@@ -46,7 +46,11 @@ func (p *Peer) Handshake(network uint64, head common.Hash, genesis common.Hash, 
 		if p.Inbound() {
 			// If the is an inbound connection, we want to read the status message from the
 			// client first to avoid it copying our own status message.
-			errc <- p.readStatus(network, &status, genesis, forkFilter)
+			err := p.readStatus(network, &status, genesis, forkFilter)
+			errc <- err
+			if err != nil {
+				return
+			}
 		}
 		errc <- p2p.Send(p.rw, StatusMsg, &StatusPacket{
 			ProtocolVersion: uint32(p.version),
