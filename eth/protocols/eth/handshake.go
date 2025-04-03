@@ -43,6 +43,11 @@ func (p *Peer) Handshake(network uint64, head common.Hash, genesis common.Hash, 
 	var status StatusPacket // safe to read after two values have been received from errc
 
 	go func() {
+		if p.Inbound() {
+			// If the is an inbound connection, we want to read the status message from the
+			// client first to avoid it copying our own status message.
+			errc <- p.readStatus(network, &status, genesis, forkFilter)
+		}
 		errc <- p2p.Send(p.rw, StatusMsg, &StatusPacket{
 			ProtocolVersion: uint32(p.version),
 			NetworkID:       network,
@@ -52,9 +57,12 @@ func (p *Peer) Handshake(network uint64, head common.Hash, genesis common.Hash, 
 			ForkID:          forkID,
 		})
 	}()
-	go func() {
-		errc <- p.readStatus(network, &status, genesis, forkFilter)
-	}()
+	if !p.Inbound() {
+		// If we dialed, we don't care about the order in which status messages are sent.
+		go func() {
+			errc <- p.readStatus(network, &status, genesis, forkFilter)
+		}()
+	}
 	timeout := time.NewTimer(handshakeTimeout)
 	defer timeout.Stop()
 	for i := 0; i < 2; i++ {
