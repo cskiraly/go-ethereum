@@ -479,7 +479,6 @@ func (srv *Server) setupDiscovery() error {
 			return err
 		}
 		srv.discv4 = ntab
-		srv.discmix.AddSource(ntab.RandomNodes(), "DiscoveryV4")
 	}
 	if srv.Config.DiscoveryV5 {
 		cfg := discover.Config{
