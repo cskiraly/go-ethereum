@@ -24,6 +24,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/forkid"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/p2p"
 )
@@ -52,6 +53,7 @@ func (p *Peer) Handshake(network uint64, head common.Hash, genesis common.Hash, 
 				return
 			}
 		}
+		log.Trace("HANDSHAKE: Sending status", "to", p.ID(), "inbound", p.Inbound(), "head", head, "genesis", genesis, "forkid", forkID)
 		errc <- p2p.Send(p.rw, StatusMsg, &StatusPacket{
 			ProtocolVersion: uint32(p.version),
 			NetworkID:       network,
@@ -93,6 +95,7 @@ func (p *Peer) readStatus(network uint64, status *StatusPacket, genesis common.H
 	if msg.Code != StatusMsg {
 		return fmt.Errorf("%w: first msg has code %x (!= %x)", errNoStatusMsg, msg.Code, StatusMsg)
 	}
+	log.Trace("HANDSHAKE: Status received", "inbound", p.Inbound(), "peer", p.ID(), "network", status.NetworkID, "head", status.Head, "genesis", status.Genesis, "forkid", status.ForkID)
 	if msg.Size > maxMessageSize {
 		return fmt.Errorf("%w: %v > %v", errMsgTooLarge, msg.Size, maxMessageSize)
 	}
@@ -111,6 +114,9 @@ func (p *Peer) readStatus(network uint64, status *StatusPacket, genesis common.H
 	}
 	if err := forkFilter(status.ForkID); err != nil {
 		return fmt.Errorf("%w: %v", errForkIDRejected, err)
+	}
+	if err == nil {
+		log.Trace("HANDSHAKE: Handshake complete", "inbound", p.Inbound(), "peer", p.ID(), "network", status.NetworkID, "head", status.Head, "genesis", status.Genesis, "forkid", status.ForkID)
 	}
 	return nil
 }
