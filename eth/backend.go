@@ -502,18 +502,26 @@ func (s *Ethereum) setupDiscovery() error {
 
 	// Add DHT nodes from discv4.
 	if s.p2pServer.DiscoveryV4() != nil {
-		asyncFilter := s.p2pServer.DiscoveryV4().RequestENR
-		filter := eth.NewNodeFilter(s.blockchain)
-		iter := enode.AsyncFilter(s.p2pServer.DiscoveryV4().RandomNodes(), asyncFilter, 16)
-		iter = enode.Filter(iter, filter)
-		s.discmix.AddSource(iter, "DiscoveryV4")
+		for i := 0; i < 1; i++ {
+			asyncFilter := s.p2pServer.DiscoveryV4().RequestENR
+			filter := eth.NewNodeFilter(s.blockchain)
+			iter := enode.AsyncFilter(
+				enode.NewBufferIter(
+					s.p2pServer.DiscoveryV4().RandomNodes(), 0),
+				asyncFilter, 128)
+			iter = enode.Filter(iter, filter)
+			s.discmix.AddSource(iter, fmt.Sprintf("DiscoveryV4-%d", i))
+		}
 	}
 
 	// Add DHT nodes from discv5.
 	if s.p2pServer.DiscoveryV5() != nil {
-		filter := eth.NewNodeFilter(s.blockchain)
-		iter := enode.Filter(s.p2pServer.DiscoveryV5().RandomNodes(), filter)
-		s.discmix.AddSource(iter, "DiscoveryV5")
+		for i := 0; i < 1; i++ {
+			iter := enode.NewBufferIter(s.p2pServer.DiscoveryV5().RandomNodes(), 0)
+			filter := eth.NewNodeFilter(s.blockchain)
+			filterIter := enode.Filter(iter, filter)
+			s.discmix.AddSource(filterIter, fmt.Sprintf("DiscoveryV5-%d", i))
+		}
 	}
 
 	return nil
