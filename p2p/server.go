@@ -29,6 +29,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -523,7 +524,25 @@ func (srv *Server) setupDialScheduler() {
 		config.resolver = srv.discv4
 	}
 	if config.dialer == nil {
-		config.dialer = tcpDialer{&net.Dialer{Timeout: defaultDialTimeout}}
+		config.dialer = tcpDialer{&net.Dialer{
+			Timeout: defaultDialTimeout,
+			Control: func(network, address string, c syscall.RawConn) error {
+				c.Control(func(fd uintptr) {
+					if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+						log.Error("SO_REUSEADDR", "err", err)
+						return
+					}
+					SO_REUSEPORT := 0xf
+					if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, SO_REUSEPORT, 1); err != nil {
+						log.Error("SO_REUSEPORT", "err", err)
+						return
+					}
+				},
+				)
+				return nil
+			},
+			LocalAddr: &net.TCPAddr{IP: nil, Port: srv.listener.Addr().(*net.TCPAddr).Port + 1},
+		}}
 	}
 	srv.dialsched = newDialScheduler(config, srv.discmix, srv.SetupConn)
 	for _, n := range srv.StaticNodes {
