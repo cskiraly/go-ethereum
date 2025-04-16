@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net"
 
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 )
 
@@ -87,6 +88,8 @@ func markDialError(err error) {
 	if !metrics.Enabled() {
 		return
 	}
+
+	log.Info("markDialError", "err", err)
 
 	var reason DiscReason
 	var handshakeErr *protoHandshakeError

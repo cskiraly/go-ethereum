@@ -612,7 +612,7 @@ func (t *dialTask) dial(d *dialScheduler, dest *enode.Node) error {
 	fd, err := d.dialer.Dial(d.ctx, dest)
 	if err != nil {
 		addr, _ := dest.TCPEndpoint()
-		d.log.Trace("Dial error", "id", dest.ID(), "addr", addr, "conn", t.flags, "err", cleanupDialErr(err))
+		d.log.Info("Dial connection error", "id", dest.ID(), "addr", addr, "conn", t.flags, "err", cleanupDialErr(err))
 		dialConnectionError.Mark(1)
 		return &dialError{err}
 	}
