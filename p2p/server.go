@@ -47,8 +47,9 @@ const (
 
 	// This is the fairness knob for the discovery mixer. When looking for peers, we'll
 	// wait this long for a single source of candidates before moving on and trying other
-	// sources.
-	discmixTimeout = 5 * time.Second
+	// sources. Currently there is only one source at the Server level, so this has no effect.
+	// Check the fairMox tineout in the Backend for the actual timeout.
+	discmixTimeout = 100 * time.Millisecond
 
 	// Connectivity defaults.
 	defaultMaxPendingPeers = 50
@@ -483,7 +484,6 @@ func (srv *Server) setupDiscovery() error {
 			return err
 		}
 		srv.discv4 = ntab
-		srv.discmix.AddSource(ntab.RandomNodes())
 	}
 	if srv.Config.DiscoveryV5 {
 		cfg := discover.Config{
@@ -502,7 +502,7 @@ func (srv *Server) setupDiscovery() error {
 	added := make(map[string]bool)
 	for _, proto := range srv.Protocols {
 		if proto.DialCandidates != nil && !added[proto.Name] {
-			srv.discmix.AddSource(proto.DialCandidates)
+			srv.discmix.AddSource(proto.DialCandidates, "DialCandidates-"+proto.Name)
 			added[proto.Name] = true
 		}
 	}
@@ -523,7 +523,26 @@ func (srv *Server) setupDialScheduler() {
 		config.resolver = srv.discv4
 	}
 	if config.dialer == nil {
-		config.dialer = tcpDialer{&net.Dialer{Timeout: defaultDialTimeout}}
+		config.dialer = tcpDialer{&net.Dialer{
+			Timeout: defaultDialTimeout,
+			Control: func(network, address string, c syscall.RawConn) error {
+				log.Info("Control", "network", network, "address", address, "localaddr", srv.listener.Addr())
+				c.Control(func(fd uintptr) {
+					if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+						log.Error("SO_REUSEADDR", "err", err)
+						return
+					}
+					SO_REUSEPORT := 0xf
+					if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, SO_REUSEPORT, 1); err != nil {
+						log.Error("SO_REUSEPORT", "err", err)
+						return
+					}
+				},
+				)
+				return nil
+			},
+			LocalAddr: &net.TCPAddr{IP: nil, Port: srv.listener.Addr().(*net.TCPAddr).Port + 1},
+		}}
 	}
 	srv.dialsched = newDialScheduler(config, srv.discmix, srv.SetupConn)
 	for _, n := range srv.StaticNodes {
@@ -864,6 +883,8 @@ func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *enode.Node) 
 	if err != nil {
 		if !c.is(inboundConn) {
 			markDialError(err)
+		} else {
+			markServeError(err)
 		}
 		c.close(err)
 	}
