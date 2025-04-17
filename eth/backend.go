@@ -422,13 +422,13 @@ func (s *Ethereum) newChainView(head *types.Header) *filtermaps.ChainView {
 
 func (s *Ethereum) checkBlockTxsAtNeighbors() {
 	log.Info("Checking block transactions at neighbors")
-	blockProcCh := make(chan bool)
-	sub := s.blockchain.SubscribeBlockProcessingEvent(blockProcCh)
+	chainHeadEventCh := make(chan core.ChainHeadEvent)
+	sub := s.blockchain.SubscribeChainHeadEvent(chainHeadEventCh)
 	defer func() {
 		sub.Unsubscribe()
 		for {
 			select {
-			case <-blockProcCh:
+			case <-chainHeadEventCh:
 			default:
 				return
 			}
@@ -437,19 +437,17 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 
 	for {
 		select {
-		case blockProc := <-blockProcCh:
-			if !blockProc {
-				// Block processing finished
-				current := s.blockchain.GetBlockByHash(s.blockchain.CurrentBlock().Hash())
-				for _, tx := range current.Transactions() {
-					//					if tx.Type() == types.BlobTxType {
-					// Check if the transaction is known by the peers
-					p := s.handler.peers.len()
-					miss := len(s.handler.peers.peersWithoutTransaction(tx.Hash()))
-					known := s.txPool.Has(tx.Hash())
-					log.Info("Transaction known by", "type", tx.Type(), "tx", tx.Hash(), "us", known, "peers", p, "knows", p-miss)
-					//					}
-				}
+		case chainHeadEvent := <-chainHeadEventCh:
+			// Block processing finished
+			current := s.blockchain.GetBlockByHash(chainHeadEvent.Header.Hash())
+			for _, tx := range current.Transactions() {
+				//if tx.Type() == types.BlobTxType {
+				// Check if the transaction is known by the peers
+				p := s.handler.peers.len()
+				miss := len(s.handler.peers.peersWithoutTransaction(tx.Hash()))
+				known := s.txPool.Has(tx.Hash())
+				log.Info("Transaction known by", "type", tx.Type(), "tx", tx.Hash(), "us", known, "peers", p, "knows", p-miss)
+				//					}
 			}
 		}
 	}
