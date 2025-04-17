@@ -117,6 +117,9 @@ var (
 	slotsGauge   = metrics.NewRegisteredGauge("txpool/slots", nil)
 
 	reheapTimer = metrics.NewRegisteredTimer("txpool/reheap", nil)
+
+	// extra statistics
+	durationMsHist = metrics.NewRegisteredHistogram("txpool/duration", nil, metrics.NewExpDecaySample(1028, 0.015))
 )
 
 // BlockChain defines the minimal set of methods needed to back a tx pool with
@@ -1817,6 +1820,7 @@ func (t *lookup) Add(tx *types.Transaction) {
 
 // Remove removes a transaction from the lookup.
 func (t *lookup) Remove(hash common.Hash) {
+	durationMsHist.Update(time.Since(t.txs[hash].arrival).Milliseconds())
 	t.lock.Lock()
 	defer t.lock.Unlock()
 
