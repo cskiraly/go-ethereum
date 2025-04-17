@@ -465,12 +465,10 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 			current := s.blockchain.GetBlockByHash(chainHeadEvent.Header.Hash())
 			var publicTxCount, haveTxCount int
 			for _, tx := range current.Transactions() {
-				//if tx.Type() == types.BlobTxType {
-				// Check if the transaction is known by the peers
 				p := s.handler.peers.len()
 				miss := len(s.handler.peers.peersWithoutTransaction(tx.Hash()))
 				have := s.txPool.Has(tx.Hash())
-				log.Info("Transaction known by", "type", tx.Type(), "tx", tx.Hash(), "us", have, "peers", p, "knows", p-miss)
+				log.Debug("Transaction known by", "type", tx.Type(), "tx", tx.Hash(), "us", have, "peers", p, "knows", p-miss)
 				if p-miss > 0 {
 					publicTxCount++
 					blockTxPublicPeerRatioHist.Update(int64(p-miss) * 100000 / int64(p))
@@ -479,11 +477,12 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 					}
 				}
 			}
-			txCount := current.Transactions().Len()
-			blockTxMetric.Mark(int64(txCount))
-			blockTxPublicMetric.Mark(int64(publicTxCount))
-			blockTxPublicHaveMetric.Mark(int64(haveTxCount))
-			blockTxPublicRatioHist.Update(int64(publicTxCount) * 100000 / int64(txCount))
+			if txCount := current.Transactions().Len(); txCount != 0 {
+				blockTxMetric.Mark(int64(txCount))
+				blockTxPublicMetric.Mark(int64(publicTxCount))
+				blockTxPublicHaveMetric.Mark(int64(haveTxCount))
+				blockTxPublicRatioHist.Update(int64(publicTxCount) * 100000 / int64(txCount))
+			}
 		}
 	}
 }
