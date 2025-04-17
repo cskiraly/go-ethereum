@@ -51,6 +51,7 @@ import (
 	"github.com/ethereum/go-ethereum/internal/shutdowncheck"
 	"github.com/ethereum/go-ethereum/internal/version"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
@@ -112,6 +113,18 @@ type Ethereum struct {
 
 	shutdownTracker *shutdowncheck.ShutdownTracker // Tracks if and when the node has shutdown ungracefully
 }
+
+var (
+	blockTxMetric = metrics.NewRegisteredMeter("block/txs/total", nil) // total txs in blocks
+	// note: we consider public txs those that are reported by at least one of our peers
+	// those that are not reported by any of our peers are considered private txs, but maybe they are just not that public
+	blockTxPublicMetric     = metrics.NewRegisteredMeter("block/txs/public", nil)      // (seemingly) public txs in blocks
+	blockTxPublicHaveMetric = metrics.NewRegisteredMeter("block/txs/public/have", nil) // public txs we have received before block arrival
+
+	// we use scaling factor of 100000 to avoid float64
+	blockTxPublicRatioHist     = metrics.NewRegisteredHistogram("block/txs/public/ratio/histogram", nil, metrics.NewUniformSample(1024))
+	blockTxPublicPeerRatioHist = metrics.NewRegisteredHistogram("block/txs/public/peerhas/histogram", nil, metrics.NewUniformSample(1024))
+)
 
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
 // whose lifecycle will be managed by the provided node.
@@ -450,15 +463,27 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 		case chainHeadEvent := <-chainHeadEventCh:
 			// Block processing finished
 			current := s.blockchain.GetBlockByHash(chainHeadEvent.Header.Hash())
+			var publicTxCount, haveTxCount int
 			for _, tx := range current.Transactions() {
 				//if tx.Type() == types.BlobTxType {
 				// Check if the transaction is known by the peers
 				p := s.handler.peers.len()
 				miss := len(s.handler.peers.peersWithoutTransaction(tx.Hash()))
-				known := s.txPool.Has(tx.Hash())
-				log.Info("Transaction known by", "type", tx.Type(), "tx", tx.Hash(), "us", known, "peers", p, "knows", p-miss)
-				//					}
+				have := s.txPool.Has(tx.Hash())
+				log.Info("Transaction known by", "type", tx.Type(), "tx", tx.Hash(), "us", have, "peers", p, "knows", p-miss)
+				if p-miss > 0 {
+					publicTxCount++
+					blockTxPublicPeerRatioHist.Update(int64(p-miss) * 100000 / int64(p))
+					if have {
+						haveTxCount++
+					}
+				}
 			}
+			txCount := current.Transactions().Len()
+			blockTxMetric.Mark(int64(txCount))
+			blockTxPublicMetric.Mark(int64(publicTxCount))
+			blockTxPublicHaveMetric.Mark(int64(haveTxCount))
+			blockTxPublicRatioHist.Update(int64(publicTxCount) * 100000 / int64(txCount))
 		}
 	}
 }
