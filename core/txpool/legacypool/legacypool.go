@@ -1735,6 +1735,11 @@ func (as *accountSet) merge(other *accountSet) {
 	as.cache = nil
 }
 
+type txWithArrival struct {
+	*types.Transaction
+	arrival time.Time
+}
+
 // lookup is used internally by LegacyPool to track transactions while allowing
 // lookup without mutex contention.
 //
@@ -1747,7 +1752,7 @@ func (as *accountSet) merge(other *accountSet) {
 type lookup struct {
 	slots int
 	lock  sync.RWMutex
-	txs   map[common.Hash]*types.Transaction
+	txs   map[common.Hash]txWithArrival
 
 	auths map[common.Address][]common.Hash // All accounts with a pooled authorization
 }
@@ -1755,7 +1760,7 @@ type lookup struct {
 // newLookup returns a new lookup structure.
 func newLookup() *lookup {
 	return &lookup{
-		txs:   make(map[common.Hash]*types.Transaction),
+		txs:   make(map[common.Hash]txWithArrival),
 		auths: make(map[common.Address][]common.Hash),
 	}
 }
@@ -1768,7 +1773,7 @@ func (t *lookup) Range(f func(hash common.Hash, tx *types.Transaction) bool) {
 	defer t.lock.RUnlock()
 
 	for key, value := range t.txs {
-		if !f(key, value) {
+		if !f(key, value.Transaction) {
 			return
 		}
 	}
@@ -1779,7 +1784,7 @@ func (t *lookup) Get(hash common.Hash) *types.Transaction {
 	t.lock.RLock()
 	defer t.lock.RUnlock()
 
-	return t.txs[hash]
+	return t.txs[hash].Transaction
 }
 
 // Count returns the current number of transactions in the lookup.
@@ -1806,7 +1811,7 @@ func (t *lookup) Add(tx *types.Transaction) {
 	t.slots += numSlots(tx)
 	slotsGauge.Update(int64(t.slots))
 
-	t.txs[tx.Hash()] = tx
+	t.txs[tx.Hash()] = txWithArrival{Transaction: tx, arrival: time.Now()}
 	t.addAuthorities(tx)
 }
 
@@ -1820,8 +1825,8 @@ func (t *lookup) Remove(hash common.Hash) {
 		log.Error("No transaction found to be deleted", "hash", hash)
 		return
 	}
-	t.removeAuthorities(tx)
-	t.slots -= numSlots(tx)
+	t.removeAuthorities(tx.Transaction)
+	t.slots -= numSlots(tx.Transaction)
 	slotsGauge.Update(int64(t.slots))
 
 	delete(t.txs, hash)
