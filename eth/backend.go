@@ -407,6 +407,9 @@ func (s *Ethereum) Start() error {
 	// start log indexer
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
+
+	// TX peer stats
+	go s.checkBlockTxsAtNeighbors()
 	return nil
 }
 
@@ -415,6 +418,41 @@ func (s *Ethereum) newChainView(head *types.Header) *filtermaps.ChainView {
 		return nil
 	}
 	return filtermaps.NewChainView(s.blockchain, head.Number.Uint64(), head.Hash())
+}
+
+func (s *Ethereum) checkBlockTxsAtNeighbors() {
+	log.Info("Checking block transactions at neighbors")
+	blockProcCh := make(chan bool)
+	sub := s.blockchain.SubscribeBlockProcessingEvent(blockProcCh)
+	defer func() {
+		sub.Unsubscribe()
+		for {
+			select {
+			case <-blockProcCh:
+			default:
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case blockProc := <-blockProcCh:
+			if !blockProc {
+				// Block processing finished
+				current := s.blockchain.GetBlockByHash(s.blockchain.CurrentBlock().Hash())
+				for _, tx := range current.Transactions() {
+					//					if tx.Type() == types.BlobTxType {
+					// Check if the transaction is known by the peers
+					p := s.handler.peers.len()
+					miss := len(s.handler.peers.peersWithoutTransaction(tx.Hash()))
+					known := s.txPool.Has(tx.Hash())
+					log.Info("Transaction known by", "type", tx.Type(), "tx", tx.Hash(), "us", known, "peers", p, "knows", p-miss)
+					//					}
+				}
+			}
+		}
+	}
 }
 
 func (s *Ethereum) updateFilterMapsHeads() {
