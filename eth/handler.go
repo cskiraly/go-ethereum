@@ -505,7 +505,9 @@ func (h *handler) BroadcastTransactions(txs types.Transactions) {
 		// To do this, we hash the local enode IW with together with a peer's
 		// enode ID together with the transaction sender and broadcast if
 		// `sha(self, peer, sender) mod peers < sqrt(peers)`.
-		for _, peer := range h.peers.peersWithoutTransaction(tx.Hash()) {
+		peersWithoutTransaction := h.peers.peersWithoutTransaction(tx.Hash())
+		var bcastcount, anncount int
+		for _, peer := range peersWithoutTransaction {
 			var broadcast bool
 			if maybeDirect {
 				hasher.Reset()
@@ -521,11 +523,15 @@ func (h *handler) BroadcastTransactions(txs types.Transactions) {
 				}
 			}
 			if broadcast {
+				bcastcount++
 				txset[peer] = append(txset[peer], tx.Hash())
 			} else {
+				anncount++
 				annos[peer] = append(annos[peer], tx.Hash())
 			}
 		}
+		log.Info("Bcast tx", "hash", tx.Hash(), "type", tx.Type(), "size", tx.Size(),
+			"peersWithout", len(peersWithoutTransaction), "bcast", bcastcount, "ann", anncount)
 	}
 	for peer, hashes := range txset {
 		directCount += len(hashes)
@@ -535,7 +541,7 @@ func (h *handler) BroadcastTransactions(txs types.Transactions) {
 		annCount += len(hashes)
 		peer.AsyncSendPooledTransactionHashes(hashes)
 	}
-	log.Debug("Distributed transactions", "plaintxs", len(txs)-blobTxs-largeTxs, "blobtxs", blobTxs, "largetxs", largeTxs,
+	log.Info("Distributed transactions", "plaintxs", len(txs)-blobTxs-largeTxs, "blobtxs", blobTxs, "largetxs", largeTxs,
 		"bcastpeers", len(txset), "bcastcount", directCount, "annpeers", len(annos), "anncount", annCount)
 }
 

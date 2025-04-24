@@ -105,7 +105,8 @@ def plot_dataframe(df):
     fig, ax = plt.subplots(figsize=(6, 6))
     # plot da over time with dots
     
-    df['da'].plot(ax=ax, label='DA', color='red', line)
+    df['da'].resample('12min').mean().plot(ax=ax, label='DA', color='red')
+    #df['da'].plot(ax=ax, label='DA', color='red')
     ax.set_title('Average ratio of peers knowing a block transaction')
     ax.set_xlabel('Time')
     ax.set_ylabel('Ratio')
@@ -114,7 +115,6 @@ def plot_dataframe(df):
     print("Plot saved as geth_log_plot.png")
 
 
-    #df['da'].resample('12min').mean().plot(ax=ax, label='DA', color='red')
 
     # show the plot
     # plt.tight_layout()
