@@ -209,7 +209,6 @@ type BufferIter struct {
 	it        Iterator
 	buffer    chan *Node
 	head      *Node
-	closed    chan struct{}
 	closeOnce sync.Once
 }
 
@@ -218,8 +217,6 @@ func NewBufferIter(it Iterator, size int) Iterator {
 	b := BufferIter{
 		it:     it,
 		buffer: make(chan *Node, size),
-		head:   nil,
-		closed: make(chan struct{}),
 	}
 
 	go func() {
@@ -227,22 +224,14 @@ func NewBufferIter(it Iterator, size int) Iterator {
 		defer close(b.buffer)
 		// If instead the bufferIterator is closed, we bail out of the loop.
 		for b.it.Next() {
-			select {
-			case b.buffer <- b.it.Node():
-			case <-b.closed:
-				return
-			}
+			b.buffer <- b.it.Node()
 		}
 	}()
 	return &b
 }
 
 func (b *BufferIter) Next() bool {
-	select {
-	case b.head = <-b.buffer:
-	case <-b.closed:
-		b.head = nil
-	}
+	b.head = <-b.buffer
 	return b.head != nil
 }
 
@@ -253,7 +242,6 @@ func (b *BufferIter) Node() *Node {
 func (b *BufferIter) Close() {
 	b.closeOnce.Do(func() {
 		b.it.Close()
-		close(b.closed)
 		// Wait for Next to terminate.
 		for range b.buffer {
 		}
