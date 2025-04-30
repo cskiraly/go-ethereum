@@ -28,6 +28,8 @@ type peerMeters struct {
 	pooledTxReceived *metrics.Meter
 	annReceived      *metrics.Meter
 	annSent          *metrics.Meter
+
+	blockTxSourceMeter *metrics.Meter
 }
 
 // newPeerMeters registers and returns peer-level meters.
@@ -45,6 +47,8 @@ func newPeerMeters(base string, r metrics.Registry) *peerMeters {
 		pooledTxReceived: metrics.NewRegisteredMeter(base+"/pooledTxReceived", r),
 		annReceived:      metrics.NewRegisteredMeter(base+"/annReceived", r),
 		annSent:          metrics.NewRegisteredMeter(base+"/annSent", r),
+
+		blockTxSourceMeter: metrics.NewRegisteredMeter(base+"/blockTxSource", nil),
 	}
 }
 
@@ -55,4 +59,10 @@ func (m *peerMeters) Close() {
 	m.reg.Unregister(m.base + "/pooledTxReceived")
 	m.reg.Unregister(m.base + "/annReceived")
 	m.reg.Unregister(m.base + "/annSent")
+
+	m.reg.Unregister(m.base + "/blockTxSource")
+}
+
+func (p *Peer) MarkBlockTxSource(i int64) {
+	p.meters.blockTxSourceMeter.Mark(i)
 }
