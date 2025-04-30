@@ -57,6 +57,8 @@ type Peer struct {
 	reqCancel   chan *cancel   // Dispatch channel to cancel pending requests and untrack them
 	resDispatch chan *response // Dispatch channel to fulfil pending requests and untrack them
 
+	meters *peerMeters // Peer-specific metrics for diagnositics and to use in decision logic
+
 	term chan struct{} // Termination channel to stop the broadcasters
 }
 
@@ -75,6 +77,7 @@ func NewPeer(version uint, p *p2p.Peer, rw p2p.MsgReadWriter, txpool TxPool) *Pe
 		reqCancel:   make(chan *cancel),
 		resDispatch: make(chan *response),
 		txpool:      txpool,
+		meters:      newPeerMeters("peers/"+p.ID().String(), nil),
 		term:        make(chan struct{}),
 	}
 	// Start up all the broadcasters
@@ -90,6 +93,7 @@ func NewPeer(version uint, p *p2p.Peer, rw p2p.MsgReadWriter, txpool TxPool) *Pe
 // clean it up!
 func (p *Peer) Close() {
 	close(p.term)
+	p.meters.Close()
 }
 
 // ID retrieves the peer's unique identifier.
@@ -128,6 +132,7 @@ func (p *Peer) SendTransactions(txs types.Transactions) error {
 	for _, tx := range txs {
 		p.knownTxs.Add(tx.Hash())
 	}
+	p.meters.txSent.Mark(int64(len(txs)))
 	return p2p.Send(p.rw, TransactionsMsg, txs)
 }
 
@@ -154,6 +159,7 @@ func (p *Peer) AsyncSendTransactions(hashes []common.Hash) {
 func (p *Peer) sendPooledTransactionHashes(hashes []common.Hash, types []byte, sizes []uint32) error {
 	// Mark all the transactions as known, but ensure we don't overflow our limits
 	p.knownTxs.Add(hashes...)
+	p.meters.annSent.Mark(int64(len(hashes)))
 	return p2p.Send(p.rw, NewPooledTransactionHashesMsg, NewPooledTransactionHashesPacket{Types: types, Sizes: sizes, Hashes: hashes})
 }
 
@@ -176,6 +182,7 @@ func (p *Peer) ReplyPooledTransactionsRLP(id uint64, hashes []common.Hash, txs [
 	p.knownTxs.Add(hashes...)
 
 	// Not packed into PooledTransactionsResponse to avoid RLP decoding
+	p.meters.pooledTxSent.Mark(int64(len(txs)))
 	return p2p.Send(p.rw, PooledTransactionsMsg, &PooledTransactionsRLPPacket{
 		RequestId:                     id,
 		PooledTransactionsRLPResponse: txs,
