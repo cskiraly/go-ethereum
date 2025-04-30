@@ -1842,7 +1842,7 @@ func (t *lookup) Clear() {
 	defer t.lock.Unlock()
 
 	t.slots = 0
-	t.txs = make(map[common.Hash]*types.Transaction)
+	t.txs = make(map[common.Hash]txWithArrival)
 	t.auths = make(map[common.Address][]common.Hash)
 }
 
