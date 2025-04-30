@@ -368,6 +368,8 @@ func (f *TxFetcher) Enqueue(peer string, txs []*types.Transaction, direct bool) 
 
 			case errors.Is(err, txpool.ErrAlreadyKnown):
 				duplicate++
+				log.Trace("RX Duplicate transaction", "from", peer, "tx", batch[j].Hash().Hex())
+				// why is this going to added?
 
 			case errors.Is(err, txpool.ErrUnderpriced) || errors.Is(err, txpool.ErrReplaceUnderpriced) || errors.Is(err, txpool.ErrTxGasPriceTooLow):
 				underpriced++
@@ -375,7 +377,7 @@ func (f *TxFetcher) Enqueue(peer string, txs []*types.Transaction, direct bool) 
 			default:
 				otherreject++
 			}
-			added = append(added, batch[j].Hash())
+			added = append(added, batch[j].Hash()) // also for duplicates?
 			metas = append(metas, txMetadata{
 				kind: batch[j].Type(),
 				size: uint32(batch[j].Size()),
@@ -753,6 +755,12 @@ func (f *TxFetcher) loop() {
 						cutoff = i
 					}
 				}
+				if cutoff != len(req.hashes) {
+					log.Trace("Peer delivered partial response", "peer", delivery.origin, "cutoff", cutoff, "total", len(req.hashes), "delivered", len(delivery.hashes))
+				} else {
+					log.Trace("Peer delivered full response", "peer", delivery.origin, "cutoff", cutoff, "total", len(req.hashes), "delivered", len(delivery.hashes))
+				}
+
 				// Reschedule missing hashes from alternates, not-fulfilled from alt+self
 				for i, hash := range req.hashes {
 					// Skip rescheduling hashes already delivered by someone else

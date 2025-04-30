@@ -455,10 +455,11 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 			current := s.blockchain.GetBlockByHash(chainHeadEvent.Header.Hash())
 			var publicTxCount, haveTxCount int
 			for _, tx := range current.Transactions() {
+				// checking neighors
 				p := s.handler.peers.len()
 				miss := len(s.handler.peers.peersWithoutTransaction(tx.Hash()))
 				have := s.txPool.Has(tx.Hash())
-				log.Debug("Transaction known by", "type", tx.Type(), "tx", tx.Hash(), "us", have, "peers", p, "knows", p-miss)
+				log.Info("Transaction known by", "type", tx.Type(), "tx", tx.Hash(), "us", have, "peers", p, "knows", p-miss)
 				if p-miss > 0 {
 					publicTxCount++
 					blockTxPublicPeerRatioHist.Update(int64(p-miss) * 100000 / int64(p))
