@@ -77,7 +77,7 @@ func NewPeer(version uint, p *p2p.Peer, rw p2p.MsgReadWriter, txpool TxPool) *Pe
 		reqCancel:   make(chan *cancel),
 		resDispatch: make(chan *response),
 		txpool:      txpool,
-		meters:      newPeerMeters("peers/"+p.ID().String(), nil),
+		meters:      newPeerMeters("peers/"+p.ID().String(), PeerMetricsRegistry),
 		term:        make(chan struct{}),
 	}
 	// Start up all the broadcasters

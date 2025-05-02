@@ -36,6 +36,10 @@ type peerMeters struct {
 	blockBlobSourceMeter *metrics.Meter
 }
 
+var (
+	PeerMetricsRegistry = metrics.NewRegistry()
+)
+
 // newPeerMeters registers and returns peer-level meters.
 func newPeerMeters(base string, r metrics.Registry) *peerMeters {
 	if r == nil {
