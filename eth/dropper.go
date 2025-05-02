@@ -104,7 +104,7 @@ func (cm *dropper) Stop() {
 }
 
 // dropRandomPeer selects one of the peers randomly and drops it from the peer pool.
-func (cm *dropper) dropRandomPeer() bool {
+func (cm *dropper) DropRandomPeer() bool {
 	peers := cm.peersFunc()
 	var numInbound int
 	for _, p := range peers {
@@ -157,7 +157,7 @@ func (cm *dropper) loop() {
 		case <-cm.peerDropTimer.C:
 			// Drop a random peer if we are not syncing and the peer count is close to the limit.
 			if !cm.syncingFunc() {
-				cm.dropRandomPeer()
+				cm.DropRandomPeer()
 			}
 			cm.peerDropTimer.Reset(randomDuration(peerDropIntervalMin, peerDropIntervalMax))
 		case <-cm.shutdownCh:
