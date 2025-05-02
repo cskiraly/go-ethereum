@@ -34,6 +34,7 @@ import sys
 import os
 import argparse
 import numpy as np
+import seaborn as sns
 
 def parse_log_file(log_file):
     # regex to match the log lines
@@ -63,8 +64,6 @@ def create_dataframe(log_lines):
     # convert the timestamp to datetime
     df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-    print(df['timestamp'])
-
     # extract the transaction hash from the message
     df['tx'] = df['message'].str.extract(r'tx=([0-9a-f]{64})')
 
@@ -76,10 +75,10 @@ def create_dataframe(log_lines):
  
     # extract value from type=2 tx=22272e..e3d631 us=true  peers=36 knows=36
     df['type'] = df['message'].str.extract(r'type=(\d+)')
-    df['us'] = df['message'].str.extract(r'us=(\w+)')
-    df['peers'] = df['message'].str.extract(r'peers=(\d+)')
-    df['knows'] = df['message'].str.extract(r'knows=(\d+)')
-    df['da'] = df['knows'].astype(int) / df['peers'].astype(int)
+    df['us'] = df['message'].str.extract(r'us=(\w+)').isin(['true', 'True'])
+    df['peers'] = df['message'].str.extract(r'peers=(\d+)').astype(int)
+    df['knows'] = df['message'].str.extract(r'knows=(\d+)').astype(int)
+    df['da'] = df['knows'] / df['peers']
 
     return df
 def plot_dataframe(df):
@@ -102,17 +101,66 @@ def plot_dataframe(df):
     # plt.xticks(rotation=45)
 
 
-    fig, ax = plt.subplots(figsize=(6, 6))
-    # plot da over time with dots
-    
-    df['da'].resample('12min').mean().plot(ax=ax, label='DA', color='red')
-    #df['da'].plot(ax=ax, label='DA', color='red')
-    ax.set_title('Average ratio of peers knowing a block transaction')
+    # plot da over time
+    fig, ax = plt.subplots(figsize=(12, 6))
+    df1 = df[['da','type']].groupby('type').resample('6.4min', include_groups=False).mean()
+    sns.lineplot(data=df1, x='timestamp', y='da', hue='type',
+                  ax=ax)
+    ax.set_title('Average ratio of peers knowing transactions of a given type, over time (epochs)')
     ax.set_xlabel('Time')
-    ax.set_ylabel('Ratio')
+    ax.set_ylabel('Ratio of peers knowing a "block transaction"')
     ax.legend()
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
+    plt.xticks(rotation=45)
     plt.savefig('geth_da_over_time.png')
-    print("Plot saved as geth_log_plot.png")
+
+    # plot public txs over time
+    fig, ax = plt.subplots(figsize=(12, 6))
+    df1 = df[['public','type']].groupby('type').resample('6.4min', include_groups=False).apply(lambda x: np.sum(x)/len(x))
+    sns.lineplot(data=df1, x='timestamp', y='public', hue='type',
+                  ax=ax)
+    ax.set_title('Average ratio of public block transactions of a given type, over time (epochs)')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Ratio of public "block transaction"')
+    ax.legend()
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
+    plt.xticks(rotation=45)
+    plt.savefig('geth_public_over_time.png')
+
+    # plot public txs ratio with columns
+    fig, ax = plt.subplots(figsize=(12, 6))
+    df1 = df[['public','type']].groupby('type').apply(lambda x: np.sum(x)/len(x))
+    sns.barplot(data=df1, x='type', y='public', hue='type',
+                  ax=ax)
+    ax.set_title('Average ratio of public block transactions of a given type')
+    ax.set_xlabel('"Block transaction" type')
+    ax.set_ylabel('Ratio of public "block transaction"')
+    ax.legend()
+    plt.savefig('geth_public.png')
+
+    # plot received txs over time
+    fig, ax = plt.subplots(figsize=(12, 6))
+    df1 = df[['us','type']].groupby('type').resample('6.4min', include_groups=False).apply(lambda x: np.sum(x)/len(x))
+    sns.lineplot(data=df1, x='timestamp', y='us', hue='type',
+                  ax=ax)
+    ax.set_title('Average ratio of received block transactions of a given type, over time (epochs)')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Ratio of received "block transaction"')
+    ax.legend()
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
+    plt.xticks(rotation=45)
+    plt.savefig('geth_received_over_time.png')
+
+    # plot received block txs ratio with columns
+    fig, ax = plt.subplots(figsize=(12, 6))
+    df1 = df[['us','type']].groupby('type').apply(lambda x: np.sum(x)/len(x))
+    sns.barplot(data=df1, x='type', y='us', hue='type',
+                  ax=ax)
+    ax.set_title('Average ratio of received transactions of a given type')
+    ax.set_xlabel('"Block transaction" type')
+    ax.set_ylabel('Ratio of received "block transaction"')
+    ax.legend()
+    plt.savefig('geth_received.png')
 
 
 
@@ -135,6 +183,24 @@ def plot_dataframe(df):
     plt.tight_layout()
     plt.savefig('geth_da_hist.png')
 
+    # replot the same using Seaborn
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.ecdfplot(data=df[df['da']!=0.0], x='da', hue='type',
+                 #stat="density", common_norm=False, # independent density normalization
+                 #bins=100, multiple="dodge",
+                 #kde=True,
+                 ax=ax)
+    # ax.set_title('Histogram of DA values')
+    # ax.set_xlabel('EL DA')
+    # ax.set_ylabel('Probability')
+    # # add a legend
+    # ax.legend()
+    # # save the histogram to a file
+    # plt.tight_layout()
+    plt.savefig('geth_da_ecdf_seaborn.png')
+    print("Histogram saved as geth_da_hist_seaborn.png")
+
+
 def main():
     # create the argument parser
     parser = argparse.ArgumentParser(description='Parse and plot Geth log file.')
@@ -151,6 +217,16 @@ def main():
 
     # create a dataframe from the log lines
     df = create_dataframe(log_lines)
+
+    # mark public transactions: those that we have or that are known by at least one peer
+    df['public'] = df['us'] | (df['da'] > 0.0)
+    df['onlyPeers'] = (~ df['us']) & (df['da'] > 0.0)
+    df['onlyUs'] = df['us'] & (df['da'] == 0.0)
+
+    print(df)
+    print(df[['public','us','onlyPeers','onlyUs','type']].groupby('type').sum())
+    print(df[['public','us','onlyPeers','onlyUs','type','peers']].groupby(['type','peers']).sum())
+    
 
     # plot the dataframe
     plot_dataframe(df)
