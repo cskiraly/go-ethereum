@@ -472,7 +472,7 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 					log.Warn("Transaction provenance", "tx", tx.Hash(), "provenance", prov)
 					// get peer by its ID
 					if p := s.handler.peers.peer(prov); p != nil {
-						p.MarkBlockTxSource(1)
+						p.MarkBlockTxSource(tx)
 					}
 				}
 			}

@@ -16,7 +16,10 @@
 
 package eth
 
-import "github.com/ethereum/go-ethereum/metrics"
+import (
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/metrics"
+)
 
 type peerMeters struct {
 	base string
@@ -29,7 +32,8 @@ type peerMeters struct {
 	annReceived      *metrics.Meter
 	annSent          *metrics.Meter
 
-	blockTxSourceMeter *metrics.Meter
+	blockTxSourceMeter   *metrics.Meter
+	blockBlobSourceMeter *metrics.Meter
 }
 
 // newPeerMeters registers and returns peer-level meters.
@@ -48,7 +52,8 @@ func newPeerMeters(base string, r metrics.Registry) *peerMeters {
 		annReceived:      metrics.NewRegisteredMeter(base+"/annReceived", r),
 		annSent:          metrics.NewRegisteredMeter(base+"/annSent", r),
 
-		blockTxSourceMeter: metrics.NewRegisteredMeter(base+"/blockTxSource", nil),
+		blockTxSourceMeter:   metrics.NewRegisteredMeter(base+"/blockTxSource", nil),
+		blockBlobSourceMeter: metrics.NewRegisteredMeter(base+"/blockBlobSource", nil),
 	}
 }
 
@@ -61,8 +66,13 @@ func (m *peerMeters) Close() {
 	m.reg.Unregister(m.base + "/annSent")
 
 	m.reg.Unregister(m.base + "/blockTxSource")
+	m.reg.Unregister(m.base + "/blockBlobSource")
 }
 
-func (p *Peer) MarkBlockTxSource(i int64) {
-	p.meters.blockTxSourceMeter.Mark(i)
+func (p *Peer) MarkBlockTxSource(tx *types.Transaction) {
+	if tx.Type() != types.BlobTxType {
+		p.meters.blockTxSourceMeter.Mark(1)
+	} else {
+		p.meters.blockBlobSourceMeter.Mark(1)
+	}
 }
