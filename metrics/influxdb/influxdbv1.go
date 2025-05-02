@@ -144,6 +144,9 @@ func (r *reporter) send(tstamp int64) error {
 		if fields == nil {
 			return
 		}
+		// tags := maps.Clone(r.tags)
+		// extraTags := i.(metrics.TaggedMetric).Tags()
+		// maps.Copy(tags, extraTags) // Merge extra tags, overwriting any existing ones
 		if p, err := client.NewPoint(measurement, r.tags, fields, now); err == nil {
 			bps.AddPoint(p)
 		}

@@ -35,6 +35,10 @@ func Enable() {
 
 var threadCreateProfile = pprof.Lookup("threadcreate")
 
+type TaggedMetric interface {
+	Tags() map[string]string // returns the tags for this metric
+}
+
 type runtimeStats struct {
 	GCPauses     *metrics.Float64Histogram
 	GCAllocBytes uint64
