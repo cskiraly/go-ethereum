@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math/big"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -423,6 +424,31 @@ func (s *Ethereum) Start() error {
 
 	// TX peer stats
 	go s.checkBlockTxsAtNeighbors()
+
+	// Set up maxpeers schedule
+	go func() {
+		var peerCountSchedule = []int{10, 20}
+		for {
+			for _, max := range peerCountSchedule {
+				s.setMaxPeers(max)
+				log.Info("Set maxPeers", "max", max, "peers", s.p2pServer.PeerCount())
+				for max < s.p2pServer.PeerCount() {
+					// wait until we reach the max
+					time.Sleep(time.Second * 10)
+				}
+				time.Sleep(time.Second * 10)
+			}
+			for max := range slices.Backward(peerCountSchedule) {
+				s.setMaxPeers(max)
+				log.Info("Set maxPeers", "max", max, "peers", s.p2pServer.PeerCount())
+				for max > s.p2pServer.PeerCount() {
+					// drop until we reach the new max
+					s.dropper.DropRandomPeer()
+				}
+				time.Sleep(time.Second * 10)
+			}
+		}
+	}()
 	return nil
 }
 
