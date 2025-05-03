@@ -455,25 +455,26 @@ func (s *Ethereum) Start() error {
 
 	// Set up maxpeers schedule
 	go func() {
-		var peerCountSchedule = []int{10, 20}
+		var peerCountSchedule = []int{3, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100}
 		for {
 			for _, max := range peerCountSchedule {
 				s.setMaxPeers(max)
 				log.Info("Set maxPeers", "max", max, "peers", s.p2pServer.PeerCount())
-				for max < s.p2pServer.PeerCount() {
+				for max > s.p2pServer.PeerCount() {
 					// wait until we reach the max
-					time.Sleep(time.Second * 10)
+					time.Sleep(time.Second * 1)
 				}
-				time.Sleep(time.Second * 10)
+				time.Sleep(time.Minute * 3)
 			}
-			for max := range slices.Backward(peerCountSchedule) {
+			for _, max := range slices.Backward(peerCountSchedule) {
 				s.setMaxPeers(max)
 				log.Info("Set maxPeers", "max", max, "peers", s.p2pServer.PeerCount())
-				for max > s.p2pServer.PeerCount() {
+				for max < s.p2pServer.PeerCount() {
 					// drop until we reach the new max
 					s.dropper.DropRandomPeer()
+					time.Sleep(time.Second * 1)
 				}
-				time.Sleep(time.Second * 10)
+				time.Sleep(time.Minute * 3)
 			}
 		}
 	}()
