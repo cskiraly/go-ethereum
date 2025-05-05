@@ -56,8 +56,8 @@ func newPeerMeters(base string, r metrics.Registry) *peerMeters {
 		annReceived:      metrics.NewRegisteredMeter(base+"/annReceived", r),
 		annSent:          metrics.NewRegisteredMeter(base+"/annSent", r),
 
-		blockTxSourceMeter:   metrics.NewRegisteredMeter(base+"/blockTxSource", nil),
-		blockBlobSourceMeter: metrics.NewRegisteredMeter(base+"/blockBlobSource", nil),
+		blockTxSourceMeter:   metrics.NewRegisteredMeter(base+"/blockTxSource", r),
+		blockBlobSourceMeter: metrics.NewRegisteredMeter(base+"/blockBlobSource", r),
 	}
 }
 
