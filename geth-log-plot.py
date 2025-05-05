@@ -118,7 +118,7 @@ def plot_dataframe(df):
     # plot da over peercount
     fig, ax = plt.subplots(figsize=(12, 6))
     df1 = df[df['public']]
-    #df1 = df1[df1['peers'].isin([2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200])]
+    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200])]
     df1 = df1[['da','peers','type']].groupby(['type','peers']).mean()
     sns.lineplot(data=df1, x='peers', y='da', hue='type',
                   ax=ax)
@@ -144,7 +144,7 @@ def plot_dataframe(df):
     # plot public txs over peercount
     fig, ax = plt.subplots(figsize=(12, 6))
     df1 = df
-    #df1 = df1[df1['peers'].isin([2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200])]
+    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200])]
     df1 = df1[['public','peers','type']].groupby(['type','peers']).apply(lambda x: np.sum(x)/len(x))
     sns.lineplot(data=df1, x='peers', y='public', hue='type',
                   ax=ax)
