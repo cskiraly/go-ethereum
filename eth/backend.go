@@ -520,7 +520,24 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 				p := s.handler.peers.len()
 				miss := len(s.handler.peers.peersWithoutTransaction(tx.Hash()))
 				have := s.txPool.Has(tx.Hash())
-				log.Info("Transaction known by", "type", tx.Type(), "tx", tx.Hash(), "us", have, "peers", p, "knows", p-miss)
+				var haveSize int
+				var since int64
+				if have {
+					//haveSize = int(s.txPool.GetMetadata(tx.Hash()).Size)
+					// if we have the transaction, we can get the time it was added to the pool
+					pooltx := s.txPool.Get(tx.Hash())
+					if pooltx != nil { // strangely, we can have a transaction in the pool that is not in the txpool
+						haveSize = int(pooltx.Size())
+						since = time.Since(pooltx.Time()).Milliseconds()
+					} else {
+						log.Warn("Transaction not found in pool with Get", "tx", tx.Hash(), "have", s.txPool.Has(tx.Hash()), "type", tx.Type())
+					}
+				}
+				log.Info("Transaction known by",
+					"block", current.Hash(), // "blocknumber", current.NumberU64(),
+					"type", tx.Type(), "tx", tx.Hash(), "size", tx.Size(), "blobs", len(tx.BlobHashes()),
+					"have", have, "havesize", haveSize, "peers", p, "knows", p-miss,
+					"since", since)
 				if p-miss > 0 {
 					publicTxCount++
 					blockTxPublicPeerRatioHist.Update(int64(p-miss) * 100000 / int64(p))
