@@ -19,11 +19,11 @@
 # python geth-log-plot.py path/to/logfile.log
 
 # Example log format:
-# INFO [04-21|23:15:00.747] Transaction known by                     type=2 tx=22272e..e3d631 us=true  peers=36 knows=36
+# INFO [04-21|23:15:00.747] Transaction known by                     type=2 tx=22272e..e3d631 have=true  peers=36 knows=36
 # WARN [04-21|23:15:00.747] Transaction provenance                   tx=22272e..e3d631 provenance=2c8087f9eafa8314fde8d07218efff9b57ac38663c7005ce187c2140cbfed21a
-# INFO [04-21|23:15:00.747] Transaction known by                     type=2 tx=d8ed92..7a2758 us=true  peers=36 knows=36
+# INFO [04-21|23:15:00.747] Transaction known by                     type=2 tx=d8ed92..7a2758 have=true  peers=36 knows=36
 # WARN [04-21|23:15:00.747] Transaction provenance                   tx=d8ed92..7a2758 provenance=10b52ae19496fc598949ab13b97ade999586cf405005d83cf2bab68ce2c69367
-# INFO [04-21|23:15:00.747] Transaction known by                     type=2 tx=9e897a..b7ab5b us=true  peers=36 knows=36
+# INFO [04-21|23:15:00.747] Transaction known by                     type=2 tx=9e897a..b7ab5b have=true  peers=36 knows=36
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -73,9 +73,9 @@ def create_dataframe(log_lines):
     # select only lines with "Transaction known by", drop the rest
     df = df[df['message'].str.contains('Transaction known by')]
  
-    # extract value from type=2 tx=22272e..e3d631 us=true  peers=36 knows=36
+    # extract value from type=2 tx=22272e..e3d631 have=true  peers=36 knows=36
     df['type'] = df['message'].str.extract(r'type=(\d+)')
-    df['us'] = df['message'].str.extract(r'us=(\w+)').isin(['true', 'True'])
+    df['have'] = df['message'].str.extract(r'have=(\w+)').isin(['true', 'True'])
     df['peers'] = df['message'].str.extract(r'peers=(\d+)').astype(int)
     df['knows'] = df['message'].str.extract(r'knows=(\d+)').astype(int)
     df['da'] = df['knows'] / df['peers']
@@ -103,7 +103,8 @@ def plot_dataframe(df):
 
     # plot da over time
     fig, ax = plt.subplots(figsize=(12, 6))
-    df1 = df[['da','type']].groupby('type').resample('6.4min', include_groups=False).mean()
+    df1 = df[df['public']]
+    df1 = df1[['da','type']].groupby('type').resample('6.4min', include_groups=False).mean()
     sns.lineplot(data=df1, x='timestamp', y='da', hue='type',
                   ax=ax)
     ax.set_title('Average ratio of peers knowing transactions of a given type, over time (epochs)')
@@ -113,6 +114,19 @@ def plot_dataframe(df):
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
     plt.xticks(rotation=45)
     plt.savefig('geth_da_over_time.png')
+
+    # plot da over peercount
+    fig, ax = plt.subplots(figsize=(12, 6))
+    df1 = df[df['public']]
+    #df1 = df1[df1['peers'].isin([2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200])]
+    df1 = df1[['da','peers','type']].groupby(['type','peers']).mean()
+    sns.lineplot(data=df1, x='peers', y='da', hue='type',
+                  ax=ax)
+    ax.set_title('Average ratio of peers knowing transactions of a given type, as a function of peer count')
+    ax.set_xlabel('Peer count')
+    ax.set_ylabel('Ratio of peers knowing a "block transaction"')
+    ax.legend()
+    plt.savefig('geth_da_over_peercount.png')
 
     # plot public txs over time
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -127,6 +141,19 @@ def plot_dataframe(df):
     plt.xticks(rotation=45)
     plt.savefig('geth_public_over_time.png')
 
+    # plot public txs over peercount
+    fig, ax = plt.subplots(figsize=(12, 6))
+    df1 = df
+    #df1 = df1[df1['peers'].isin([2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200])]
+    df1 = df1[['public','peers','type']].groupby(['type','peers']).apply(lambda x: np.sum(x)/len(x))
+    sns.lineplot(data=df1, x='peers', y='public', hue='type',
+                  ax=ax)
+    ax.set_title('Average ratio of public block transactions of a given type, as a function of peer count')
+    ax.set_xlabel('Peer count')
+    ax.set_ylabel('Ratio of public "block transaction"')
+    ax.legend()
+    plt.savefig('geth_public_over_peercount.png')
+
     # plot public txs ratio with columns
     fig, ax = plt.subplots(figsize=(12, 6))
     df1 = df[['public','type']].groupby('type').apply(lambda x: np.sum(x)/len(x))
@@ -140,8 +167,8 @@ def plot_dataframe(df):
 
     # plot received txs over time
     fig, ax = plt.subplots(figsize=(12, 6))
-    df1 = df[['us','type']].groupby('type').resample('6.4min', include_groups=False).apply(lambda x: np.sum(x)/len(x))
-    sns.lineplot(data=df1, x='timestamp', y='us', hue='type',
+    df1 = df[['have','type']].groupby('type').resample('6.4min', include_groups=False).apply(lambda x: np.sum(x)/len(x))
+    sns.lineplot(data=df1, x='timestamp', y='have', hue='type',
                   ax=ax)
     ax.set_title('Average ratio of received block transactions of a given type, over time (epochs)')
     ax.set_xlabel('Time')
@@ -153,8 +180,8 @@ def plot_dataframe(df):
 
     # plot received block txs ratio with columns
     fig, ax = plt.subplots(figsize=(12, 6))
-    df1 = df[['us','type']].groupby('type').apply(lambda x: np.sum(x)/len(x))
-    sns.barplot(data=df1, x='type', y='us', hue='type',
+    df1 = df[['have','type']].groupby('type').apply(lambda x: np.sum(x)/len(x))
+    sns.barplot(data=df1, x='type', y='have', hue='type',
                   ax=ax)
     ax.set_title('Average ratio of received transactions of a given type')
     ax.set_xlabel('"Block transaction" type')
@@ -219,13 +246,13 @@ def main():
     df = create_dataframe(log_lines)
 
     # mark public transactions: those that we have or that are known by at least one peer
-    df['public'] = df['us'] | (df['da'] > 0.0)
-    df['onlyPeers'] = (~ df['us']) & (df['da'] > 0.0)
-    df['onlyUs'] = df['us'] & (df['da'] == 0.0)
+    df['public'] = df['have'] | (df['da'] > 0.0)
+    df['onlyPeers'] = (~ df['have']) & (df['da'] > 0.0)
+    df['onlyUs'] = df['have'] & (df['da'] == 0.0)
 
     print(df)
-    print(df[['public','us','onlyPeers','onlyUs','type']].groupby('type').sum())
-    print(df[['public','us','onlyPeers','onlyUs','type','peers']].groupby(['type','peers']).sum())
+    print(df[['public','have','onlyPeers','onlyUs','type']].groupby('type').sum())
+    print(df[['public','have','onlyPeers','onlyUs','type','peers']].groupby(['type','peers']).sum())
     
 
     # plot the dataframe
