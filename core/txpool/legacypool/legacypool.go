@@ -1821,7 +1821,7 @@ func (t *lookup) Add(tx *types.Transaction) {
 // Remove removes a transaction from the lookup.
 func (t *lookup) Remove(hash common.Hash) {
 	durationMsHist.Update(time.Since(t.txs[hash].arrival).Milliseconds())
-	log.Info("Tx removed", "hash", hash, "type", t.txs[hash].Type(), "duration", time.Since(t.txs[hash].arrival).Milliseconds())
+	log.Debug("Tx removed", "hash", hash, "type", t.txs[hash].Type(), "duration", time.Since(t.txs[hash].arrival).Milliseconds())
 	t.lock.Lock()
 	defer t.lock.Unlock()
 

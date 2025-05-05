@@ -132,7 +132,7 @@ func (cm *dropper) DropRandomPeer() bool {
 	droppable := slices.DeleteFunc(peers, selectDoNotDrop)
 	if len(droppable) > 0 {
 		p := droppable[mrand.Intn(len(droppable))]
-		log.Debug("Dropping random peer", "inbound", p.Inbound(),
+		log.Info("Dropping random peer", "inbound", p.Inbound(),
 			"id", p.ID(), "duration", common.PrettyDuration(p.Lifetime()), "peercountbefore", len(peers))
 		p.Disconnect(p2p.DiscUselessPeer)
 		if p.Inbound() {
@@ -141,6 +141,8 @@ func (cm *dropper) DropRandomPeer() bool {
 			droppedOutbound.Mark(1)
 		}
 		return true
+	} else {
+		log.Info("No peers to drop", "maxDialPeers", cm.maxDialPeers)
 	}
 	return false
 }

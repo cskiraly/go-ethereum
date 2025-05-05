@@ -534,7 +534,7 @@ func (h *handler) BroadcastTransactions(txs types.Transactions) {
 				annos[peer] = append(annos[peer], tx.Hash())
 			}
 		}
-		log.Info("Bcast tx", "hash", tx.Hash(), "type", tx.Type(), "size", tx.Size(),
+		log.Debug("Bcast tx", "hash", tx.Hash(), "type", tx.Type(), "size", tx.Size(),
 			"peersWithout", len(peersWithoutTransaction), "bcast", bcastcount, "ann", anncount)
 	}
 	for peer, hashes := range txset {
@@ -545,7 +545,7 @@ func (h *handler) BroadcastTransactions(txs types.Transactions) {
 		annCount += len(hashes)
 		peer.AsyncSendPooledTransactionHashes(hashes)
 	}
-	log.Info("Distributed transactions", "plaintxs", len(txs)-blobTxs-largeTxs, "blobtxs", blobTxs, "largetxs", largeTxs,
+	log.Debug("Distributed transactions", "plaintxs", len(txs)-blobTxs-largeTxs, "blobtxs", blobTxs, "largetxs", largeTxs,
 		"bcastpeers", len(txset), "bcastcount", directCount, "annpeers", len(annos), "anncount", annCount)
 }
 
