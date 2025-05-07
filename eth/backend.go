@@ -455,7 +455,10 @@ func (s *Ethereum) Start() error {
 
 	// Set up maxpeers schedule
 	go func() {
-		var peerCountSchedule = []int{1, 2, 3, 5, 7, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200}
+		//var peerCountSchedule = []int{1, 2, 3, 5, 7, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200}
+		var peerCountSchedule = []int{50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000}
+		//var peerCountSchedule = []int{50, 100, 200, 300, 400, 500}
+		//var peerCountSchedule = []int{50}
 		for {
 			for _, max := range peerCountSchedule {
 				s.setMaxPeers(max)
@@ -464,7 +467,7 @@ func (s *Ethereum) Start() error {
 					// wait until we reach the max
 					time.Sleep(time.Second * 1)
 				}
-				time.Sleep(time.Second * 12 * 32)
+				time.Sleep(time.Second * 12 * 32 * 2)
 			}
 			for _, max := range slices.Backward(peerCountSchedule) {
 				s.setMaxPeers(max)
