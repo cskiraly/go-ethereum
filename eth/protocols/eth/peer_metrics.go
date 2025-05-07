@@ -27,10 +27,12 @@ type peerMeters struct {
 
 	txReceived       *metrics.Meter
 	txSent           *metrics.Meter
+	txDropped        *metrics.Meter
 	pooledTxSent     *metrics.Meter
 	pooledTxReceived *metrics.Meter
 	annReceived      *metrics.Meter
 	annSent          *metrics.Meter
+	annDropped       *metrics.Meter
 
 	blockTxSourceMeter   *metrics.Meter
 	blockBlobSourceMeter *metrics.Meter
@@ -51,10 +53,12 @@ func newPeerMeters(base string, r metrics.Registry) *peerMeters {
 
 		txReceived:       metrics.NewRegisteredMeter(base+"/txReceived", r),
 		txSent:           metrics.NewRegisteredMeter(base+"/txSent", r),
+		txDropped:        metrics.NewRegisteredMeter(base+"/txDropped", r),
 		pooledTxSent:     metrics.NewRegisteredMeter(base+"/pooledTxSent", r),
 		pooledTxReceived: metrics.NewRegisteredMeter(base+"/pooledTxReceived", r),
 		annReceived:      metrics.NewRegisteredMeter(base+"/annReceived", r),
 		annSent:          metrics.NewRegisteredMeter(base+"/annSent", r),
+		annDropped:       metrics.NewRegisteredMeter(base+"/annDropped", r),
 
 		blockTxSourceMeter:   metrics.NewRegisteredMeter(base+"/blockTxSource", r),
 		blockBlobSourceMeter: metrics.NewRegisteredMeter(base+"/blockBlobSource", r),
@@ -65,9 +69,11 @@ func (m *peerMeters) Close() {
 	m.reg.Unregister(m.base + "/txReceived")
 	m.reg.Unregister(m.base + "/txSent")
 	m.reg.Unregister(m.base + "/pooledTxSent")
+	m.reg.Unregister(m.base + "/txDropped")
 	m.reg.Unregister(m.base + "/pooledTxReceived")
 	m.reg.Unregister(m.base + "/annReceived")
 	m.reg.Unregister(m.base + "/annSent")
+	m.reg.Unregister(m.base + "/annDropped")
 
 	m.reg.Unregister(m.base + "/blockTxSource")
 	m.reg.Unregister(m.base + "/blockBlobSource")

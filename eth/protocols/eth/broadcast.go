@@ -79,6 +79,9 @@ func (p *Peer) broadcastTransactions() {
 			queue = append(queue, hashes...)
 			if len(queue) > maxQueuedTxs {
 				// Fancy copy and resize to ensure buffer doesn't grow indefinitely
+				if len(queue) > maxQueuedTxs {
+					p.meters.txDropped.Mark(int64(len(queue) - maxQueuedTxs))
+				}
 				queue = queue[:copy(queue, queue[len(queue)-maxQueuedTxs:])]
 			}
 
@@ -150,6 +153,9 @@ func (p *Peer) announceTransactions() {
 			queue = append(queue, hashes...)
 			if len(queue) > maxQueuedTxAnns {
 				// Fancy copy and resize to ensure buffer doesn't grow indefinitely
+				if len(queue) > maxQueuedTxAnns {
+					p.meters.annDropped.Mark(int64(len(queue) - maxQueuedTxAnns))
+				}
 				queue = queue[:copy(queue, queue[len(queue)-maxQueuedTxAnns:])]
 			}
 
