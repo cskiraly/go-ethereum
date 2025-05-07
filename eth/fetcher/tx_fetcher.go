@@ -1060,3 +1060,19 @@ func (f *TxFetcher) TxFromPeer(hash common.Hash) (string, bool) {
 	provenance, ok := f.txFromPeer[hash]
 	return provenance, ok
 }
+
+func (f *TxFetcher) PopTxPeerSource(hash common.Hash) (string, bool) {
+	f.txFromPeerMutex.Lock()
+	defer f.txFromPeerMutex.Unlock()
+	provenance, ok := f.txFromPeer[hash]
+	if ok {
+		delete(f.txFromPeer, hash)
+	}
+	return provenance, ok
+}
+
+func (f *TxFetcher) TxPeerSourceLen() int {
+	f.txFromPeerMutex.RLock()
+	defer f.txFromPeerMutex.RUnlock()
+	return len(f.txFromPeer)
+}

@@ -537,7 +537,9 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 					"block", current.Hash(), // "blocknumber", current.NumberU64(),
 					"type", tx.Type(), "tx", tx.Hash(), "size", tx.Size(), "blobs", len(tx.BlobHashes()),
 					"have", have, "havesize", haveSize, "peers", p, "knows", p-miss,
-					"since", since)
+					"since", since,
+					"txpoolsize", s.handler.txFetcher.TxPeerSourceLen(),
+				)
 				if p-miss > 0 {
 					publicTxCount++
 					blockTxPublicPeerRatioHist.Update(int64(p-miss) * 100000 / int64(p))
@@ -546,7 +548,7 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 					}
 				}
 				// checking provenance
-				if prov, ok := s.handler.txFetcher.TxFromPeer(tx.Hash()); ok {
+				if prov, ok := s.handler.txFetcher.PopTxPeerSource(tx.Hash()); ok {
 					log.Debug("Transaction provenance", "tx", tx.Hash(), "provenance", prov)
 					// get peer by its ID
 					if p := s.handler.peers.peer(prov); p != nil {
