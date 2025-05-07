@@ -1268,6 +1268,13 @@ func (p *BlobPool) Get(hash common.Hash) *types.Transaction {
 			"hash", hash, "id", id, "err", err)
 		return nil
 	}
+	// we only have time information in the lookup
+	time, ok := p.lookup.timeOfTx(hash)
+	if ok {
+		item.SetTime(time)
+	} else {
+		log.Error("Failed to get time for blob transaction", "hash", hash)
+	}
 	return item
 }
 

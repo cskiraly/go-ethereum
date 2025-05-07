@@ -17,12 +17,15 @@
 package blobpool
 
 import (
+	"time"
+
 	"github.com/ethereum/go-ethereum/common"
 )
 
 type txMetadata struct {
-	id   uint64 // the billy id of transction
-	size uint64 // the RLP encoded size of transaction (blobs are included)
+	id   uint64    // the billy id of transction
+	size uint64    // the RLP encoded size of transaction (blobs are included)
+	time time.Time // time first seen locally (not persisted to disk)
 }
 
 // lookup maps blob versioned hashes to transaction hashes that include them,
@@ -79,6 +82,15 @@ func (l *lookup) sizeOfTx(txhash common.Hash) (uint64, bool) {
 	return meta.size, true
 }
 
+// timeOfTx returns the reception time of transaction (not persisted to disk)
+func (l *lookup) timeOfTx(txhash common.Hash) (time.Time, bool) {
+	meta, ok := l.txIndex[txhash]
+	if !ok {
+		return time.Time{}, false
+	}
+	return meta.time, true
+}
+
 // track inserts a new set of mappings from blob versioned hashes to transaction
 // hashes; and from transaction hashes to datastore storage item ids.
 func (l *lookup) track(tx *blobTxMeta) {
@@ -93,6 +105,7 @@ func (l *lookup) track(tx *blobTxMeta) {
 	l.txIndex[tx.hash] = &txMetadata{
 		id:   tx.id,
 		size: tx.size,
+		time: time.Now(),
 	}
 }
 
