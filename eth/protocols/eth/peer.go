@@ -18,6 +18,8 @@ package eth
 
 import (
 	"math/rand"
+	"sync"
+	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/ethereum/go-ethereum/common"
@@ -39,6 +41,41 @@ const (
 	// before dropping older announcements.
 	maxQueuedTxAnns = 4096
 )
+
+var (
+	AnnSend   = make(map[common.Hash][]time.Time) // Set of hashes that have been received
+	AnnSendMu = sync.RWMutex{}
+	TxSend    = make(map[common.Hash][]time.Time) // Set of hashes that have been received
+	TxSendMu  = sync.RWMutex{}
+)
+
+// markAnnSend marks a transaction as having been sent to a peer.
+func markAnnSend(hashes []common.Hash) {
+	t := time.Now()
+	AnnSendMu.Lock()
+	defer AnnSendMu.Unlock()
+	for _, hash := range hashes {
+		AnnSend[hash] = append(AnnSend[hash], t)
+	}
+}
+
+// markTxSend marks a transaction as having been sent to a peer.
+func markTxSend(hashes []common.Hash) {
+	t := time.Now()
+	TxSendMu.Lock()
+	defer TxSendMu.Unlock()
+	for _, hash := range hashes {
+		TxSend[hash] = append(TxSend[hash], t)
+	}
+}
+func markTxSend2(txs []*types.Transaction) {
+	t := time.Now()
+	TxSendMu.Lock()
+	defer TxSendMu.Unlock()
+	for _, tx := range txs {
+		TxSend[tx.Hash()] = append(TxSend[tx.Hash()], t)
+	}
+}
 
 // Peer is a collection of relevant information we have about a `eth` peer.
 type Peer struct {
@@ -133,6 +170,7 @@ func (p *Peer) SendTransactions(txs types.Transactions) error {
 		p.knownTxs.Add(tx.Hash())
 	}
 	p.meters.txSent.Mark(int64(len(txs)))
+	markTxSend2(txs)
 	return p2p.Send(p.rw, TransactionsMsg, txs)
 }
 
@@ -160,6 +198,7 @@ func (p *Peer) sendPooledTransactionHashes(hashes []common.Hash, types []byte, s
 	// Mark all the transactions as known, but ensure we don't overflow our limits
 	p.knownTxs.Add(hashes...)
 	p.meters.annSent.Mark(int64(len(hashes)))
+	markAnnSend(hashes)
 	return p2p.Send(p.rw, NewPooledTransactionHashesMsg, NewPooledTransactionHashesPacket{Types: types, Sizes: sizes, Hashes: hashes})
 }
 
@@ -183,6 +222,7 @@ func (p *Peer) ReplyPooledTransactionsRLP(id uint64, hashes []common.Hash, txs [
 
 	// Not packed into PooledTransactionsResponse to avoid RLP decoding
 	p.meters.pooledTxSent.Mark(int64(len(txs)))
+	markTxSend(hashes)
 	return p2p.Send(p.rw, PooledTransactionsMsg, &PooledTransactionsRLPPacket{
 		RequestId:                     id,
 		PooledTransactionsRLPResponse: txs,

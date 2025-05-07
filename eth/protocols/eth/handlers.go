@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -28,6 +30,30 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 )
+
+var (
+	AnnRecv   = make(map[common.Hash][]time.Time) // Set of hashes that have been received
+	AnnRecvMu = sync.RWMutex{}
+	TxRecv    = make(map[common.Hash][]time.Time) // Set of hashes that have been received
+	TxRecvMu  = sync.RWMutex{}
+)
+
+// markAnnRecv marks the transaction as received, saving the time of reception
+func markAnnRecv(hash common.Hash) {
+	// Mark the hash as received
+	AnnRecvMu.Lock()
+	defer AnnRecvMu.Unlock()
+	AnnRecv[hash] = append(AnnRecv[hash], time.Now())
+}
+
+// markTxRecv marks the transaction as received, saving the time of reception
+// Clearly, second and later receptions are duplicates
+func markTxRecv(hash common.Hash) {
+	// Mark the hash as received
+	TxRecvMu.Lock()
+	defer TxRecvMu.Unlock()
+	TxRecv[hash] = append(TxRecv[hash], time.Now())
+}
 
 func handleGetBlockHeaders(backend Backend, msg Decoder, peer *Peer) error {
 	// Decode the complex header query
@@ -378,6 +404,7 @@ func handleNewPooledTransactionHashes(backend Backend, msg Decoder, peer *Peer) 
 	// Schedule all the unknown hashes for retrieval
 	for _, hash := range ann.Hashes {
 		peer.markTransaction(hash)
+		markAnnRecv(hash)
 	}
 	peer.meters.annReceived.Mark(int64(len(ann.Hashes)))
 	return backend.Handle(peer, ann)
@@ -432,6 +459,7 @@ func handleTransactions(backend Backend, msg Decoder, peer *Peer) error {
 			return fmt.Errorf("%w: transaction %d is nil", errDecode, i)
 		}
 		peer.markTransaction(tx.Hash())
+		markTxRecv(tx.Hash())
 	}
 	peer.meters.txReceived.Mark(int64(len(txs)))
 	return backend.Handle(peer, &txs)
@@ -453,6 +481,7 @@ func handlePooledTransactions(backend Backend, msg Decoder, peer *Peer) error {
 			return fmt.Errorf("%w: transaction %d is nil", errDecode, i)
 		}
 		peer.markTransaction(tx.Hash())
+		markTxRecv(tx.Hash())
 	}
 	requestTracker.Fulfil(peer.id, peer.version, PooledTransactionsMsg, txs.RequestId)
 

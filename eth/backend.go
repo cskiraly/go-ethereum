@@ -543,6 +543,26 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 					"since", since,
 					"txpoolsize", s.handler.txFetcher.TxPeerSourceLen(),
 				)
+				eth.TxSendMu.RLock()
+				eth.AnnSendMu.RLock()
+				eth.TxRecvMu.RLock()
+				eth.AnnRecvMu.RLock()
+				sinceFn := func(tt []time.Time) []int64 {
+					ret := make([]int64, len(tt))
+					for i, t := range tt {
+						ret[i] = time.Since(t).Milliseconds()
+					}
+					return ret
+				}
+
+				log.Info("Tx timing", "tx", tx.Hash(), "type", tx.Type(),
+					"TxSend", sinceFn(eth.TxSend[tx.Hash()]), "AnnSend", sinceFn(eth.AnnSend[tx.Hash()]),
+					"TxRecv", sinceFn(eth.TxRecv[tx.Hash()]), "AnnRecv", sinceFn(eth.AnnRecv[tx.Hash()]),
+				)
+				eth.TxSendMu.RUnlock()
+				eth.AnnSendMu.RUnlock()
+				eth.TxRecvMu.RUnlock()
+				eth.AnnRecvMu.RUnlock()
 				if p-miss > 0 {
 					publicTxCount++
 					blockTxPublicPeerRatioHist.Update(int64(p-miss) * 100000 / int64(p))
