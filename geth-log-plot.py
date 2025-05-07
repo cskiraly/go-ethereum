@@ -19,11 +19,9 @@
 # python geth-log-plot.py path/to/logfile.log
 
 # Example log format:
-# INFO [04-21|23:15:00.747] Transaction known by                     type=2 tx=22272e..e3d631 have=true  peers=36 knows=36
-# WARN [04-21|23:15:00.747] Transaction provenance                   tx=22272e..e3d631 provenance=2c8087f9eafa8314fde8d07218efff9b57ac38663c7005ce187c2140cbfed21a
-# INFO [04-21|23:15:00.747] Transaction known by                     type=2 tx=d8ed92..7a2758 have=true  peers=36 knows=36
-# WARN [04-21|23:15:00.747] Transaction provenance                   tx=d8ed92..7a2758 provenance=10b52ae19496fc598949ab13b97ade999586cf405005d83cf2bab68ce2c69367
-# INFO [04-21|23:15:00.747] Transaction known by                     type=2 tx=9e897a..b7ab5b have=true  peers=36 knows=36
+# INFO [05-05|01:02:24.528] Imported new potential chain segment     number=22,413,537 hash=f30523..3aa189 blocks=1  txs=202  mgas=13.965  elapsed=71.839ms   mgasps=194.390 blobs=0 agems=1528    snapdiffs=8.98MiB triediffs=218.11MiB triedirty=240.97MiB
+# INFO [05-05|01:02:24.640] Transaction known by                     block=f30523..3aa189 type=0 tx=eac45c..d08a6f size=343   blobs=0 have=false havesize=0       peers=2 knows=0 since=0
+# INFO [05-05|01:02:24.640] Transaction known by                     block=f30523..3aa189 type=2 tx=315a0c..464f34 size=5928  blobs=0 have=false havesize=0       peers=2 knows=0 since=0
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -57,6 +55,7 @@ def parse_log_file(log_file):
                 log_lines.append((timestamp, level, message))
 
     return log_lines
+
 def create_dataframe(log_lines):
     # create a pandas dataframe from the log lines
     df = pd.DataFrame(log_lines, columns=['timestamp', 'level', 'message'])
@@ -64,23 +63,50 @@ def create_dataframe(log_lines):
     # convert the timestamp to datetime
     df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-    # extract the transaction hash from the message
-    df['tx'] = df['message'].str.extract(r'tx=([0-9a-f]{64})')
-
-    # extract the provenance from the message
-    df['provenance'] = df['message'].str.extract(r'provenance=([0-9a-f]{64})')
+    # select lines for blocks
+    blocks = df[df['message'].str.contains('Imported new')].copy()
+    # extract the block short hash from the message
+    blocks['block'] = blocks['message'].str.extract(r'hash=([0-9a-f.]{14})')
+    # extract the block number from the message
+    blocks['number'] = blocks['message'].str.extract(r'number=(\d+)').astype(int)
+    # extract the block size from the message
+    blocks['size'] = blocks['message'].str.extract(r'txs=(\d+)').astype(int)
+    # extract the block gas from the message
+    blocks['mgas'] = blocks['message'].str.extract(r'mgas=(\d+\.\d+)').astype(float)
+    # extract the block elapsed time from the message
+    blocks['elapsed'] = blocks['message'].str.extract(r'elapsed=(\d+\.\d+)ms').astype(float)
+    # extract the block mgasps from the message
+    blocks['mgasps'] = blocks['message'].str.extract(r'mgasps=(\d+\.\d+)').astype(float)
+    # extract the block blobs from the message
+    blocks['blobs'] = blocks['message'].str.extract(r'blobs=(\d+)').astype(int)
+    # extract the block agems from the message
+    blocks['agems'] = blocks['message'].str.extract(r'agems=(\d+)').astype(int)
 
     # select only lines with "Transaction known by", drop the rest
-    df = df[df['message'].str.contains('Transaction known by')]
- 
-    # extract value from type=2 tx=22272e..e3d631 have=true  peers=36 knows=36
-    df['type'] = df['message'].str.extract(r'type=(\d+)')
-    df['have'] = df['message'].str.extract(r'have=(\w+)').isin(['true', 'True'])
-    df['peers'] = df['message'].str.extract(r'peers=(\d+)').astype(int)
-    df['knows'] = df['message'].str.extract(r'knows=(\d+)').astype(int)
-    df['da'] = df['knows'] / df['peers']
+    btxs = df[df['message'].str.contains('Transaction known by')].copy()
 
-    return df
+    # extract the transaction short hash from the message
+    btxs['tx'] = btxs['message'].str.extract(r'tx=([0-9a-f.]{14})')
+
+    # extract the block short hash from the message
+    btxs['block'] = btxs['message'].str.extract(r'block=([0-9a-f.]{14})')
+
+    # # extract the provenance from the message
+    # df['provenance'] = df['message'].str.extract(r'provenance=([0-9a-f]{64})')
+ 
+    # extract value from type=2 tx=22272e..e3d631 have=true peers=36 knows=36
+    btxs['type'] = btxs['message'].str.extract(r'type=(\d+)')
+    btxs['have'] = btxs['message'].str.extract(r'have=(\w+)').isin(['true', 'True'])
+    btxs['peers'] = btxs['message'].str.extract(r'peers=(\d+)').astype(int)
+    btxs['knows'] = btxs['message'].str.extract(r'knows=(\d+)').astype(int)
+    btxs['blobs'] = btxs['message'].str.extract(r'blobs=(\d+)').astype(int)
+    btxs['havesize'] = btxs['message'].str.extract(r'havesize=(\d+)').astype(int)
+    btxs['since'] = btxs['message'].str.extract(r'since=(\d+)').astype(int) * -1
+    btxs['size'] = btxs['message'].str.extract(r'size=(\d+)').astype(int)
+
+    btxs['da'] = btxs['knows'] / btxs['peers']
+
+    return btxs
 def plot_dataframe(df):
     # set the timestamp as the index
     df.set_index('timestamp', inplace=True)
@@ -189,6 +215,46 @@ def plot_dataframe(df):
     ax.legend()
     plt.savefig('geth_received.png')
 
+    # plot seen, but not received block txs ratio with columns
+    fig, ax = plt.subplots(figsize=(12, 6))
+    df1 = df[['onlyPeers','type']].groupby('type').apply(lambda x: np.sum(x)/len(x))
+    sns.barplot(data=df1, x='type', y='onlyPeers', hue='type',
+                  ax=ax)
+    ax.set_title('Average ratio of seen but not received block transactions of a given type')
+    ax.set_xlabel('"Block transaction" type')
+    ax.set_ylabel('Ratio of seen but not received "block transaction"')
+    ax.legend()
+    plt.savefig('geth_onlyPeers.png')
+
+    # plot seen, but not received block txs over peercount
+    fig, ax = plt.subplots(figsize=(12, 6))
+    df1 = df
+    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200])]
+    df1 = df1[['onlyPeers','peers','type']].groupby(['type','peers']).apply(lambda x: np.sum(x)/len(x))
+    sns.lineplot(data=df1, x='peers', y='onlyPeers', hue='type',
+                  ax=ax)
+    ax.set_title('Average ratio of seen but not received block transactions of a given type, as a function of peer count')
+    ax.set_xlabel('Peer count')
+    ax.set_ylabel('Ratio of seen but not received "block transaction"')
+    ax.legend()
+    plt.savefig('geth_onlyPeers_over_peercount.png')
+
+    # --------------
+
+    # plot histogram of since values per type using Seaborn
+    fig, ax = plt.subplots(figsize=(12, 6))
+    # sns.histplot(data=df[df['have'] & (df['since']<=36000)],
+    #                 x='since', hue='type',
+    sns.displot(data=df[df['have'] & (df['since']<=32*12000)],
+                    kind='hist',
+#                    log_scale=(True, False),
+                    x='since', hue='type',
+                    stat="proportion", common_norm=False, # independent density normalization
+                    bins=1000,
+                    #multiple="dodge",
+                    kde=True,
+                    ax=ax)
+    plt.savefig('geth_btx_age_hist.png')
 
 
     # show the plot
@@ -212,20 +278,23 @@ def plot_dataframe(df):
 
     # replot the same using Seaborn
     fig, ax = plt.subplots(figsize=(12, 6))
+    sns.histplot(data=df[df['da']!=0.0], x='da', hue='type',
+                    stat="proportion", common_norm=False, # independent density normalization
+                    bins=100,
+                    multiple="dodge",
+                    #log_scale=(False, True)
+                    element="step", fill=True,
+                    #kde=True,
+                    ax=ax)
+    plt.savefig('geth_da_hist_seaborn.png')
+
+    fig, ax = plt.subplots(figsize=(12, 6))
     sns.ecdfplot(data=df[df['da']!=0.0], x='da', hue='type',
                  #stat="density", common_norm=False, # independent density normalization
                  #bins=100, multiple="dodge",
                  #kde=True,
                  ax=ax)
-    # ax.set_title('Histogram of DA values')
-    # ax.set_xlabel('EL DA')
-    # ax.set_ylabel('Probability')
-    # # add a legend
-    # ax.legend()
-    # # save the histogram to a file
-    # plt.tight_layout()
-    plt.savefig('geth_da_ecdf_seaborn.png')
-    print("Histogram saved as geth_da_hist_seaborn.png")
+    plt.savefig('geth_da_ecdf.png')
 
 
 def main():
