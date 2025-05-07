@@ -526,7 +526,7 @@ func (h *handler) BroadcastTransactions(txs types.Transactions) {
 					broadcast = true
 				}
 			}
-			if broadcast {
+			if broadcast && (bcastcount < 7) {
 				bcastcount++
 				txset[peer] = append(txset[peer], tx.Hash())
 			} else {
