@@ -22,6 +22,10 @@
 # INFO [05-05|01:02:24.528] Imported new potential chain segment     number=22,413,537 hash=f30523..3aa189 blocks=1  txs=202  mgas=13.965  elapsed=71.839ms   mgasps=194.390 blobs=0 agems=1528    snapdiffs=8.98MiB triediffs=218.11MiB triedirty=240.97MiB
 # INFO [05-05|01:02:24.640] Transaction known by                     block=f30523..3aa189 type=0 tx=eac45c..d08a6f size=343   blobs=0 have=false havesize=0       peers=2 knows=0 since=0
 # INFO [05-05|01:02:24.640] Transaction known by                     block=f30523..3aa189 type=2 tx=315a0c..464f34 size=5928  blobs=0 have=false havesize=0       peers=2 knows=0 since=0
+# INFO [05-08|09:28:48.958] Transaction known by                     block=f52321..836b0c type=2 tx=2e211f..b57edf size=178   blobs=0 have=true  havesize=178     peers=50 knows=50 since=5486    txpoolsize=41545
+# INFO [05-08|09:28:48.958] Tx timing                                tx=2e211f..b57edf type=2 TxSend="[5485 5485 5485 5485 5485 5485 5485]"  AnnSend=[] TxRecv="[5486 5422 5409 5379]"                  AnnRecv="[5479 5465 5465 5459 5458 5444 5440 5421 5407 5397 5386 5385 5378 5378 5371 5369 5365 5364 5358 5350 5344 5339 5324 5323 5309 5300 5266 5240 5236 5219 5213 5024 4687 3959]"
+# INFO [05-08|09:28:48.958] Transaction known by                     block=f52321..836b0c type=2 tx=20707b..ea64fc size=177   blobs=0 have=true  havesize=177     peers=50 knows=44 since=212,409 txpoolsize=41544
+# INFO [05-08|09:28:48.958] Tx timing                                tx=20707b..ea64fc type=2 TxSend="[212408 212408]"                       AnnSend=[] TxRecv="[212409 212373 212360 212341 212340 212323 212321 212286 211537]" AnnRecv="[212420 212416 212416 212415 212411 212403 212401 212386 212379 212376 212335 212318 212298 212287 212283 212266 212259 212193 212163 211722 211586 210335 207682 197985 22795 11870 11757 11706 11683 11656 11550]"
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -56,7 +60,7 @@ def parse_log_file(log_file):
 
     return log_lines
 
-def create_dataframe(log_lines):
+def create_dataframes(log_lines):
     # create a pandas dataframe from the log lines
     df = pd.DataFrame(log_lines, columns=['timestamp', 'level', 'message'])
 
@@ -84,7 +88,6 @@ def create_dataframe(log_lines):
 
     # select only lines with "Transaction known by", drop the rest
     btxs = df[df['message'].str.contains('Transaction known by')].copy()
-
     # extract the transaction short hash from the message
     btxs['tx'] = btxs['message'].str.extract(r'tx=([0-9a-f.]{14})')
 
@@ -106,7 +109,30 @@ def create_dataframe(log_lines):
 
     btxs['da'] = btxs['knows'] / btxs['peers']
 
-    return btxs
+    # extract transaction timing from the message
+
+    # select only lines with "Transaction known by", drop the rest
+    btxtime = df[df['message'].str.contains('Tx timing')].copy()
+    btxtime['tx'] = btxtime['message'].str.extract(r'tx=([0-9a-f.]{14})')
+    btxtime['type'] = btxtime['message'].str.extract(r'type=(\d+)').astype(int)
+    btxtime['TxSend'] = btxtime['message'].str.extract(r'TxSend="?\[(.*?)\]"?')
+    btxtime['TxSend'] = btxtime['TxSend'].str.split().apply(lambda x: [int(i) for i in x])
+    btxtime['TxRecv'] = btxtime['message'].str.extract(r'TxRecv="?\[(.*?)\]"?')
+    btxtime['TxRecv'] = btxtime['TxRecv'].str.split().apply(lambda x: [int(i) for i in x])
+    btxtime['AnnSend'] = btxtime['message'].str.extract(r'AnnSend="?\[(.*?)\]"?')
+    btxtime['AnnSend'] = btxtime['AnnSend'].str.split().apply(lambda x: [int(i) for i in x])
+    btxtime['AnnRecv'] = btxtime['message'].str.extract(r'AnnRecv="?\[(.*?)\]"?')
+    btxtime['AnnRecv'] = btxtime['AnnRecv'].str.split().apply(lambda x: [int(i) for i in x])
+
+    btxtime['peers'] = btxtime['message'].str.extract(r'peers=(\d+)').astype(int)
+    btxtime['knows'] = btxtime['message'].str.extract(r'knows=(\d+)').astype(int)
+    btxtime['blobs'] = btxtime['message'].str.extract(r'blobs=(\d+)').astype(int)
+    btxtime['havesize'] = btxtime['message'].str.extract(r'havesize=(\d+)').astype(int)
+    btxtime['since'] = btxtime['message'].str.extract(r'since=(\d+)').astype(int) * -1
+    btxtime['size'] = btxtime['message'].str.extract(r'size=(\d+)').astype(int)
+
+    return btxs, blocks, btxtime
+
 def plot_dataframe(df):
     # set the timestamp as the index
     df.set_index('timestamp', inplace=True)
@@ -296,6 +322,93 @@ def plot_dataframe(df):
                  ax=ax)
     plt.savefig('geth_da_ecdf.png')
 
+def plot_transaction_timing(btxtime):
+    # plot the transaction timing
+    color_by_type = { 0: 'blue', 1: 'orange', 2: 'green', 3: 'red', 4: 'purple' }
+
+    fig1, ax1 = plt.subplots(figsize=(12, 6)) # block rx timing based
+    fig2, ax2 = plt.subplots(figsize=(12, 6)) # firstrx timing based
+    # plot the AnnRecv times
+    plottedtype = {}
+    plotted = 0
+    allpoints = []
+
+    print(btxtime)
+    for i, row in btxtime.iterrows():
+        annrecv = np.array(row['AnnRecv'])
+        txrecv = np.array(row['TxRecv'])
+        recv = np.concatenate((txrecv, annrecv)) /1000
+        type = row['type']
+        txid = row['tx']
+        label = f'{txid}, type={type}'
+        if len(recv) > 1: # and type != 0:
+            recv *= -1
+            recv = np.sort(recv)
+            recv_firstrx = recv - recv.min()
+            maxrecvfrom = row['peers'] - len(row['TxSend'])
+            #print(f'{txid} {row["knows"]}/{row["peers"]}: {len(recv)} =? {len(annrecv)}+{len(txrecv)}+{len(row["TxSend"])} ({len(row["AnnSend"])})')
+            #y = [(x) / (len(recv)-1) for x in range(len(recv))]
+            y = [x/maxrecvfrom for x in range(len(recv))]
+            points = pd.DataFrame({ 'type': type, 'delay': recv_firstrx, 'q': y})
+            quantized = points.quantile((np.arange(100)+1)/100)
+            quantized['type'] = type # reset type to integer
+            quantized['blobs'] = row['blobs']
+            #allpoints = pd.concat([allpoints, quantized], ignore_index=True, axis=0)
+            allpoints.append(quantized)
+
+            if type not in plottedtype:
+                plottedtype[type] = 0
+            if plottedtype[type] < 4:
+                ax1.plot(recv, y, label=label, color=color_by_type[type])
+                ax2.plot(recv_firstrx, y, label=label, color=color_by_type[type])
+                plottedtype[type] += 1
+            plotted += 1
+            if plotted >= 1000:
+                break
+            # # add a vertical line for the transaction time
+            # ax.axvline(x=row['timestamp'], color='red', linestyle='--')
+    # set the title and labels
+    ax1.set_title('Transaction availability in the mempool before block inclusion')
+    ax1.set_xlabel('Time before the arrival of including block (s)')
+    ax1.set_ylabel('Portion of peers announced the transaction to us')
+    ax1.legend()
+    ax1.set_ylim(0, 1)    
+    ax1.set_xlim(-20, 0)
+    fig1.savefig('geth_tx_timing.png')
+
+    ax2.set_title('Transaction availability in the mempool')
+    ax2.set_xlabel('Time after first reception or announcement (s)')
+    ax2.set_ylabel('Portion of peers announced the transaction to us')
+    ax2.legend()
+    ax2.set_ylim(0, 1)    
+    ax2.set_xlim(0, 20)
+    fig2.savefig('geth_tx_timing_firstrx.png')
+
+    allpoints = pd.concat(allpoints, axis=0)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.lineplot(allpoints, x='delay', y=allpoints.index, orient='y', hue='type',
+                #errorbar="sd",
+                palette="tab10",
+                ax=ax)
+    ax.set_title('Transaction availability in the mempool')
+    ax.set_xlabel('Time after first reception or announcement (s)')
+    ax.set_ylabel('Portion of peers announced the transaction to us')    
+    ax.set_ylim(0, 1)    
+    ax.set_xlim(0, 20)
+    plt.savefig('geth_tx_timing_2D.png')
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    type3 = allpoints[allpoints['type'] == 3]
+    print(type3)
+    sns.lineplot(type3, x='delay', y=type3.index, orient='y', hue='blobs',
+                #errorbar="sd",
+                ax=ax)
+    ax.set_title('Blob transaction spreading in the mempool')
+    ax.set_xlabel('Time after first reception or announcement (s)')
+    ax.set_ylabel('Portion of peers announced the transaction to us')
+    ax.set_ylim(0, 1)    
+    ax.set_xlim(0, 20)
+    plt.savefig('geth_blobtx_timing_2D.png')
 
 def main():
     # create the argument parser
@@ -312,7 +425,10 @@ def main():
     log_lines = parse_log_file(args.log_file)
 
     # create a dataframe from the log lines
-    df = create_dataframe(log_lines)
+    df, blocks, btxtime = create_dataframes(log_lines)
+
+    # calculate the real size of the transactions
+    df['realSize'] = df['size'] + df['blobs'] * 131175 + 9
 
     # mark public transactions: those that we have or that are known by at least one peer
     df['public'] = df['have'] | (df['da'] > 0.0)
@@ -326,5 +442,8 @@ def main():
 
     # plot the dataframe
     plot_dataframe(df)
+
+    plot_transaction_timing(btxtime)
+
 if __name__ == '__main__':
     main()
