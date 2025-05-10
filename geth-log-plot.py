@@ -152,6 +152,27 @@ def plot_dataframe(df):
     # ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
     # plt.xticks(rotation=45)
 
+    # plot overall ratio of transactions per type in a pie chart with seaborn
+    fig, ax = plt.subplots(figsize=(6, 6))
+    df1 = df[['type']].groupby('type').size()
+    ax.pie(df1, labels=df1.index, autopct='%1.1f%%', startangle=90)
+    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+    # add legend
+    labels = [f'{l}, {s:0.1f}%' for l, s in zip(df1.index, df1.values/df1.sum()*100)]
+    ax.legend(labels, title="Transaction types", loc="upper right")
+    ax.set_title('Overall ratio of transactions per type')
+    plt.savefig('geth_tx_type_ratio.png')
+
+    # plot the same, now weighted by transaction size
+    fig, ax = plt.subplots(figsize=(6, 6))
+    df1 = df[['type','realSize']].groupby('type').sum()
+    ax.pie(df1['realSize'], labels=df1.index, autopct='%1.1f%%', startangle=90)
+    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+    # add legend
+    labels = [f'{l}, {s:0.1f}%' for l, s in zip(df1.index, df1['realSize'].values/df1['realSize'].sum()*100)]
+    ax.legend(labels, title="Transaction types", loc="upper right")
+    ax.set_title('Overall ratio of transactions per type, weighted by transaction size')
+    plt.savefig('geth_tx_type_ratio_weighted.png')
 
     # plot da over time
     fig, ax = plt.subplots(figsize=(12, 6))
