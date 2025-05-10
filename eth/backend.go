@@ -555,7 +555,11 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 					return ret
 				}
 
-				log.Info("Tx timing", "tx", tx.Hash(), "type", tx.Type(),
+				log.Info("Tx timing",
+					"block", current.Hash(), // "blocknumber", current.NumberU64(),
+					"type", tx.Type(), "tx", tx.Hash(), "size", tx.Size(), "blobs", len(tx.BlobHashes()),
+					"have", have, "havesize", haveSize, "peers", p, "knows", p-miss,
+					"since", since,
 					"TxSend", sinceFn(eth.TxSend[tx.Hash()]), "AnnSend", sinceFn(eth.AnnSend[tx.Hash()]),
 					"TxRecv", sinceFn(eth.TxRecv[tx.Hash()]), "AnnRecv", sinceFn(eth.AnnRecv[tx.Hash()]),
 				)
