@@ -191,7 +191,8 @@ def plot_dataframe(df):
     # plot da over peercount
     fig, ax = plt.subplots(figsize=(12, 6))
     df1 = df[df['public']]
-    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200])]
+    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200,
+                                 300, 400, 500, 600, 700, 800, 900, 1000])]
     df1 = df1[['da','peers','type']].groupby(['type','peers']).mean()
     sns.lineplot(data=df1, x='peers', y='da', hue='type',
                   ax=ax)
@@ -217,7 +218,8 @@ def plot_dataframe(df):
     # plot public txs over peercount
     fig, ax = plt.subplots(figsize=(12, 6))
     df1 = df
-    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200])]
+    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200,
+                                 300, 400, 500, 600, 700, 800, 900, 1000])]
     df1 = df1[['public','peers','type']].groupby(['type','peers']).apply(lambda x: np.sum(x)/len(x))
     sns.lineplot(data=df1, x='peers', y='public', hue='type',
                   ax=ax)
@@ -227,7 +229,7 @@ def plot_dataframe(df):
     ax.legend()
     plt.savefig('geth_public_over_peercount.png')
 
-    # plot public txs ratio with columns
+    # plot public txs ratio with columns, showing also the values for each bar
     fig, ax = plt.subplots(figsize=(12, 6))
     df1 = df[['public','type']].groupby('type').apply(lambda x: np.sum(x)/len(x))
     sns.barplot(data=df1, x='type', y='public', hue='type',
@@ -284,7 +286,8 @@ def plot_dataframe(df):
     # plot seen, but not received block txs over peercount
     fig, ax = plt.subplots(figsize=(12, 6))
     df1 = df
-    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200])]
+    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200,
+                                 300, 400, 500, 600, 700, 800, 900, 1000])]
     df1 = df1[['onlyPeers','peers','type']].groupby(['type','peers']).apply(lambda x: np.sum(x)/len(x))
     sns.lineplot(data=df1, x='peers', y='onlyPeers', hue='type',
                   ax=ax)
@@ -305,7 +308,7 @@ def plot_dataframe(df):
 #                    log_scale=(True, False),
                     x='since', hue='type',
                     stat="proportion", common_norm=False, # independent density normalization
-                    bins=1000,
+                    bins=50,
                     #multiple="dodge",
                     kde=True,
                     ax=ax)
@@ -337,10 +340,14 @@ def plot_dataframe(df):
                     stat="proportion", common_norm=False, # independent density normalization
                     bins=100,
                     multiple="dodge",
+                    hue_order=["0","1","2","3","4"],
                     #log_scale=(False, True)
                     element="step", fill=True,
                     #kde=True,
                     ax=ax)
+    ax.set_title('Transaction availability in the mempool')
+    ax.set_xlabel('Level of dissusion (based on sampling)')
+    ax.set_ylabel('Portion of transactions')
     plt.savefig('geth_da_hist_seaborn.png')
 
     fig, ax = plt.subplots(figsize=(12, 6))
