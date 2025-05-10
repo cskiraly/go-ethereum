@@ -543,10 +543,10 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 					"since", since,
 					"txpoolsize", s.handler.txFetcher.TxPeerSourceLen(),
 				)
-				eth.TxSendMu.RLock()
-				eth.AnnSendMu.RLock()
-				eth.TxRecvMu.RLock()
-				eth.AnnRecvMu.RLock()
+				eth.TxSendMu.Lock()
+				eth.AnnSendMu.Lock()
+				eth.TxRecvMu.Lock()
+				eth.AnnRecvMu.Lock()
 				sinceFn := func(tt []time.Time) []int64 {
 					ret := make([]int64, len(tt))
 					for i, t := range tt {
@@ -559,10 +559,14 @@ func (s *Ethereum) checkBlockTxsAtNeighbors() {
 					"TxSend", sinceFn(eth.TxSend[tx.Hash()]), "AnnSend", sinceFn(eth.AnnSend[tx.Hash()]),
 					"TxRecv", sinceFn(eth.TxRecv[tx.Hash()]), "AnnRecv", sinceFn(eth.AnnRecv[tx.Hash()]),
 				)
-				eth.TxSendMu.RUnlock()
-				eth.AnnSendMu.RUnlock()
-				eth.TxRecvMu.RUnlock()
-				eth.AnnRecvMu.RUnlock()
+				delete(eth.TxSend, tx.Hash())
+				delete(eth.AnnSend, tx.Hash())
+				delete(eth.TxRecv, tx.Hash())
+				delete(eth.AnnRecv, tx.Hash())
+				eth.TxSendMu.Unlock()
+				eth.AnnSendMu.Unlock()
+				eth.TxRecvMu.Unlock()
+				eth.AnnRecvMu.Unlock()
 				if p-miss > 0 {
 					publicTxCount++
 					blockTxPublicPeerRatioHist.Update(int64(p-miss) * 100000 / int64(p))
