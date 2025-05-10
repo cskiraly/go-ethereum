@@ -236,6 +236,10 @@ def plot_dataframe(df):
     ax.set_xlabel('"Block transaction" type')
     ax.set_ylabel('Ratio of public "block transaction"')
     ax.legend()
+    for p in ax.patches:
+        ax.annotate(f'{p.get_height()*100:.1f}%', (p.get_x() + p.get_width() / 2., p.get_height()),
+                    ha='center', va='center', rotation=0, fontsize=12, color='black',
+                    xytext=(0, 5), textcoords='offset points')
     plt.savefig('geth_public.png')
 
     # plot received txs over time
@@ -260,6 +264,10 @@ def plot_dataframe(df):
     ax.set_xlabel('"Block transaction" type')
     ax.set_ylabel('Ratio of received "block transaction"')
     ax.legend()
+    for p in ax.patches:
+        ax.annotate(f'{p.get_height()*100:.1f}%', (p.get_x() + p.get_width() / 2., p.get_height()),
+                    ha='center', va='center', rotation=0, fontsize=12, color='black',
+                    xytext=(0, 5), textcoords='offset points')
     plt.savefig('geth_received.png')
 
     # plot seen, but not received block txs ratio with columns
