@@ -104,7 +104,7 @@ def create_dataframes(log_lines):
     btxs['knows'] = btxs['message'].str.extract(r'knows=(\d+)').astype(int)
     btxs['blobs'] = btxs['message'].str.extract(r'blobs=(\d+)').astype(int)
     btxs['havesize'] = btxs['message'].str.extract(r'havesize=(\d+)').astype(int)
-    btxs['since'] = btxs['message'].str.extract(r'since=(\d+)').astype(int) * -1
+    btxs['since'] = btxs['message'].str.extract(r'since=(\d+)').astype(float) /1000 * -1
     btxs['size'] = btxs['message'].str.extract(r'size=(\d+)').astype(int)
 
     btxs['da'] = btxs['knows'] / btxs['peers']
@@ -128,7 +128,7 @@ def create_dataframes(log_lines):
     btxtime['knows'] = btxtime['message'].str.extract(r'knows=(\d+)').astype(int)
     btxtime['blobs'] = btxtime['message'].str.extract(r'blobs=(\d+)').astype(int)
     btxtime['havesize'] = btxtime['message'].str.extract(r'havesize=(\d+)').astype(int)
-    btxtime['since'] = btxtime['message'].str.extract(r'since=(\d+)').astype(int) * -1
+    btxtime['since'] = btxtime['message'].str.extract(r'since=(\d+)').astype(float) /1000 * -1
     btxtime['size'] = btxtime['message'].str.extract(r'size=(\d+)').astype(int)
 
     return btxs, blocks, btxtime
@@ -174,6 +174,11 @@ def plot_dataframe(df):
     ax.set_title('Overall ratio of transactions per type, weighted by transaction size')
     plt.savefig('geth_tx_type_ratio_weighted.png')
 
+
+    df['peersCat'] = pd.cut(df['peers'], bins=[1, 5, 10, 15 ,25, 50, 100, 200, 300, 400, 500], 
+                             labels=[5, 10, 15 ,25, 50, 100, 200, 300, 400, 500])
+
+
     # plot da over time
     fig, ax = plt.subplots(figsize=(12, 6))
     df1 = df[df['public']]
@@ -191,10 +196,10 @@ def plot_dataframe(df):
     # plot da over peercount
     fig, ax = plt.subplots(figsize=(12, 6))
     df1 = df[df['public']]
-    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200,
-                                 300, 400, 500, 600, 700, 800, 900, 1000])]
-    df1 = df1[['da','peers','type']].groupby(['type','peers']).mean()
-    sns.lineplot(data=df1, x='peers', y='da', hue='type',
+    # df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200,
+    #                              300, 400, 500, 600, 700, 800, 900, 1000])]
+    df1 = df1[['da','peers','peersCat','type']].groupby(['type','peersCat']).mean()
+    sns.lineplot(data=df1, x='peersCat', y='da', hue='type',
                   ax=ax)
     ax.set_title('Average ratio of peers knowing transactions of a given type, as a function of peer count')
     ax.set_xlabel('Peer count')
@@ -218,10 +223,10 @@ def plot_dataframe(df):
     # plot public txs over peercount
     fig, ax = plt.subplots(figsize=(12, 6))
     df1 = df
-    df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200,
-                                 300, 400, 500, 600, 700, 800, 900, 1000])]
-    df1 = df1[['public','peers','type']].groupby(['type','peers']).apply(lambda x: np.sum(x)/len(x))
-    sns.lineplot(data=df1, x='peers', y='public', hue='type',
+    # df1 = df1[df1['peers'].isin([1,2,3,5,7,10,20,30,40,50,60,70,80,90,100,120,140,160,180,200,
+    #                              300, 400, 500, 600, 700, 800, 900, 1000])]
+    df1 = df1[['public','peersCat','type']].groupby(['type','peersCat']).apply(lambda x: np.sum(x)/len(x))
+    sns.lineplot(data=df1, x='peersCat', y='public', hue='type',
                   ax=ax)
     ax.set_title('Average ratio of public block transactions of a given type, as a function of peer count')
     ax.set_xlabel('Peer count')
@@ -254,8 +259,17 @@ def plot_dataframe(df):
     ax.set_ylabel('Ratio of received "block transaction"')
     ax.legend()
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
-    plt.xticks(rotation=45)
+    plt.xticks(rotation=15)
     plt.savefig('geth_received_over_time.png')
+
+    df1 = df[['have','peersCat','type']].groupby(['type','peersCat']).apply(lambda x: np.sum(x)/len(x))
+    sns.lineplot(data=df1, x='peersCat', y='have', hue='type',
+                  ax=ax)
+    ax.set_title('Average ratio of received block transactions of a given type, as a function of peer count')
+    ax.set_xlabel('Peer count')
+    ax.set_ylabel('Ratio of received "block transaction"')
+    ax.legend()
+    plt.savefig('geth_received_over_peercount.png')
 
     # plot received block txs ratio with columns
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -301,18 +315,22 @@ def plot_dataframe(df):
 
     # plot histogram of since values per type using Seaborn
     fig, ax = plt.subplots(figsize=(12, 6))
-    # sns.histplot(data=df[df['have'] & (df['since']<=36000)],
-    #                 x='since', hue='type',
-    sns.displot(data=df[df['have'] & (df['since']<=32*12000)],
-                    kind='hist',
-#                    log_scale=(True, False),
+    sns.histplot(data=df[df['have'] & (df['since']>=-32*12)],
+                    #kind='hist',
+                    #log_scale=(True, False),
                     x='since', hue='type',
+                    hue_order=["0","1","2","3","4"],
                     stat="proportion", common_norm=False, # independent density normalization
-                    bins=50,
-                    #multiple="dodge",
+                    bins=100,
+                    linewidth=0,
                     kde=True,
+                    kde_kws=dict(bw_adjust=0.5),
+                    line_kws=dict(linewidth = 2),
                     ax=ax)
-    plt.savefig('geth_btx_age_hist.png')
+    ax.set_title('Transaction age in the mempool before block inclusion')
+    ax.set_xlabel('Time since transaction was received (s)')
+    ax.set_ylabel('Portion of transactions')
+    fig.savefig('geth_btx_age_hist.png')
 
 
     # show the plot
@@ -358,6 +376,58 @@ def plot_dataframe(df):
                  ax=ax)
     plt.savefig('geth_da_ecdf.png')
 
+def plot_getblobs_statistics(btxs):
+    # plot the ratio of blocks where we have all type 3 transactions
+    blobtxs = btxs[btxs['type'] == "3"]
+    print(blobtxs[['block','have', 'tx', 'blobs', 'public']])
+    # sum the number of blobs per block'; use all on have and public columns
+    getblobstats=blobtxs[['block','have','public','blobs']].groupby('block').agg({
+        'blobs': 'sum',
+        'have': 'all',
+        'public': 'all'
+        }).reset_index()
+    
+    # get the category of the block based on the have and public columns    
+    getblobstats['category'] = getblobstats[['public','have']].apply(tuple, axis=1).map({
+        (False,False): 'Private',
+        (False,True): 'Private',
+        (True,True): 'getBlobs works',
+        (True,False): 'getBlobs fails',
+        })
+    
+    print(getblobstats)
+    getblobstats['blobs'] = getblobstats['blobs'].astype(int)
+
+    ## plot the category in stacked hist chart, per number of blobs
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.histplot(data=getblobstats, x='blobs', hue='category',
+                bins=[0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5,10.5],
+                multiple="stack",
+                hue_order=["Private","getBlobs fails","getBlobs works"],
+                legend=True,
+                ax=ax)
+    # set legend text
+    ax.legend(title='Category', loc='upper right', labels=['some Private', 'all public, but getBlobs fails', 'all public, and getBlobs works'])
+    ax.set_title('Blobcount vs. getBlobs effectiveness')
+    ax.set_xlabel('Number of blobs in the block')
+    ax.set_ylabel('Number of Private/Public blocks with a given blobcount')
+    # save the histogram to a file
+    plt.tight_layout()
+    plt.savefig('geth_blobtx_category.png')
+
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    getblobstats['category'].value_counts().plot.pie(autopct='%1.1f%%', startangle=90, ax=ax)
+    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+    ax.set_title('Ratio of blocks where we have all type 3 transactions')
+    ax.set_xlabel('Have all type 3 transactions')
+    ax.set_ylabel('Count')
+    # add a legend
+    ax.legend(title='Category', loc='upper right', labels=['some Private', 'all public, but getBlobs fails', 'all public, and getBlobs works'])
+    # save the histogram to a file
+    plt.tight_layout()
+    plt.savefig('geth_blobtx_have_all.png')
+
 def plot_transaction_timing(btxtime):
     # plot the transaction timing
     color_by_type = { 0: 'blue', 1: 'orange', 2: 'green', 3: 'red', 4: 'purple' }
@@ -370,14 +440,14 @@ def plot_transaction_timing(btxtime):
     allpoints = []
 
     print(btxtime)
-    for i, row in btxtime.iterrows():
+    for i, row in btxtime[::-1].iterrows():
         annrecv = np.array(row['AnnRecv'])
         txrecv = np.array(row['TxRecv'])
         recv = np.concatenate((txrecv, annrecv)) /1000
         type = row['type']
         txid = row['tx']
         label = f'{txid}, type={type}'
-        if len(recv) > 1: # and type != 0:
+        if len(recv) > 1 and row['peers']>45: # and type != 0:
             recv *= -1
             recv = np.sort(recv)
             recv_firstrx = recv - recv.min()
@@ -399,8 +469,8 @@ def plot_transaction_timing(btxtime):
                 ax2.plot(recv_firstrx, y, label=label, color=color_by_type[type])
                 plottedtype[type] += 1
             plotted += 1
-            if plotted >= 1000:
-                break
+            # if plotted >= 1000:
+            #     break
             # # add a vertical line for the transaction time
             # ax.axvline(x=row['timestamp'], color='red', linestyle='--')
     # set the title and labels
@@ -474,7 +544,9 @@ def main():
     print(df)
     print(df[['public','have','onlyPeers','onlyUs','type']].groupby('type').sum())
     print(df[['public','have','onlyPeers','onlyUs','type','peers']].groupby(['type','peers']).sum())
-    
+
+
+    plot_getblobs_statistics(df)
 
     # plot the dataframe
     plot_dataframe(df)
