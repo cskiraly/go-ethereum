@@ -1001,7 +1001,7 @@ func (pool *LegacyPool) addTxsLocked(txs []*types.Transaction) ([]error, *accoun
 			dirty.addTx(tx)
 		}
 	}
-	validTxMeter.Mark(int64(len(dirty.accounts)))
+	validTxMeter.Mark(int64(len(dirty.accounts))) // this should be independet of peer count, looks OK
 	return errs, dirty
 }
 
@@ -1571,7 +1571,9 @@ func (pool *LegacyPool) truncatePending() {
 			}
 		}
 	}
-	pendingRateLimitMeter.Mark(int64(pendingBeforeCap - pending))
+	pendingRateLimitMeter.Mark(int64(pendingBeforeCap - pending)) //TODO: check if this is correct with many peers
+	// https://grafana.ethquokkaops.io/d/aeiipt7gk5on4d/single-geth-2b-dial-quality-csaba?orgId=2&from=now-2d&to=now&timezone=browser&var-host=cskiraly&var-percentile=50&refresh=1m&editPanel=117
+
 }
 
 // truncateQueue drops the oldest transactions in the queue if the pool is above the global queue limit.

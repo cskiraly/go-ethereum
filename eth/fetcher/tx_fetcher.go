@@ -545,7 +545,7 @@ func (f *TxFetcher) loop() {
 
 				// Assign the current timestamp as the wait time, but for blob transactions,
 				// skip the wait time since they are only announced.
-				if ann.metas[i].kind != types.BlobTxType {
+				if ann.metas[i].kind != types.BlobTxType {	// TODO: on send side we also do size based logic. Here why not?
 					f.waittime[hash] = f.clock.Now()
 				} else {
 					hasBlob = true
