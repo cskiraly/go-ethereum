@@ -131,6 +131,11 @@ def create_dataframes(log_lines):
     btxtime['since'] = btxtime['message'].str.extract(r'since=(\d+)').astype(float) /1000 * -1
     btxtime['size'] = btxtime['message'].str.extract(r'size=(\d+)').astype(int)
 
+    # remove the message columns
+    btxs.drop(columns=['message'], inplace=True)
+    btxtime.drop(columns=['message'], inplace=True)
+    blocks.drop(columns=['message'], inplace=True)
+
     return btxs, blocks, btxtime
 
 def plot_dataframe(df):
@@ -379,54 +384,92 @@ def plot_dataframe(df):
 def plot_getblobs_statistics(btxs):
     # plot the ratio of blocks where we have all type 3 transactions
     blobtxs = btxs[btxs['type'] == "3"]
-    print(blobtxs[['block','have', 'tx', 'blobs', 'public']])
+    blobtxs['haveblobs'] = np.where(blobtxs['have'], blobtxs['blobs'], 0)
+
+    #blobtxs[['block', 'tx', 'have', 'public', 'blobs', 'haveblobs']].groupby('block').apply(print)
+    print(blobtxs[['block', 'tx', 'have', 'public', 'blobs', 'haveblobs']])
+
     # sum the number of blobs per block'; use all on have and public columns
-    getblobstats=blobtxs[['block','have','public','blobs']].groupby('block').agg({
+    blobstats=blobtxs[['block','have','public','blobs', 'haveblobs']].groupby('block').agg({
         'blobs': 'sum',
         'have': 'all',
-        'public': 'all'
+        'public': 'all',
+        'haveblobs': 'sum',
         }).reset_index()
-    
+    blobstats['missblobs'] = blobstats['blobs'] - blobstats['haveblobs']
+
     # get the category of the block based on the have and public columns    
-    getblobstats['category'] = getblobstats[['public','have']].apply(tuple, axis=1).map({
+    blobstats['category'] = blobstats[['public','have']].apply(tuple, axis=1).map({
         (False,False): 'Private',
         (False,True): 'Private',
         (True,True): 'getBlobs works',
         (True,False): 'getBlobs fails',
         })
     
-    print(getblobstats)
-    getblobstats['blobs'] = getblobstats['blobs'].astype(int)
+    blobstats['blobs'] = blobstats['blobs'].astype(int)
+
+
+    print(blobtxs[~blobtxs['have']][['block', 'tx', 'have', 'public', 'blobs', 'haveblobs']])
+    print(blobstats[blobstats['missblobs']>0])
 
     ## plot the category in stacked hist chart, per number of blobs
     fig, ax = plt.subplots(figsize=(12, 6))
-    sns.histplot(data=getblobstats, x='blobs', hue='category',
-                bins=[0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5,10.5],
+    sns.histplot(data=blobstats, x='blobs', hue='category',
+                bins=[0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5],
                 multiple="stack",
-                hue_order=["Private","getBlobs fails","getBlobs works"],
+                hue_order=["Private", "getBlobs fails","getBlobs works"],
                 legend=True,
                 ax=ax)
-    # set legend text
-    ax.legend(title='Category', loc='upper right', labels=['some Private', 'all public, but getBlobs fails', 'all public, and getBlobs works'])
+    # ax.legend(title='Category', loc='upper right',
+    #           labels=['all public, and getBlobs works', 'all public, but getBlobs fails', 'some Private'])
     ax.set_title('Blobcount vs. getBlobs effectiveness')
     ax.set_xlabel('Number of blobs in the block')
     ax.set_ylabel('Number of Private/Public blocks with a given blobcount')
+    ax.set_xticks(np.arange(1, 10, 1))
     # save the histogram to a file
     plt.tight_layout()
     plt.savefig('geth_blobtx_category.png')
 
 
+    # plot the category in pie chart
+    # make sure the right colors are used
     fig, ax = plt.subplots(figsize=(6, 6))
-    getblobstats['category'].value_counts().plot.pie(autopct='%1.1f%%', startangle=90, ax=ax)
+    piedf = blobstats['category'].value_counts()
+    print(piedf)
+    piedf.plot.pie(autopct='%1.1f%%', startangle=90, ax=ax,
+            colors=piedf.index.map({
+                'Private': 'blue',
+                'getBlobs fails': 'orange',
+                'getBlobs works': 'green'
+            })
+    )
     ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
-    ax.set_title('Ratio of blocks where we have all type 3 transactions')
-    ax.set_xlabel('Have all type 3 transactions')
-    ax.set_ylabel('Count')
-    # add a legend
-    ax.legend(title='Category', loc='upper right', labels=['some Private', 'all public, but getBlobs fails', 'all public, and getBlobs works'])
-    # save the histogram to a file
+    ax.set_title('getBlobs effectiveness')
+    ax.set_ylabel('')  # remove the y-label
+    # ax.legend(title='Category', loc='upper right', labels=['some Private', 'all public, but getBlobs fails', 'all public, and getBlobs works'])
     plt.tight_layout()
     plt.savefig('geth_blobtx_have_all.png')
+
+    # focusing on private blocks, plot haveblobs as a functions of blobs in stacked histogram
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.histplot(data=blobstats[blobstats['category'] == 'Private'], x='blobs', hue='missblobs',
+                bins=[0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5],
+                multiple="stack",
+                palette="tab10",
+                # hue_order=["False", "True"],
+                legend=True,
+                ax=ax)
+    # ax.legend(title='Category', loc='upper right',
+    #           labels=['all public, and getBlobs works', 'all public, but getBlobs fails', 'some Private'])
+    ax.set_title('Blobcount vs. missing blobs')
+    ax.set_xlabel('Number of blobs in the block')
+    ax.set_ylabel('Number of Private blocks with a given blobcount\n and the number of blobs we miss')
+    ax.set_xticks(np.arange(1, 10, 1))
+    # save the histogram to a file
+    plt.tight_layout()
+    plt.savefig('geth_blobtx_private.png')
+
+    exit(0)
 
 def plot_transaction_timing(btxtime):
     # plot the transaction timing
