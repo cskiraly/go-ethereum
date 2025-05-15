@@ -478,7 +478,7 @@ func (s *Ethereum) setupDiscovery() error {
 		if err != nil {
 			return err
 		}
-		s.discmix.AddSource(iter)
+		s.discmix.AddSource(enode.WithSourceName("DNSeth", iter))
 	}
 
 	// Add snap nodes from DNS.
@@ -487,14 +487,14 @@ func (s *Ethereum) setupDiscovery() error {
 		if err != nil {
 			return err
 		}
-		s.discmix.AddSource(iter)
+		s.discmix.AddSource(enode.WithSourceName("DNSsnap", iter))
 	}
 
 	// Add DHT nodes from discv5.
 	if s.p2pServer.DiscoveryV5() != nil {
 		filter := eth.NewNodeFilter(s.blockchain)
 		iter := enode.Filter(s.p2pServer.DiscoveryV5().RandomNodes(), filter)
-		s.discmix.AddSource(iter)
+		s.discmix.AddSource(enode.WithSourceName("discv5", iter))
 	}
 
 	return nil

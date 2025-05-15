@@ -324,6 +324,10 @@ func (d *dialScheduler) readNodes(it enode.Iterator) {
 	for it.Next() {
 		select {
 		case d.nodesIn <- it.Node():
+			// check if it is a SourceIterator
+			if it, ok := it.(enode.SourceIterator); ok {
+				log.Trace("Dial candidate", "id", it.Node().ID(), "ip", it.Node().IPAddr(), "source", it.NodeSource())
+			}
 		case <-d.ctx.Done():
 		}
 	}
