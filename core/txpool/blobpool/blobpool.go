@@ -938,6 +938,7 @@ func (p *BlobPool) Reset(oldHead, newHead *types.Header) {
 						fail++
 						continue
 					}
+					log.Trace("Converted blob transaction to new format", "hash", tx.Hash())
 					errs := p.Add([]*types.Transaction{&tx}, true)
 					if errs[0] != nil {
 						fail++
@@ -1829,7 +1830,7 @@ func (p *BlobPool) drop(deleteTxBlob bool) (common.Address, uint64, uint64) {
 		}
 	}
 	// Remove the transaction from the data store
-	log.Debug("Evicting overflown blob transaction", "from", from, "evicted", drop.nonce, "id", drop.id)
+	log.Debug("Evicting overflown blob transaction", "hash", drop.hash, "from", from, "evicted", drop.nonce, "id", drop.id)
 	dropOverflownMeter.Mark(1)
 
 	if deleteTxBlob {

@@ -64,10 +64,13 @@ func newConversionQueue() *conversionQueue {
 //
 // This function may block for a long time until the transaction is processed.
 func (q *conversionQueue) convert(tx *types.Transaction) error {
+	log.Trace("Queuing blob transaction for conversion", "hash", tx.Hash(), "version", tx.BlobTxSidecar().Version)
 	done := make(chan error, 1)
 	select {
 	case q.tasks <- &cTask{tx: tx, done: done}:
-		return <-done
+		err := <-done
+		log.Trace("Blob transaction conversion result", "hash", tx.Hash(), "version", tx.BlobTxSidecar().Version, "err", err)
+		return err
 	case <-q.closed:
 		return errors.New("conversion queue closed")
 	}
