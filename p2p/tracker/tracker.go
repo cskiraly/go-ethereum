@@ -161,6 +161,21 @@ func (t *Tracker) schedule() {
 	t.wake = time.AfterFunc(time.Until(t.pending[t.expire.Front().Value.(uint64)].time.Add(t.timeout)), t.clean)
 }
 
+// Match checks whether a request with the given parameters is being tracked.
+func (t *Tracker) HasRequest(peer string, version uint, code uint64, id uint64) bool {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	req, ok := t.pending[id]
+	if !ok {
+		return false
+	}
+	if req.peer != peer || req.version != version || req.resCode != code {
+		return false
+	}
+	return true
+}
+
 // Fulfil fills a pending request, if any is available, reporting on various metrics.
 func (t *Tracker) Fulfil(peer string, version uint, code uint64, id uint64) {
 	if !metrics.Enabled() {

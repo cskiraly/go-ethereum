@@ -521,6 +521,12 @@ func handlePooledTransactions(backend Backend, msg Decoder, peer *Peer) error {
 	if err := msg.Decode(&txs); err != nil {
 		return err
 	}
+	// Check for matching request id, discard if none found. An error would be too harsh
+	// as this could be a legitimate request that timed out.
+	if !requestTracker.HasRequest(peer.id, peer.version, PooledTransactionsMsg, txs.RequestId) {
+		log.Trace("Discarding PooledTransactions with unknown request ID", "peer", peer.id, "reqid", txs.RequestId)
+		return nil
+	}
 	// Duplicate transactions are not allowed
 	seen := make(map[common.Hash]struct{})
 	for i, tx := range txs.PooledTransactionsResponse {
