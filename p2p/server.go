@@ -89,6 +89,7 @@ type Server struct {
 	loopWG       sync.WaitGroup // loop, listenLoop
 	peerFeed     event.Feed
 	log          log.Logger
+	globalRL     *globalRateLimiter
 
 	nodedb    *enode.DB
 	localnode *enode.LocalNode
@@ -369,6 +370,7 @@ func (srv *Server) Start() (err error) {
 	if srv.log == nil {
 		srv.log = log.Root()
 	}
+	srv.globalRL = newGlobalRateLimiter(srv.log)
 	if srv.clock == nil {
 		srv.clock = mclock.System{}
 	}
@@ -967,7 +969,7 @@ func (srv *Server) checkpoint(c *conn, stage chan<- *conn) error {
 }
 
 func (srv *Server) launchPeer(c *conn) *Peer {
-	p := newPeer(srv.log, c, srv.Protocols)
+	p := newPeer(srv.log, c, srv.Protocols, srv.globalRL)
 	if srv.EnableMsgEvents {
 		// If message events are enabled, pass the peerFeed
 		// to the peer.

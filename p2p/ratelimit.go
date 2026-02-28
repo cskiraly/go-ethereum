@@ -19,6 +19,7 @@ package p2p
 import (
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -69,25 +70,93 @@ var defaultRateLimit = msgRateLimit{rate: 30, burst: 60}
 // Roughly 1x the sum of all per-type rates.
 var defaultPeerAggregateLimit = msgRateLimit{rate: 300, burst: 600}
 
+// defaultGlobalMsgRateLimits contains per-message-type rate limits shared across
+// all peers. Values are 50x the per-peer limits (scaled for default MaxPeers=50).
+var defaultGlobalMsgRateLimits = func() map[string]msgRateLimit {
+	m := make(map[string]msgRateLimit, len(defaultMsgRateLimits))
+	for k, v := range defaultMsgRateLimits {
+		m[k] = msgRateLimit{rate: v.rate * 50, burst: v.burst * 50}
+	}
+	return m
+}()
+
+// defaultGlobalRateLimit is used for message types not in defaultGlobalMsgRateLimits.
+var defaultGlobalRateLimit = msgRateLimit{rate: 1500, burst: 3000}
+
 // rateLimitKey returns the map key for a protocol name and relative message code.
 func rateLimitKey(protoName string, relCode uint64) string {
 	return fmt.Sprintf("%s/0x%02x", protoName, relCode)
 }
 
+// globalRateLimiter holds per-message-type token buckets shared across all peers.
+// The mutex protects map initialization; rate.Limiter.Reserve() is goroutine-safe.
+type globalRateLimiter struct {
+	mu       sync.Mutex
+	limiters map[string]*rate.Limiter
+	logger   log.Logger
+}
+
+// newGlobalRateLimiter creates a global rate limiter instance.
+func newGlobalRateLimiter(logger log.Logger) *globalRateLimiter {
+	return &globalRateLimiter{
+		limiters: make(map[string]*rate.Limiter),
+		logger:   logger,
+	}
+}
+
+// getOrCreate returns the limiter for the given message type, creating it lazily.
+func (gl *globalRateLimiter) getOrCreate(protoName string, relCode uint64) *rate.Limiter {
+	key := rateLimitKey(protoName, relCode)
+	gl.mu.Lock()
+	l, ok := gl.limiters[key]
+	if !ok {
+		cfg, found := defaultGlobalMsgRateLimits[key]
+		if !found {
+			cfg = defaultGlobalRateLimit
+		}
+		l = rate.NewLimiter(cfg.rate, cfg.burst)
+		gl.limiters[key] = l
+	}
+	gl.mu.Unlock()
+	return l
+}
+
+// wait reserves a token from the global bucket for the given message type and
+// blocks until it is available or the closed channel fires.
+func (gl *globalRateLimiter) wait(closed <-chan struct{}, protoName string, relCode uint64) error {
+	limiter := gl.getOrCreate(protoName, relCode)
+	delay, err := waitOnLimiter(limiter, closed)
+	if err != nil {
+		return err
+	}
+	if delay > 0 {
+		key := rateLimitKey(protoName, relCode)
+		gl.logger.Debug("Rate limited by global bucket", "key", key, "delay", delay)
+		if metrics.Enabled() {
+			m := fmt.Sprintf("p2p/ratelimit/global/%s", key)
+			metrics.GetOrRegisterMeter(m, nil).Mark(1)
+		}
+	}
+	return nil
+}
+
 // peerRateLimiter holds per-message-type and aggregate token buckets for a single peer.
 // It is only accessed from the peer's readLoop goroutine, so no mutex is needed
-// for the per-peer fields.
+// for the per-peer fields. The global limiter is shared across all peers.
 type peerRateLimiter struct {
 	limiters  map[string]*rate.Limiter
 	aggregate *rate.Limiter
+	global    *globalRateLimiter // shared across all peers; may be nil in tests
 	logger    log.Logger
 }
 
 // newPeerRateLimiter creates a new rate limiter for a peer.
-func newPeerRateLimiter(logger log.Logger) *peerRateLimiter {
+// The global limiter is shared across all peers and may be nil.
+func newPeerRateLimiter(logger log.Logger, global *globalRateLimiter) *peerRateLimiter {
 	return &peerRateLimiter{
 		limiters:  make(map[string]*rate.Limiter),
 		aggregate: rate.NewLimiter(defaultPeerAggregateLimit.rate, defaultPeerAggregateLimit.burst),
+		global:    global,
 		logger:    logger,
 	}
 }
@@ -126,10 +195,16 @@ func waitOnLimiter(limiter *rate.Limiter, closed <-chan struct{}) (time.Duration
 	}
 }
 
-// wait reserves tokens from the aggregate and per-message-type buckets,
+// wait reserves tokens from the global, aggregate, and per-message-type buckets,
 // blocking until they are available or the peer's closed channel fires.
-// Check order: aggregate → per-message-type.
+// Check order: global → aggregate → per-message-type.
 func (rl *peerRateLimiter) wait(closed <-chan struct{}, protoName string, relCode uint64) error {
+	// Global bucket: one per message type shared across all peers.
+	if rl.global != nil {
+		if err := rl.global.wait(closed, protoName, relCode); err != nil {
+			return err
+		}
+	}
 	// Aggregate bucket: one per peer across all message types.
 	delay, err := waitOnLimiter(rl.aggregate, closed)
 	if err != nil {

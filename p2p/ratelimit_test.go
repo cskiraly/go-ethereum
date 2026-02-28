@@ -18,6 +18,7 @@ package p2p
 
 import (
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ func TestPeerRateLimitKey(t *testing.T) {
 }
 
 func TestPeerRateLimitBurstConsumption(t *testing.T) {
-	rl := newPeerRateLimiter(log.New())
+	rl := newPeerRateLimiter(log.New(), nil)
 	closed := make(chan struct{})
 
 	// eth/0x00 (Status) has burst=2. Consume the entire burst.
@@ -64,7 +65,7 @@ func TestPeerRateLimitBurstConsumption(t *testing.T) {
 }
 
 func TestPeerRateLimitIndependentBuckets(t *testing.T) {
-	rl := newPeerRateLimiter(log.New())
+	rl := newPeerRateLimiter(log.New(), nil)
 	closed := make(chan struct{})
 
 	// Exhaust eth/0x00 burst (burst=2).
@@ -80,7 +81,7 @@ func TestPeerRateLimitIndependentBuckets(t *testing.T) {
 }
 
 func TestPeerRateLimitDefaultFallback(t *testing.T) {
-	rl := newPeerRateLimiter(log.New())
+	rl := newPeerRateLimiter(log.New(), nil)
 
 	// Unknown protocol/code should use defaultRateLimit (burst=60).
 	limiter := rl.getOrCreate("unknown", 0x42)
@@ -90,7 +91,7 @@ func TestPeerRateLimitDefaultFallback(t *testing.T) {
 }
 
 func TestPeerRateLimitTokenRefill(t *testing.T) {
-	rl := newPeerRateLimiter(log.New())
+	rl := newPeerRateLimiter(log.New(), nil)
 	closed := make(chan struct{})
 
 	// eth/0x00: rate=1/s, burst=2. Exhaust burst.
@@ -113,7 +114,7 @@ func TestPeerRateLimitTokenRefill(t *testing.T) {
 }
 
 func TestPeerRateLimitCloseDuringWait(t *testing.T) {
-	rl := newPeerRateLimiter(log.New())
+	rl := newPeerRateLimiter(log.New(), nil)
 	closed := make(chan struct{})
 
 	// eth/0x00: rate=1/s, burst=2. Exhaust burst.
@@ -140,7 +141,7 @@ func TestPeerRateLimitCloseDuringWait(t *testing.T) {
 }
 
 func TestPeerRateLimitAggregateExhaustion(t *testing.T) {
-	rl := newPeerRateLimiter(log.New())
+	rl := newPeerRateLimiter(log.New(), nil)
 	closed := make(chan struct{})
 
 	// Replace the aggregate limiter with a small one for testing.
@@ -163,7 +164,7 @@ func TestPeerRateLimitAggregateExhaustion(t *testing.T) {
 }
 
 func TestPeerRateLimitAggregateIndependence(t *testing.T) {
-	rl := newPeerRateLimiter(log.New())
+	rl := newPeerRateLimiter(log.New(), nil)
 	closed := make(chan struct{})
 
 	// Exhaust a single per-type bucket (eth/0x00: burst=2).
@@ -181,5 +182,67 @@ func TestPeerRateLimitAggregateIndependence(t *testing.T) {
 	r := rl.aggregate.Reserve()
 	if r.Delay() != 0 {
 		t.Fatal("aggregate bucket should still have tokens")
+	}
+}
+
+func TestGlobalRateLimiterSharedBudget(t *testing.T) {
+	gl := newGlobalRateLimiter(log.New())
+	// Replace the global limiter for eth/0x02 with a small one (burst=10, rate=1/s).
+	gl.mu.Lock()
+	gl.limiters["eth/0x02"] = rate.NewLimiter(1, 10)
+	gl.mu.Unlock()
+
+	rl1 := newPeerRateLimiter(log.New(), gl)
+	rl2 := newPeerRateLimiter(log.New(), gl)
+	closed := make(chan struct{})
+
+	// Peer 1 sends 6 messages, peer 2 sends 4. Total = 10 = burst.
+	for i := 0; i < 6; i++ {
+		if err := rl1.wait(closed, "eth", 0x02); err != nil {
+			t.Fatalf("rl1.wait %d returned error: %v", i, err)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		if err := rl2.wait(closed, "eth", 0x02); err != nil {
+			t.Fatalf("rl2.wait %d returned error: %v", i, err)
+		}
+	}
+	// Global bucket for eth/0x02 should now be exhausted.
+	limiter := gl.getOrCreate("eth", 0x02)
+	r := limiter.Reserve()
+	if r.Delay() == 0 {
+		t.Fatal("expected non-zero delay after global burst exhaustion")
+	}
+	r.Cancel()
+}
+
+func TestGlobalRateLimiterConcurrentAccess(t *testing.T) {
+	gl := newGlobalRateLimiter(log.New())
+	closed := make(chan struct{})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rl := newPeerRateLimiter(log.New(), gl)
+			for j := 0; j < 20; j++ {
+				if err := rl.wait(closed, "eth", 0x02); err != nil {
+					t.Errorf("wait returned error: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestGlobalRateLimiterDefaultFallback(t *testing.T) {
+	gl := newGlobalRateLimiter(log.New())
+
+	// Unknown protocol/code should use defaultGlobalRateLimit.
+	limiter := gl.getOrCreate("unknown", 0x42)
+	if limiter.Burst() != defaultGlobalRateLimit.burst {
+		t.Errorf("unknown message type burst = %d, want %d", limiter.Burst(), defaultGlobalRateLimit.burst)
 	}
 }

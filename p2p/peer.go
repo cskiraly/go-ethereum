@@ -134,7 +134,7 @@ func NewPeer(id enode.ID, name string, caps []Cap) *Peer {
 	pipe, _ := net.Pipe()
 	node := enode.SignNull(new(enr.Record), id)
 	conn := &conn{fd: pipe, transport: nil, node: node, caps: caps, name: name}
-	peer := newPeer(log.Root(), conn, protos)
+	peer := newPeer(log.Root(), conn, protos, nil)
 	close(peer.closed) // ensures Disconnect doesn't block
 	return peer
 }
@@ -249,7 +249,7 @@ func (p *Peer) Lifetime() mclock.AbsTime {
 	return mclock.Now() - p.created
 }
 
-func newPeer(log log.Logger, conn *conn, protocols []Protocol) *Peer {
+func newPeer(log log.Logger, conn *conn, protocols []Protocol, globalRL *globalRateLimiter) *Peer {
 	protomap := matchProtocols(protocols, conn.caps, conn)
 	p := &Peer{
 		rw:       conn,
@@ -262,7 +262,7 @@ func newPeer(log log.Logger, conn *conn, protocols []Protocol) *Peer {
 		log:      log.New("id", conn.node.ID(), "conn", conn.flags),
 	}
 	if !conn.is(trustedConn) {
-		p.rateLimiter = newPeerRateLimiter(p.log)
+		p.rateLimiter = newPeerRateLimiter(p.log, globalRL)
 	}
 	return p
 }
