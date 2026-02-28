@@ -65,23 +65,30 @@ var defaultMsgRateLimits = map[string]msgRateLimit{
 // defaultRateLimit is used for message types not in defaultMsgRateLimits.
 var defaultRateLimit = msgRateLimit{rate: 30, burst: 60}
 
+// defaultPeerAggregateLimit caps total messages from one peer across all types.
+// Roughly 1x the sum of all per-type rates.
+var defaultPeerAggregateLimit = msgRateLimit{rate: 300, burst: 600}
+
 // rateLimitKey returns the map key for a protocol name and relative message code.
 func rateLimitKey(protoName string, relCode uint64) string {
 	return fmt.Sprintf("%s/0x%02x", protoName, relCode)
 }
 
-// peerRateLimiter holds per-message-type token buckets for a single peer.
-// It is only accessed from the peer's readLoop goroutine, so no mutex is needed.
+// peerRateLimiter holds per-message-type and aggregate token buckets for a single peer.
+// It is only accessed from the peer's readLoop goroutine, so no mutex is needed
+// for the per-peer fields.
 type peerRateLimiter struct {
-	limiters map[string]*rate.Limiter
-	logger   log.Logger
+	limiters  map[string]*rate.Limiter
+	aggregate *rate.Limiter
+	logger    log.Logger
 }
 
 // newPeerRateLimiter creates a new rate limiter for a peer.
 func newPeerRateLimiter(logger log.Logger) *peerRateLimiter {
 	return &peerRateLimiter{
-		limiters: make(map[string]*rate.Limiter),
-		logger:   logger,
+		limiters:  make(map[string]*rate.Limiter),
+		aggregate: rate.NewLimiter(defaultPeerAggregateLimit.rate, defaultPeerAggregateLimit.burst),
+		logger:    logger,
 	}
 }
 
@@ -100,32 +107,53 @@ func (rl *peerRateLimiter) getOrCreate(protoName string, relCode uint64) *rate.L
 	return l
 }
 
-// wait reserves a token for the given message type and blocks until it is
-// available or the peer's closed channel fires. It is called from the peer's
-// readLoop goroutine.
-func (rl *peerRateLimiter) wait(closed <-chan struct{}, protoName string, relCode uint64) error {
-	limiter := rl.getOrCreate(protoName, relCode)
-
+// waitOnLimiter reserves a token from limiter and blocks until it is available
+// or the closed channel fires. It returns the delay waited and any error.
+func waitOnLimiter(limiter *rate.Limiter, closed <-chan struct{}) (time.Duration, error) {
 	r := limiter.Reserve()
 	delay := r.Delay()
 	if delay == 0 {
-		return nil // fast path: token available immediately
+		return 0, nil
 	}
-	// Slow path: suspend until token replenishes or peer closes.
-	rl.logger.Debug("Rate limited, suspending", "proto", protoName, "code", relCode, "delay", delay)
-	if metrics.Enabled() {
-		key := rateLimitKey(protoName, relCode)
-		m := fmt.Sprintf("p2p/ratelimit/%s", key)
-		metrics.GetOrRegisterMeter(m, nil).Mark(1)
-	}
-
 	t := time.NewTimer(delay)
 	defer t.Stop()
 	select {
 	case <-t.C:
-		return nil // token now available, resume processing
+		return delay, nil
 	case <-closed:
 		r.Cancel()
-		return io.EOF // peer shutting down
+		return 0, io.EOF
 	}
+}
+
+// wait reserves tokens from the aggregate and per-message-type buckets,
+// blocking until they are available or the peer's closed channel fires.
+// Check order: aggregate → per-message-type.
+func (rl *peerRateLimiter) wait(closed <-chan struct{}, protoName string, relCode uint64) error {
+	// Aggregate bucket: one per peer across all message types.
+	delay, err := waitOnLimiter(rl.aggregate, closed)
+	if err != nil {
+		return err
+	}
+	if delay > 0 {
+		rl.logger.Debug("Rate limited by aggregate bucket", "proto", protoName, "code", relCode, "delay", delay)
+		if metrics.Enabled() {
+			metrics.GetOrRegisterMeter("p2p/ratelimit/aggregate", nil).Mark(1)
+		}
+	}
+	// Per-message-type bucket.
+	limiter := rl.getOrCreate(protoName, relCode)
+	delay, err = waitOnLimiter(limiter, closed)
+	if err != nil {
+		return err
+	}
+	if delay > 0 {
+		key := rateLimitKey(protoName, relCode)
+		rl.logger.Debug("Rate limited by per-type bucket", "key", key, "delay", delay)
+		if metrics.Enabled() {
+			m := fmt.Sprintf("p2p/ratelimit/%s", key)
+			metrics.GetOrRegisterMeter(m, nil).Mark(1)
+		}
+	}
+	return nil
 }

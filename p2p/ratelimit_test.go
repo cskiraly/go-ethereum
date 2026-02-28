@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
+	"golang.org/x/time/rate"
 )
 
 func TestPeerRateLimitKey(t *testing.T) {
@@ -135,5 +136,50 @@ func TestPeerRateLimitCloseDuringWait(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("wait did not return after close")
+	}
+}
+
+func TestPeerRateLimitAggregateExhaustion(t *testing.T) {
+	rl := newPeerRateLimiter(log.New())
+	closed := make(chan struct{})
+
+	// Replace the aggregate limiter with a small one for testing.
+	// burst=5, rate=1/s so we can exhaust it quickly without refill issues.
+	rl.aggregate = rate.NewLimiter(1, 5)
+
+	// Send 5 messages across different types (each per-type bucket has
+	// burst >= 60, so they won't block).
+	for i := 0; i < 5; i++ {
+		if err := rl.wait(closed, "test", uint64(i)); err != nil {
+			t.Fatalf("wait %d returned error: %v", i, err)
+		}
+	}
+	// Aggregate bucket should now be exhausted. Next reservation must block.
+	r := rl.aggregate.Reserve()
+	if r.Delay() == 0 {
+		t.Fatal("expected non-zero delay after aggregate burst exhaustion")
+	}
+	r.Cancel()
+}
+
+func TestPeerRateLimitAggregateIndependence(t *testing.T) {
+	rl := newPeerRateLimiter(log.New())
+	closed := make(chan struct{})
+
+	// Exhaust a single per-type bucket (eth/0x00: burst=2).
+	for i := 0; i < 2; i++ {
+		if err := rl.wait(closed, "eth", 0x00); err != nil {
+			t.Fatalf("wait returned error: %v", err)
+		}
+	}
+	// Per-type bucket for eth/0x00 is exhausted, but aggregate still has plenty.
+	// eth/0x02 (burst=60) should still work fine.
+	if err := rl.wait(closed, "eth", 0x02); err != nil {
+		t.Fatalf("different message type should not be affected: %v", err)
+	}
+	// Verify aggregate has tokens remaining (we only used 3 of 600).
+	r := rl.aggregate.Reserve()
+	if r.Delay() != 0 {
+		t.Fatal("aggregate bucket should still have tokens")
 	}
 }
