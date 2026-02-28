@@ -116,8 +116,9 @@ type Peer struct {
 	disc     chan DiscReason
 
 	// events receives message send / receive events if set
-	events   *event.Feed
-	testPipe *MsgPipeRW // for testing
+	events      *event.Feed
+	testPipe    *MsgPipeRW       // for testing
+	rateLimiter *peerRateLimiter // nil for trusted peers
 }
 
 // NewPeer returns a peer for testing purposes.
@@ -260,6 +261,9 @@ func newPeer(log log.Logger, conn *conn, protocols []Protocol) *Peer {
 		pingRecv: make(chan struct{}, 16),
 		log:      log.New("id", conn.node.ID(), "conn", conn.flags),
 	}
+	if !conn.is(trustedConn) {
+		p.rateLimiter = newPeerRateLimiter(p.log)
+	}
 	return p
 }
 
@@ -390,6 +394,11 @@ func (p *Peer) handle(msg Msg) error {
 			m := fmt.Sprintf("%s/%s/%d/%#02x", ingressMeterName, proto.Name, proto.Version, msg.Code-proto.offset)
 			metrics.GetOrRegisterMeter(m, nil).Mark(int64(msg.meterSize))
 			metrics.GetOrRegisterMeter(m+"/packets", nil).Mark(1)
+		}
+		if p.rateLimiter != nil {
+			if err := p.rateLimiter.wait(p.closed, proto.Name, msg.Code-proto.offset); err != nil {
+				return err
+			}
 		}
 		select {
 		case proto.in <- msg:
