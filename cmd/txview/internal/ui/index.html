@@ -22,39 +22,89 @@
             <span>Rejected: <strong id="cnt-rejected">0</strong></span>
         </div>
     </header>
-    <div class="filter-bar">
-        <input type="text" id="filter-input" placeholder="Filter by tx hash or peer prefix...">
-        <select id="filter-status">
-            <option value="">All statuses</option>
-            <option value="announced">Announced</option>
-            <option value="requested">Requested</option>
-            <option value="received">Received</option>
-            <option value="pooled">Pooled</option>
-            <option value="included">Included</option>
-            <option value="finalized">Finalized</option>
-            <option value="rejected">Rejected</option>
-        </select>
-    </div>
-    <div class="main-area">
-        <div class="table-area">
-            <div class="table-header">
-                <span class="col-hash">Hash</span>
-                <span class="col-status">Status</span>
-                <span class="col-peer">Peer</span>
-                <span class="col-block">Block #</span>
-                <span class="col-age">Age</span>
-                <span class="col-error">Error</span>
+    <nav class="tab-bar">
+        <button class="tab active" data-tab="feed">Feed</button>
+        <button class="tab" data-tab="top">Top</button>
+    </nav>
+
+    <!-- Feed view (existing) -->
+    <div id="view-feed" class="view active">
+        <div class="filter-bar">
+            <input type="text" id="filter-input" placeholder="Filter by tx hash or peer prefix...">
+            <select id="filter-status">
+                <option value="">All statuses</option>
+                <option value="announced">Announced</option>
+                <option value="requested">Requested</option>
+                <option value="received">Received</option>
+                <option value="pooled">Pooled</option>
+                <option value="included">Included</option>
+                <option value="finalized">Finalized</option>
+                <option value="rejected">Rejected</option>
+            </select>
+        </div>
+        <div class="main-area">
+            <div class="table-area">
+                <div class="table-header">
+                    <span class="col-hash">Hash</span>
+                    <span class="col-status">Status</span>
+                    <span class="col-peer">Peer</span>
+                    <span class="col-block">Block #</span>
+                    <span class="col-age">Age</span>
+                    <span class="col-error">Error</span>
+                </div>
+                <div class="viewport" id="viewport">
+                    <div id="scroll-spacer"></div>
+                    <div id="row-container"></div>
+                </div>
             </div>
-            <div class="viewport" id="viewport">
-                <div id="scroll-spacer"></div>
-                <div id="row-container"></div>
+            <div class="detail-panel" id="detail-panel">
+                <h2>Transaction Details</h2>
+                <div id="detail-content"></div>
             </div>
         </div>
-        <div class="detail-panel" id="detail-panel">
-            <h2>Transaction Details</h2>
-            <div id="detail-content"></div>
+    </div>
+
+    <!-- Top view (new) -->
+    <div id="view-top" class="view">
+        <div class="filter-bar">
+            <input type="text" id="top-filter-input" placeholder="Filter by hash, from address, or peer...">
+            <select id="top-filter-status">
+                <option value="">All statuses</option>
+                <option value="announced">Announced</option>
+                <option value="requested">Requested</option>
+                <option value="received">Received</option>
+                <option value="pooled">Pooled</option>
+                <option value="included">Included</option>
+                <option value="finalized">Finalized</option>
+                <option value="rejected">Rejected</option>
+            </select>
+        </div>
+        <div class="main-area">
+            <div class="table-area">
+                <div class="table-header" id="top-table-header">
+                    <span class="top-col-hash">Hash</span>
+                    <span class="top-col-status sortable" data-sort="status">Status</span>
+                    <span class="top-col-from">From</span>
+                    <span class="top-col-nonce sortable" data-sort="nonce">Nonce</span>
+                    <span class="top-col-value sortable" data-sort="value">Value</span>
+                    <span class="top-col-feecap sortable" data-sort="gasfeecap">Fee Cap</span>
+                    <span class="top-col-tipcap sortable" data-sort="gastipcap">Tip Cap</span>
+                    <span class="top-col-gas sortable" data-sort="gas">Gas</span>
+                    <span class="top-col-age sortable active-sort sort-desc" data-sort="age">Age</span>
+                    <span class="top-col-progress">Progress</span>
+                </div>
+                <div class="viewport" id="top-viewport">
+                    <div id="top-scroll-spacer"></div>
+                    <div id="top-row-container"></div>
+                </div>
+            </div>
+            <div class="detail-panel" id="top-detail-panel">
+                <h2>Transaction Details</h2>
+                <div id="top-detail-content"></div>
+            </div>
         </div>
     </div>
+
     <script src="app.js"></script>
 </body>
 </html>

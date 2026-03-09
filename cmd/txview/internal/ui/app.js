@@ -7,31 +7,34 @@
     // --- Constants ---
     const ROW_HEIGHT = 28;       // px per row (must match CSS)
     const OVERSCAN = 10;         // extra rows rendered above/below viewport
+    const CACHE_STALE_MS = 5000; // re-fetch top cache entries after this
 
-    // --- State ---
+    // --- Shared state ---
     let ws = null;
     let rpcEndpoint = '';
     let rpcId = 1;
-    const txs = new Map();       // hash -> event
+    const txs = new Map();       // hash -> event (from subscription)
     const pending = new Map();    // rpc id -> callback
     let selectedHash = null;
     let subId = null;
+    let activeTab = 'feed';      // 'feed' or 'top'
 
-    // Filtered/sorted view: array of hashes in display order (newest first).
+    // --- Feed view state ---
     let visibleHashes = [];
-    let viewDirty = true;        // true when visibleHashes needs rebuild
+    let feedViewDirty = true;
     let renderScheduled = false;
 
-    // --- DOM refs ---
+    // --- Top view state ---
+    const topCache = new Map();      // hash -> { info: TxInfo, fetchedAt: ms }
+    const topInflight = new Set();   // hashes being fetched
+    let topVisibleHashes = [];
+    let topViewDirty = true;
+    let topSortKey = 'age';
+    let topSortAsc = false;          // descending = oldest first for age
+
+    // --- DOM refs: shared ---
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
-    const viewport = document.getElementById('viewport');
-    const scrollSpacer = document.getElementById('scroll-spacer');
-    const rowContainer = document.getElementById('row-container');
-    const detailPanel = document.getElementById('detail-panel');
-    const detailContent = document.getElementById('detail-content');
-    const filterInput = document.getElementById('filter-input');
-    const filterStatus = document.getElementById('filter-status');
 
     const counters = {
         total: document.getElementById('cnt-total'),
@@ -44,20 +47,87 @@
         rejected: document.getElementById('cnt-rejected'),
     };
 
+    // --- DOM refs: feed view ---
+    const feedView = document.getElementById('view-feed');
+    const viewport = document.getElementById('viewport');
+    const scrollSpacer = document.getElementById('scroll-spacer');
+    const rowContainer = document.getElementById('row-container');
+    const detailPanel = document.getElementById('detail-panel');
+    const detailContent = document.getElementById('detail-content');
+    const filterInput = document.getElementById('filter-input');
+    const filterStatus = document.getElementById('filter-status');
+
+    // --- DOM refs: top view ---
+    const topView = document.getElementById('view-top');
+    const topViewport = document.getElementById('top-viewport');
+    const topScrollSpacer = document.getElementById('top-scroll-spacer');
+    const topRowContainer = document.getElementById('top-row-container');
+    const topDetailPanel = document.getElementById('top-detail-panel');
+    const topDetailContent = document.getElementById('top-detail-content');
+    const topFilterInput = document.getElementById('top-filter-input');
+    const topFilterStatus = document.getElementById('top-filter-status');
+    const topTableHeader = document.getElementById('top-table-header');
+
     // --- Init ---
     fetch('/config')
-        .then(r => r.json())
-        .then(cfg => { rpcEndpoint = cfg.rpcEndpoint; connect(); })
-        .catch(err => { statusText.textContent = 'config error: ' + err; });
+        .then(function(r) { return r.json(); })
+        .then(function(cfg) { rpcEndpoint = cfg.rpcEndpoint; connect(); })
+        .catch(function(err) { statusText.textContent = 'config error: ' + err; });
 
-    filterInput.addEventListener('input', function() { viewDirty = true; scheduleRender(); });
-    filterStatus.addEventListener('change', function() { viewDirty = true; scheduleRender(); });
+    // Feed view events.
+    filterInput.addEventListener('input', function() { feedViewDirty = true; scheduleRender(); });
+    filterStatus.addEventListener('change', function() { feedViewDirty = true; scheduleRender(); });
     viewport.addEventListener('scroll', scheduleRender);
 
-    // Update ages every 5 seconds.
-    setInterval(function() { if (visibleHashes.length > 0) scheduleRender(); }, 5000);
+    // Top view events.
+    topFilterInput.addEventListener('input', function() { topViewDirty = true; scheduleRender(); });
+    topFilterStatus.addEventListener('change', function() { topViewDirty = true; scheduleRender(); });
+    topViewport.addEventListener('scroll', scheduleRender);
 
-    // --- WebSocket ---
+    // Sortable column headers in top view.
+    topTableHeader.addEventListener('click', function(e) {
+        var span = e.target.closest('.sortable');
+        if (!span) return;
+        var key = span.dataset.sort;
+        if (topSortKey === key) {
+            topSortAsc = !topSortAsc;
+        } else {
+            topSortKey = key;
+            topSortAsc = false;
+        }
+        // Update header indicators.
+        var sortables = topTableHeader.querySelectorAll('.sortable');
+        for (var i = 0; i < sortables.length; i++) {
+            sortables[i].classList.remove('active-sort', 'sort-asc', 'sort-desc');
+        }
+        span.classList.add('active-sort', topSortAsc ? 'sort-asc' : 'sort-desc');
+        topViewDirty = true;
+        scheduleRender();
+    });
+
+    // Tab switching.
+    var tabs = document.querySelectorAll('.tab');
+    for (var i = 0; i < tabs.length; i++) {
+        tabs[i].addEventListener('click', function() {
+            var tab = this.dataset.tab;
+            if (tab === activeTab) return;
+            activeTab = tab;
+            for (var j = 0; j < tabs.length; j++) {
+                tabs[j].classList.toggle('active', tabs[j].dataset.tab === tab);
+            }
+            feedView.classList.toggle('active', tab === 'feed');
+            topView.classList.toggle('active', tab === 'top');
+            if (tab === 'top') topViewDirty = true;
+            scheduleRender();
+        });
+    }
+
+    // Periodic refresh (ages and top data).
+    setInterval(function() { scheduleRender(); }, 5000);
+
+    // ========================================================================
+    // WebSocket
+    // ========================================================================
     function connect() {
         console.log('[txview] connecting to', rpcEndpoint);
         ws = new WebSocket(rpcEndpoint);
@@ -84,32 +154,48 @@
         ws.onerror = function() { ws.close(); };
 
         ws.onmessage = function(msg) {
-            let data;
+            var data;
             try { data = JSON.parse(msg.data); } catch(e) { return; }
+
+            // Batch response (array of JSON-RPC results).
+            if (Array.isArray(data)) {
+                for (var i = 0; i < data.length; i++) {
+                    dispatchResponse(data[i]);
+                }
+                return;
+            }
+            // Subscription event.
             if (data.method === 'txtracker_subscription' && data.params) {
                 handleEvent(data.params.result);
                 return;
             }
-            if (data.id !== undefined && pending.has(data.id)) {
-                const cb = pending.get(data.id);
-                pending.delete(data.id);
-                cb(data.result, data.error);
-            }
+            // Single RPC response.
+            dispatchResponse(data);
         };
     }
 
+    function dispatchResponse(data) {
+        if (data.id !== undefined && pending.has(data.id)) {
+            var cb = pending.get(data.id);
+            pending.delete(data.id);
+            cb(data.result, data.error);
+        }
+    }
+
     function rpcCall(method, params, callback) {
-        const id = rpcId++;
+        var id = rpcId++;
         if (callback) pending.set(id, callback);
         ws.send(JSON.stringify({jsonrpc: '2.0', id: id, method: method, params: params}));
     }
 
-    // --- Event handling ---
+    // ========================================================================
+    // Event handling (shared)
+    // ========================================================================
     function handleEvent(ev) {
         if (!ev || !ev.txHash) return;
-        const hash = ev.txHash;
+        var hash = ev.txHash;
 
-        const old = txs.get(hash);
+        var old = txs.get(hash);
         if (old) {
             decrementCounter(old.newStatus);
         }
@@ -119,86 +205,93 @@
         incrementCounter(ev.newStatus);
         counters.total.textContent = txs.size;
 
-        viewDirty = true;
+        // Invalidate top cache for this tx (status changed).
+        topCache.delete(hash);
+
+        feedViewDirty = true;
+        topViewDirty = true;
         scheduleRender();
     }
 
     function incrementCounter(status) {
-        const el = counters[status];
+        var el = counters[status];
         if (el) el.textContent = parseInt(el.textContent) + 1;
     }
 
     function decrementCounter(status) {
-        const el = counters[status];
+        var el = counters[status];
         if (el) {
-            const v = parseInt(el.textContent) - 1;
+            var v = parseInt(el.textContent) - 1;
             el.textContent = v < 0 ? 0 : v;
         }
     }
 
-    // --- Filtering ---
-    function matchesFilter(hash, ev) {
-        const status = filterStatus.value;
+    // ========================================================================
+    // Render dispatch
+    // ========================================================================
+    function scheduleRender() {
+        if (renderScheduled) return;
+        renderScheduled = true;
+        requestAnimationFrame(render);
+    }
+
+    function render() {
+        renderScheduled = false;
+        if (activeTab === 'feed') {
+            renderFeedViewport();
+        } else {
+            renderTopViewport();
+        }
+    }
+
+    // ========================================================================
+    // Feed view
+    // ========================================================================
+    function matchesFeedFilter(hash, ev) {
+        var status = filterStatus.value;
         if (status && ev.newStatus !== status) return false;
-        const text = filterInput.value;
+        var text = filterInput.value;
         if (text) {
-            const lower = text.toLowerCase();
+            var lower = text.toLowerCase();
             if (!hash.toLowerCase().includes(lower) &&
                 !(ev.peer || '').toLowerCase().includes(lower)) return false;
         }
         return true;
     }
 
-    function rebuildVisibleHashes() {
-        visibleHashes = [];
-        // Iterate in reverse insertion order (newest first).
-        // Map preserves insertion order; collect then reverse.
-        const all = [];
+    function rebuildFeedHashes() {
+        var all = [];
         txs.forEach(function(ev, hash) {
-            if (matchesFilter(hash, ev)) all.push(hash);
+            if (matchesFeedFilter(hash, ev)) all.push(hash);
         });
-        // Reverse so newest (last inserted) is first.
         visibleHashes = all.reverse();
-        viewDirty = false;
+        feedViewDirty = false;
     }
 
-    // --- Virtual scroll rendering ---
-    function scheduleRender() {
-        if (renderScheduled) return;
-        renderScheduled = true;
-        requestAnimationFrame(renderViewport);
-    }
+    function renderFeedViewport() {
+        if (feedViewDirty) rebuildFeedHashes();
 
-    function renderViewport() {
-        renderScheduled = false;
+        var totalRows = visibleHashes.length;
+        scrollSpacer.style.height = (totalRows * ROW_HEIGHT) + 'px';
 
-        if (viewDirty) rebuildVisibleHashes();
+        var scrollTop = viewport.scrollTop;
+        var viewHeight = viewport.clientHeight;
+        var firstVisible = Math.floor(scrollTop / ROW_HEIGHT);
+        var lastVisible = Math.ceil((scrollTop + viewHeight) / ROW_HEIGHT);
+        var startIdx = Math.max(0, firstVisible - OVERSCAN);
+        var endIdx = Math.min(totalRows, lastVisible + OVERSCAN);
 
-        const totalRows = visibleHashes.length;
-        const totalHeight = totalRows * ROW_HEIGHT;
-        scrollSpacer.style.height = totalHeight + 'px';
-
-        const scrollTop = viewport.scrollTop;
-        const viewHeight = viewport.clientHeight;
-
-        const firstVisible = Math.floor(scrollTop / ROW_HEIGHT);
-        const lastVisible = Math.ceil((scrollTop + viewHeight) / ROW_HEIGHT);
-
-        const startIdx = Math.max(0, firstVisible - OVERSCAN);
-        const endIdx = Math.min(totalRows, lastVisible + OVERSCAN);
-
-        // Position the row container at the correct offset.
         rowContainer.style.transform = 'translateY(' + (startIdx * ROW_HEIGHT) + 'px)';
 
-        const now = Date.now();
-        const count = endIdx - startIdx;
+        var now = Date.now();
+        var count = endIdx - startIdx;
 
-        // Reuse existing row elements where possible.
+        // Reuse existing row elements.
         while (rowContainer.children.length > count) {
             rowContainer.removeChild(rowContainer.lastChild);
         }
         while (rowContainer.children.length < count) {
-            const row = document.createElement('div');
+            var row = document.createElement('div');
             row.className = 'vrow';
             row.innerHTML =
                 '<span class="col-hash"></span>' +
@@ -210,29 +303,26 @@
             rowContainer.appendChild(row);
         }
 
-        for (let i = 0; i < count; i++) {
-            const idx = startIdx + i;
-            const hash = visibleHashes[idx];
-            const ev = txs.get(hash);
-            const row = rowContainer.children[i];
+        for (var i = 0; i < count; i++) {
+            var idx = startIdx + i;
+            var hash = visibleHashes[idx];
+            var ev = txs.get(hash);
+            var r = rowContainer.children[i];
 
-            row.dataset.hash = hash;
-            row.onclick = function() { selectTx(hash); };
+            r.dataset.hash = hash;
+            r.onclick = (function(h) { return function() { selectTx(h, 'feed'); }; })(hash);
 
             if (hash === selectedHash) {
-                row.classList.add('selected');
+                r.classList.add('selected');
             } else {
-                row.classList.remove('selected');
+                r.classList.remove('selected');
             }
 
-            const cols = row.children;
-            const shortHash = hash.substring(0, 10) + '\u2026' + hash.substring(hash.length - 6);
-            cols[0].textContent = shortHash;
+            var cols = r.children;
+            cols[0].textContent = shortHash(hash);
             cols[0].title = hash;
-
             cols[1].textContent = ev.newStatus;
             cols[1].className = 'col-status badge badge-' + ev.newStatus;
-
             cols[2].textContent = ev.peer || '-';
             cols[3].textContent = ev.blockNum || '-';
             cols[4].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
@@ -240,29 +330,238 @@
         }
     }
 
-    // --- Detail panel ---
-    function selectTx(hash) {
+    // ========================================================================
+    // Top view
+    // ========================================================================
+    function matchesTopFilter(hash, ev) {
+        var status = topFilterStatus.value;
+        if (status && ev.newStatus !== status) return false;
+        var text = topFilterInput.value;
+        if (text) {
+            var lower = text.toLowerCase();
+            var cached = topCache.get(hash);
+            var from = cached ? (cached.info.From || '') : '';
+            if (!hash.toLowerCase().includes(lower) &&
+                !from.toLowerCase().includes(lower) &&
+                !(ev.peer || '').toLowerCase().includes(lower)) return false;
+        }
+        return true;
+    }
+
+    function rebuildTopHashes() {
+        var all = [];
+        txs.forEach(function(ev, hash) {
+            if (matchesTopFilter(hash, ev)) all.push(hash);
+        });
+
+        // Sort by the selected key. Hashes without cached info go to bottom.
+        all.sort(function(a, b) {
+            var ca = topCache.get(a);
+            var cb = topCache.get(b);
+            if (!ca && !cb) return 0;
+            if (!ca) return 1;
+            if (!cb) return -1;
+
+            var cmp = 0;
+            var ia = ca.info, ib = cb.info;
+            switch (topSortKey) {
+                case 'age':
+                    cmp = (ia.FirstSeen || 0) - (ib.FirstSeen || 0);
+                    break;
+                case 'status':
+                    cmp = statusOrd(ia.Status) - statusOrd(ib.Status);
+                    break;
+                case 'nonce':
+                    cmp = (ia.Nonce || 0) - (ib.Nonce || 0);
+                    break;
+                case 'gas':
+                    cmp = (ia.Gas || 0) - (ib.Gas || 0);
+                    break;
+                case 'value':
+                    cmp = compareBigInt(ia.Value, ib.Value);
+                    break;
+                case 'gasfeecap':
+                    cmp = compareBigInt(ia.GasFeeCap, ib.GasFeeCap);
+                    break;
+                case 'gastipcap':
+                    cmp = compareBigInt(ia.GasTipCap, ib.GasTipCap);
+                    break;
+            }
+            return topSortAsc ? cmp : -cmp;
+        });
+        topVisibleHashes = all;
+        topViewDirty = false;
+    }
+
+    function renderTopViewport() {
+        if (topViewDirty) rebuildTopHashes();
+
+        var totalRows = topVisibleHashes.length;
+        topScrollSpacer.style.height = (totalRows * ROW_HEIGHT) + 'px';
+
+        var scrollTop = topViewport.scrollTop;
+        var viewHeight = topViewport.clientHeight;
+        var firstVisible = Math.floor(scrollTop / ROW_HEIGHT);
+        var lastVisible = Math.ceil((scrollTop + viewHeight) / ROW_HEIGHT);
+        var startIdx = Math.max(0, firstVisible - OVERSCAN);
+        var endIdx = Math.min(totalRows, lastVisible + OVERSCAN);
+
+        topRowContainer.style.transform = 'translateY(' + (startIdx * ROW_HEIGHT) + 'px)';
+
+        var now = Date.now();
+        var count = endIdx - startIdx;
+
+        // Reuse row elements.
+        while (topRowContainer.children.length > count) {
+            topRowContainer.removeChild(topRowContainer.lastChild);
+        }
+        while (topRowContainer.children.length < count) {
+            var row = document.createElement('div');
+            row.className = 'vrow';
+            row.innerHTML =
+                '<span class="top-col-hash"></span>' +
+                '<span class="top-col-status"></span>' +
+                '<span class="top-col-from"></span>' +
+                '<span class="top-col-nonce"></span>' +
+                '<span class="top-col-value"></span>' +
+                '<span class="top-col-feecap"></span>' +
+                '<span class="top-col-tipcap"></span>' +
+                '<span class="top-col-gas"></span>' +
+                '<span class="top-col-age"></span>' +
+                '<span class="top-col-progress"></span>';
+            topRowContainer.appendChild(row);
+        }
+
+        // Collect hashes that need fetching.
+        var fetchNeeded = [];
+
+        for (var i = 0; i < count; i++) {
+            var idx = startIdx + i;
+            var hash = topVisibleHashes[idx];
+            var ev = txs.get(hash);
+            var r = topRowContainer.children[i];
+            var cached = topCache.get(hash);
+
+            r.dataset.hash = hash;
+            r.onclick = (function(h) { return function() { selectTx(h, 'top'); }; })(hash);
+
+            if (hash === selectedHash) {
+                r.classList.add('selected');
+            } else {
+                r.classList.remove('selected');
+            }
+
+            var cols = r.children;
+            cols[0].textContent = shortHash(hash);
+            cols[0].title = hash;
+
+            // Status from event (always available).
+            cols[1].textContent = ev.newStatus;
+            cols[1].className = 'top-col-status badge badge-' + ev.newStatus;
+
+            if (cached) {
+                var info = cached.info;
+                cols[2].textContent = shortAddr(info.From);
+                cols[2].title = info.From || '';
+                cols[3].textContent = info.Nonce || '0';
+                cols[4].textContent = formatWei(info.Value);
+                cols[5].textContent = formatGwei(info.GasFeeCap);
+                cols[6].textContent = formatGwei(info.GasTipCap);
+                cols[7].textContent = info.Gas ? formatNumber(info.Gas) : '-';
+                cols[8].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
+                cols[9].innerHTML = renderProgress(info);
+            } else {
+                // Not yet fetched.
+                cols[2].textContent = '\u2026';
+                cols[3].textContent = '\u2026';
+                cols[4].textContent = '\u2026';
+                cols[5].textContent = '\u2026';
+                cols[6].textContent = '\u2026';
+                cols[7].textContent = '\u2026';
+                cols[8].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
+                cols[9].textContent = '\u2026';
+
+                // Need to fetch.
+                if (!topInflight.has(hash)) {
+                    var entry = topCache.get(hash);
+                    if (!entry || (now - entry.fetchedAt) > CACHE_STALE_MS) {
+                        fetchNeeded.push(hash);
+                    }
+                }
+            }
+        }
+
+        // Batch-fetch visible rows that need data.
+        if (fetchNeeded.length > 0) {
+            fetchTopBatch(fetchNeeded);
+        }
+    }
+
+    function fetchTopBatch(hashes) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+        var batch = [];
+        for (var i = 0; i < hashes.length; i++) {
+            var h = hashes[i];
+            topInflight.add(h);
+            var id = rpcId++;
+            batch.push({id: id, hash: h});
+            // Register callback per id.
+            (function(hash, reqId) {
+                pending.set(reqId, function(result, err) {
+                    topInflight.delete(hash);
+                    if (!err && result) {
+                        topCache.set(hash, {info: result, fetchedAt: Date.now()});
+                    }
+                    scheduleRender();
+                });
+            })(h, id);
+        }
+
+        // Send as JSON-RPC batch.
+        var msgs = [];
+        for (var j = 0; j < batch.length; j++) {
+            msgs.push({jsonrpc: '2.0', id: batch[j].id, method: 'txtracker_getTx', params: [batch[j].hash]});
+        }
+        ws.send(JSON.stringify(msgs));
+    }
+
+    // ========================================================================
+    // Detail panel (shared)
+    // ========================================================================
+    function selectTx(hash, view) {
         selectedHash = hash;
         scheduleRender();
 
-        detailPanel.classList.add('visible');
-        detailContent.innerHTML = '<p>Loading\u2026</p>';
+        var panel = (view === 'top') ? topDetailPanel : detailPanel;
+        var content = (view === 'top') ? topDetailContent : detailContent;
+        panel.classList.add('visible');
 
+        // If top view has cached info, render immediately.
+        if (view === 'top') {
+            var cached = topCache.get(hash);
+            if (cached) {
+                renderDetail(hash, cached.info, content);
+                return;
+            }
+        }
+
+        content.innerHTML = '<p>Loading\u2026</p>';
         rpcCall('txtracker_getTx', [hash], function(result, err) {
             if (err) {
-                detailContent.innerHTML = '<p>Error: ' + escapeHtml(JSON.stringify(err)) + '</p>';
+                content.innerHTML = '<p>Error: ' + escapeHtml(JSON.stringify(err)) + '</p>';
                 return;
             }
             if (!result) {
-                detailContent.innerHTML = '<p>Transaction not found in tracker</p>';
+                content.innerHTML = '<p>Transaction not found in tracker</p>';
                 return;
             }
-            renderDetail(hash, result);
+            renderDetail(hash, result, content);
         });
     }
 
-    function renderDetail(hash, info) {
-        const fields = [
+    function renderDetail(hash, info, container) {
+        var fields = [
             ['Hash', hash],
             ['Status', info.Status],
             ['Local', info.Local ? 'yes' : 'no'],
@@ -289,18 +588,73 @@
             ['Reject Error', info.RejectErr || '-'],
         ];
 
-        let html = '';
-        for (const [label, value] of fields) {
-            html += '<div class="field"><label>' + escapeHtml(label) +
-                    '</label><div class="value">' + escapeHtml(String(value)) + '</div></div>';
+        var html = '';
+        for (var i = 0; i < fields.length; i++) {
+            html += '<div class="field"><label>' + escapeHtml(fields[i][0]) +
+                    '</label><div class="value">' + escapeHtml(String(fields[i][1])) + '</div></div>';
         }
-        detailContent.innerHTML = html;
+        container.innerHTML = html;
     }
 
-    // --- Helpers ---
+    // ========================================================================
+    // Progress rendering (Top view)
+    // ========================================================================
+    function renderProgress(info) {
+        if (!info || !info.FirstSeen) return '<span class="top-loading">-</span>';
+        var base = info.FirstSeen;
+        var steps = [];
+
+        // Always show "seen" as the starting point.
+        steps.push('<span class="step step-announced">seen</span>');
+
+        if (info.Requested) {
+            steps.push('<span class="step step-requested">+' + nanosDelta(info.Requested, base) + ' req</span>');
+        }
+        if (info.Received) {
+            steps.push('<span class="step step-received">+' + nanosDelta(info.Received, base) + ' rcv</span>');
+        }
+        if (info.Pooled) {
+            steps.push('<span class="step step-pooled">+' + nanosDelta(info.Pooled, base) + ' pool</span>');
+        }
+        if (info.Included) {
+            steps.push('<span class="step step-included">+' + nanosDelta(info.Included, base) + ' incl</span>');
+        }
+        if (info.Finalized) {
+            steps.push('<span class="step step-finalized">+' + nanosDelta(info.Finalized, base) + ' final</span>');
+        }
+        if (info.RejectErr) {
+            steps.push('<span class="step step-rejected">rej</span>');
+        }
+
+        return '<span class="progress">' + steps.join('<span class="arrow">\u2192</span>') + '</span>';
+    }
+
+    function nanosDelta(ts, base) {
+        var deltaNs = ts - base;
+        if (deltaNs < 0) deltaNs = 0;
+        var deltaSec = deltaNs / 1e9;
+        if (deltaSec < 0.1) return '0s';
+        if (deltaSec < 10) return deltaSec.toFixed(1) + 's';
+        if (deltaSec < 60) return Math.floor(deltaSec) + 's';
+        if (deltaSec < 3600) return Math.floor(deltaSec / 60) + 'm' + Math.floor(deltaSec % 60) + 's';
+        return Math.floor(deltaSec / 3600) + 'h' + Math.floor((deltaSec % 3600) / 60) + 'm';
+    }
+
+    // ========================================================================
+    // Helpers
+    // ========================================================================
+    function shortHash(hash) {
+        return hash.substring(0, 10) + '\u2026' + hash.substring(hash.length - 6);
+    }
+
+    function shortAddr(addr) {
+        if (!addr || addr === '0x0000000000000000000000000000000000000000') return '-';
+        return addr.substring(0, 8) + '\u2026' + addr.substring(addr.length - 4);
+    }
+
     function timeSince(ms) {
         if (!ms || ms < 0) return '0s';
-        const secs = Math.floor(ms / 1000);
+        var secs = Math.floor(ms / 1000);
         if (secs < 60) return secs + 's';
         if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
         return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
@@ -308,10 +662,53 @@
 
     function formatTime(nanos) {
         if (!nanos) return '-';
-        const secs = Math.floor(nanos / 1e9);
+        var secs = Math.floor(nanos / 1e9);
         if (secs < 60) return secs + 's uptime';
         if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's uptime';
         return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm uptime';
+    }
+
+    function formatWei(val) {
+        if (!val) return '0';
+        // Show in ETH if large enough.
+        try {
+            var n = BigInt(val);
+            if (n === 0n) return '0';
+            var eth = Number(n) / 1e18;
+            if (eth >= 0.001) return eth.toFixed(4);
+            var gwei = Number(n) / 1e9;
+            if (gwei >= 1) return gwei.toFixed(1) + 'G';
+            return val;
+        } catch(e) { return val; }
+    }
+
+    function formatGwei(val) {
+        if (!val) return '-';
+        try {
+            var n = Number(BigInt(val)) / 1e9;
+            if (n < 0.01) return '<0.01';
+            if (n < 100) return n.toFixed(2);
+            return Math.floor(n).toString();
+        } catch(e) { return val; }
+    }
+
+    function formatNumber(n) {
+        if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+        if (n >= 1e3) return (n / 1e3).toFixed(0) + 'k';
+        return String(n);
+    }
+
+    var STATUS_ORD = {announced:1, requested:2, received:3, pooled:4, included:5, finalized:6, rejected:7};
+    function statusOrd(s) { return STATUS_ORD[s] || 0; }
+
+    function compareBigInt(a, b) {
+        try {
+            var ba = BigInt(a || '0');
+            var bb = BigInt(b || '0');
+            if (ba < bb) return -1;
+            if (ba > bb) return 1;
+            return 0;
+        } catch(e) { return 0; }
     }
 
     function escapeHtml(s) {
