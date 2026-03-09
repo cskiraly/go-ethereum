@@ -635,6 +635,139 @@ func TestReceiveRepairsLocalFlag(t *testing.T) {
 	}
 }
 
+func TestEventFeed(t *testing.T) {
+	tr, _, chain, _ := testTracker(0)
+	defer tr.Stop()
+
+	// Subscribe to events.
+	eventCh := make(chan TxTrackerEvent, 64)
+	sub := tr.SubscribeEvents(eventCh)
+	defer sub.Unsubscribe()
+
+	// Use a real tx so ChainEvent hash matches.
+	tx := types.NewTx(&types.LegacyTx{Nonce: 100, GasPrice: big.NewInt(1), Gas: 21000})
+	txHash := tx.Hash()
+
+	// Step 1: Announced
+	tr.NotifyAnnounced("peerA", []common.Hash{txHash}, []byte{2}, []uint32{500})
+	waitStep(t, tr)
+
+	// Step 2: Received
+	tr.NotifyReceived("peerB", []common.Hash{txHash})
+	waitStep(t, tr)
+
+	// Step 3: Pooled
+	tr.NotifyPooled([]common.Hash{txHash})
+	waitStep(t, tr)
+
+	// Step 4: Included
+	header := makeHeader(50, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header,
+		Transactions: []*types.Transaction{tx},
+	})
+	waitStep(t, tr)
+
+	// Step 5: Finalized
+	chain.finalBlock = makeHeader(100, common.Hash{0xaa})
+	header2 := makeHeader(51, header.Hash())
+	chain.sendChainEvent(core.ChainEvent{Header: header2})
+	waitStep(t, tr)
+
+	// Collect all events.
+	var events []TxTrackerEvent
+	for {
+		select {
+		case ev := <-eventCh:
+			events = append(events, ev)
+		default:
+			goto done
+		}
+	}
+done:
+
+	// Expect: Announced, Received, Pooled, Included, Finalized
+	expected := []struct {
+		old, new TxStatus
+	}{
+		{0, TxAnnounced},
+		{TxAnnounced, TxReceived},
+		{TxReceived, TxPooled},
+		{TxPooled, TxIncluded},
+		{TxIncluded, TxFinalized},
+	}
+	if len(events) != len(expected) {
+		t.Fatalf("expected %d events, got %d: %+v", len(expected), len(events), events)
+	}
+	for i, exp := range expected {
+		if events[i].OldStatus != exp.old || events[i].NewStatus != exp.new {
+			t.Errorf("event %d: expected (%v→%v), got (%v→%v)", i, exp.old, exp.new, events[i].OldStatus, events[i].NewStatus)
+		}
+		if events[i].TxHash != txHash {
+			t.Errorf("event %d: unexpected hash %v", i, events[i].TxHash)
+		}
+	}
+	// Verify peer field on the first two events.
+	if events[0].Peer != "peerA" {
+		t.Errorf("announce event: expected peer peerA, got %q", events[0].Peer)
+	}
+	if events[1].Peer != "peerB" {
+		t.Errorf("receive event: expected peer peerB, got %q", events[1].Peer)
+	}
+}
+
+func TestEventFeedReorg(t *testing.T) {
+	tr, _, chain, _ := testTracker(0)
+	defer tr.Stop()
+
+	eventCh := make(chan TxTrackerEvent, 64)
+	sub := tr.SubscribeEvents(eventCh)
+	defer sub.Unsubscribe()
+
+	tx := types.NewTx(&types.LegacyTx{Nonce: 101, GasPrice: big.NewInt(1), Gas: 21000})
+	txHash := tx.Hash()
+
+	tr.NotifyPooled([]common.Hash{txHash})
+	waitStep(t, tr)
+
+	// Include in block 10.
+	header10 := makeHeader(10, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header10,
+		Transactions: []*types.Transaction{tx},
+	})
+	waitStep(t, tr)
+
+	// Reorg: new block 10 with different parent.
+	reorgHeader := makeHeader(10, common.Hash{0xde, 0xad})
+	chain.sendChainEvent(core.ChainEvent{Header: reorgHeader})
+	waitStep(t, tr)
+
+	// Drain events.
+	var events []TxTrackerEvent
+	for {
+		select {
+		case ev := <-eventCh:
+			events = append(events, ev)
+		default:
+			goto done
+		}
+	}
+done:
+
+	// Find the reorg event (TxIncluded → TxPooled).
+	found := false
+	for _, ev := range events {
+		if ev.TxHash == txHash && ev.OldStatus == TxIncluded && ev.NewStatus == TxPooled {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected reorg event (TxIncluded→TxPooled), events: %+v", events)
+	}
+}
+
 func TestStatusString(t *testing.T) {
 	tests := []struct {
 		status TxStatus

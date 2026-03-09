@@ -20,6 +20,7 @@ package txtracker
 
 import (
 	"container/list"
+	"encoding/json"
 	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -60,6 +61,24 @@ func (s TxStatus) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// MarshalJSON serializes TxStatus as a JSON string (e.g., "pooled").
+func (s TxStatus) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
+}
+
+// TxTrackerEvent is emitted whenever a tracked transaction changes state.
+type TxTrackerEvent struct {
+	TxHash    common.Hash    `json:"txHash"`
+	OldStatus TxStatus       `json:"oldStatus"`
+	NewStatus TxStatus       `json:"newStatus"`
+	Timestamp mclock.AbsTime `json:"timestamp"`
+	Peer      string         `json:"peer,omitempty"`
+	BlockNum  uint64         `json:"blockNum,omitempty"`
+	BlockHash common.Hash    `json:"blockHash,omitempty"`
+	RejectErr string         `json:"rejectErr,omitempty"`
+	Local     bool           `json:"local,omitempty"`
 }
 
 const (
@@ -219,6 +238,9 @@ type Tracker struct {
 	statusCh    chan *statusQuery
 	peerStatsCh chan *peerStatsQuery
 
+	// Event feed for state transition notifications.
+	eventFeed event.Feed
+
 	quit  chan struct{}
 	step  chan struct{} // Test synchronization: sent after each event is processed
 	ready chan struct{} // Closed when event loop has subscribed to feeds
@@ -357,6 +379,26 @@ func (t *Tracker) GetPeerStats(peer string) PeerStats {
 	}
 }
 
+// SubscribeEvents creates a subscription for transaction state transition events.
+func (t *Tracker) SubscribeEvents(ch chan<- TxTrackerEvent) event.Subscription {
+	return t.eventFeed.Subscribe(ch)
+}
+
+// emitEvent sends a state transition event to all subscribers.
+func (t *Tracker) emitEvent(hash common.Hash, oldStatus, newStatus TxStatus, rec *txRecord, peer string) {
+	t.eventFeed.Send(TxTrackerEvent{
+		TxHash:    hash,
+		OldStatus: oldStatus,
+		NewStatus: newStatus,
+		Timestamp: t.clock.Now(),
+		Peer:      peer,
+		BlockNum:  rec.blockNum,
+		BlockHash: rec.blockHash,
+		RejectErr: rec.rejectErr,
+		Local:     rec.local,
+	})
+}
+
 // loop is the main event loop, processing all events sequentially to avoid locks.
 func (t *Tracker) loop() {
 	// Subscribe to chain events for inclusion/finalization tracking.
@@ -469,6 +511,7 @@ func (t *Tracker) handleAnnounce(ev *announceEvent) {
 			rec.txSize = ev.sizes[i]
 		}
 		t.insertRecord(hash, rec)
+		t.emitEvent(hash, 0, TxAnnounced, rec, ev.peer)
 		txTrackedMeter.Mark(1)
 
 		// This peer is the first announcer.
@@ -495,15 +538,18 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 				deliverer: ev.peer,
 			}
 			t.insertRecord(hash, rec)
+			t.emitEvent(hash, 0, TxReceived, rec, ev.peer)
 			txTrackedMeter.Mark(1)
 			continue
 		}
 		// Only advance if status is before Received (i.e., Announced).
 		if rec.status < TxReceived {
+			oldStatus := rec.status
 			rec.status = TxReceived
 			rec.received = now
 			rec.deliverer = ev.peer
 			t.touchLRU(rec)
+			t.emitEvent(hash, oldStatus, TxReceived, rec, ev.peer)
 		} else if rec.local && rec.deliverer == "" {
 			// Repair race: handleNewTxs created this as local before
 			// the receive event was processed.
@@ -531,14 +577,17 @@ func (t *Tracker) handlePooled(ev *pooledEvent) {
 				pooled:    now,
 			}
 			t.insertRecord(hash, rec)
+			t.emitEvent(hash, 0, TxPooled, rec, "")
 			txTrackedMeter.Mark(1)
 			continue
 		}
 		// Only advance if not already pooled or beyond.
 		if rec.status < TxPooled {
+			oldStatus := rec.status
 			rec.status = TxPooled
 			rec.pooled = now
 			t.touchLRU(rec)
+			t.emitEvent(hash, oldStatus, TxPooled, rec, "")
 
 			// Update useful delivery stat for the deliverer.
 			if rec.deliverer != "" {
@@ -567,16 +616,19 @@ func (t *Tracker) handleRejected(ev *rejectedEvent) {
 				rec.rejectErr = ev.errs[i].Error()
 			}
 			t.insertRecord(hash, rec)
+			t.emitEvent(hash, 0, TxRejected, rec, "")
 			txTrackedMeter.Mark(1)
 			continue
 		}
 		// Only mark as rejected if not already pooled or included.
 		if rec.status < TxPooled {
+			oldStatus := rec.status
 			rec.status = TxRejected
 			if i < len(ev.errs) && ev.errs[i] != nil {
 				rec.rejectErr = ev.errs[i].Error()
 			}
 			t.touchLRU(rec)
+			t.emitEvent(hash, oldStatus, TxRejected, rec, "")
 		}
 	}
 }
@@ -605,11 +657,13 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 			continue
 		}
 		if rec.status != TxFinalized {
+			oldStatus := rec.status
 			rec.status = TxIncluded
 			rec.included = now
 			rec.blockNum = blockNum
 			rec.blockHash = blockHash
 			t.touchLRU(rec)
+			t.emitEvent(hash, oldStatus, TxIncluded, rec, "")
 			txIncludedMeter.Mark(1)
 		}
 	}
@@ -630,6 +684,7 @@ func (t *Tracker) handleReorg(newBlockNum uint64) {
 			rec.blockNum = 0
 			rec.blockHash = common.Hash{}
 			t.touchLRU(rec)
+			t.emitEvent(hash, TxIncluded, TxPooled, rec, "")
 			txReorgedMeter.Mark(1)
 		}
 	}
@@ -647,11 +702,12 @@ func (t *Tracker) checkFinalization() {
 	}
 	finalNum := finalBlock.Number.Uint64()
 
-	for _, rec := range t.txs {
+	for hash, rec := range t.txs {
 		if rec.status == TxIncluded && rec.blockNum <= finalNum {
 			rec.status = TxFinalized
 			rec.finalized = t.clock.Now()
 			t.touchLRU(rec)
+			t.emitEvent(hash, TxIncluded, TxFinalized, rec, "")
 			txFinalizedMeter.Mark(1)
 		}
 	}
@@ -678,6 +734,7 @@ func (t *Tracker) handleNewTxs(ev core.NewTxsEvent) {
 			pooled:    now,
 		}
 		t.insertRecord(hash, rec)
+		t.emitEvent(hash, 0, TxPooled, rec, "")
 		txTrackedMeter.Mark(1)
 		txLocalMeter.Mark(1)
 	}
