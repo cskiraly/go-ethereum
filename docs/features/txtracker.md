@@ -99,6 +99,50 @@ Standalone web tool for visualizing transaction lifecycles:
 - Scrollable table with status badges, filter by hash/peer/status
 - Detail panel fetches full info via `txtracker_getTx`
 
+#### Building
+
+```bash
+go build -o txview ./cmd/txview
+```
+
+#### Running
+
+Start geth with the txtracker API enabled over WebSocket:
+
+```bash
+geth --ws --ws.api txtracker
+```
+
+Then start txview pointing at geth's WebSocket endpoint:
+
+```bash
+./txview --rpc ws://localhost:8546 --addr localhost:8670
+```
+
+Open http://localhost:8670 in a browser.
+
+**Flags:**
+
+| Flag     | Default                | Description                    |
+|----------|------------------------|--------------------------------|
+| `--rpc`  | `ws://localhost:8546`  | Geth WebSocket RPC endpoint    |
+| `--addr` | `localhost:8670`       | Local HTTP listen address      |
+
+#### Remote access
+
+txview binds to localhost by default. To view the UI from another machine,
+use an SSH tunnel (recommended):
+
+```bash
+# From your local machine:
+ssh -L 8670:localhost:8670 user@remote-host
+# Then open http://localhost:8670 locally
+```
+
+Alternatively, bind to all interfaces with `--addr 0.0.0.0:8670`. In that
+case geth also needs `--ws.addr 0.0.0.0` and appropriate firewall rules,
+since the browser connects directly to geth's WebSocket.
+
 ## Future Work
 
 - Use tracker data for peer scoring (bandwidth waste detection)
