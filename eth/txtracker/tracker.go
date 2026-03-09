@@ -915,8 +915,14 @@ func fillTxMeta(rec *txRecord, tx *types.Transaction) {
 	rec.gasTipCap = tx.GasTipCap()
 	rec.value = tx.Value()
 	rec.to = tx.To()
-	if from, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx); err == nil {
-		rec.from = from
+	if chainID := tx.ChainId(); chainID != nil && chainID.Sign() > 0 {
+		if from, err := types.Sender(types.LatestSignerForChainID(chainID), tx); err == nil {
+			rec.from = from
+		}
+	} else {
+		if from, err := types.Sender(types.HomesteadSigner{}, tx); err == nil {
+			rec.from = from
+		}
 	}
 }
 
