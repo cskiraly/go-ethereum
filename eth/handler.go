@@ -29,6 +29,7 @@ import (
 
 	"github.com/dchest/siphash"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/txpool"
@@ -36,6 +37,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/downloader"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/eth/fetcher"
+	"github.com/ethereum/go-ethereum/eth/txtracker"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/eth/protocols/snap"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -123,6 +125,7 @@ type handler struct {
 
 	downloader     *downloader.Downloader
 	txFetcher      *fetcher.TxFetcher
+	txTracker      *txtracker.Tracker
 	peers          *peerSet
 	txBroadcastKey [16]byte
 
@@ -177,7 +180,24 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		return p.RequestTxs(hashes)
 	}
 	addTxs := func(txs []*types.Transaction) []error {
-		return h.txpool.Add(txs, false)
+		errs := h.txpool.Add(txs, false)
+		var pooled, rejHashes []common.Hash
+		var rejErrs []error
+		for i, err := range errs {
+			if err == nil {
+				pooled = append(pooled, txs[i].Hash())
+			} else {
+				rejHashes = append(rejHashes, txs[i].Hash())
+				rejErrs = append(rejErrs, err)
+			}
+		}
+		if len(pooled) > 0 {
+			h.txTracker.NotifyPooled(pooled)
+		}
+		if len(rejHashes) > 0 {
+			h.txTracker.NotifyRejected(rejHashes, rejErrs)
+		}
+		return errs
 	}
 	validateMeta := func(tx common.Hash, kind byte) error {
 		if h.txpool.Has(tx) {
@@ -189,6 +209,12 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		return nil
 	}
 	h.txFetcher = fetcher.NewTxFetcher(h.chain, validateMeta, addTxs, fetchTx, h.removePeer)
+	h.txTracker = txtracker.New(txtracker.Config{
+		MaxEntries: 65536,
+		Clock:      mclock.System{},
+		Chain:      config.Chain,
+		TxPool:     h.txpool,
+	})
 	return h, nil
 }
 
@@ -403,6 +429,7 @@ func (h *handler) unregisterPeer(id string) {
 	}
 	h.downloader.UnregisterPeer(id)
 	h.txFetcher.Drop(id)
+	h.txTracker.NotifyPeerDrop(id)
 
 	if err := h.peers.unregisterPeer(id); err != nil {
 		logger.Error("Ethereum peer removal failed", "err", err)
@@ -425,6 +452,7 @@ func (h *handler) Start(maxPeers int) {
 
 	// start sync handlers
 	h.txFetcher.Start()
+	h.txTracker.Start()
 
 	// start peer handler tracker
 	h.wg.Add(1)
@@ -435,6 +463,7 @@ func (h *handler) Stop() {
 	h.txsSub.Unsubscribe() // quits txBroadcastLoop
 	h.blockRange.stop()
 	h.txFetcher.Stop()
+	h.txTracker.Stop()
 	h.downloader.Terminate()
 
 	// Quit chainSync and txsync64.
