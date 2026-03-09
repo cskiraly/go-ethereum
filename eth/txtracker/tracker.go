@@ -207,7 +207,7 @@ type Tracker struct {
 	// Last known chain head for reorg detection.
 	lastHeadHash common.Hash
 
-	// Event channels (non-blocking sends from callers).
+	// Event channels (buffered; senders block when full or on quit).
 	announceCh  chan *announceEvent
 	receiveCh   chan *receiveEvent
 	pooledCh    chan *pooledEvent

@@ -192,51 +192,32 @@ func TestFullLifecycle(t *testing.T) {
 	tr, _, chain, _ := testTracker(0)
 	defer tr.Stop()
 
-	hash := makeHash(10)
+	// Use a real tx so that tx.Hash() in ChainEvent matches the tracked hash.
+	tx := types.NewTx(&types.LegacyTx{Nonce: 42, GasPrice: big.NewInt(1), Gas: 21000})
+	txHash := tx.Hash()
 
 	// Step 1: Announced
-	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{2}, []uint32{500})
+	tr.NotifyAnnounced("peerA", []common.Hash{txHash}, []byte{2}, []uint32{500})
 	waitStep(t, tr)
-	if s := tr.Status(hash); s != TxAnnounced {
+	if s := tr.Status(txHash); s != TxAnnounced {
 		t.Fatalf("step 1: expected TxAnnounced, got %v", s)
 	}
 
 	// Step 2: Received
-	tr.NotifyReceived("peerB", []common.Hash{hash})
+	tr.NotifyReceived("peerB", []common.Hash{txHash})
 	waitStep(t, tr)
-	if s := tr.Status(hash); s != TxReceived {
+	if s := tr.Status(txHash); s != TxReceived {
 		t.Fatalf("step 2: expected TxReceived, got %v", s)
 	}
 
 	// Step 3: Pooled
-	tr.NotifyPooled([]common.Hash{hash})
+	tr.NotifyPooled([]common.Hash{txHash})
 	waitStep(t, tr)
-	if s := tr.Status(hash); s != TxPooled {
+	if s := tr.Status(txHash); s != TxPooled {
 		t.Fatalf("step 3: expected TxPooled, got %v", s)
 	}
 
-	// Step 4: Included via ChainEvent (we need to use the same hash)
-	// To make this work, we'll create a ChainEvent whose tx hash matches.
-	// We can't easily create a tx with a specific hash, so we rely on
-	// the tracker matching by hash in handleChainEvent.
-	// The tracker iterates ev.Transactions and looks up tx.Hash() in t.txs.
-	// Since tx.Hash() is computed from the tx content, not from makeHash(10),
-	// the lookup will miss. This is a limitation of this test approach.
-	// Let's test inclusion via a different flow:
-
-	// Use a real transaction hash flow: announce → receive → pool → include.
-	tx := types.NewTx(&types.LegacyTx{Nonce: 42, GasPrice: big.NewInt(1), Gas: 21000})
-	txHash := tx.Hash()
-
-	tr.NotifyAnnounced("peerC", []common.Hash{txHash}, []byte{0}, []uint32{100})
-	waitStep(t, tr)
-	tr.NotifyReceived("peerC", []common.Hash{txHash})
-	waitStep(t, tr)
-	tr.NotifyPooled([]common.Hash{txHash})
-	waitStep(t, tr)
-
-	// Now send chain event with this transaction.
-	block1Hash := common.Hash{0xaa}
+	// Step 4: Included
 	header := makeHeader(50, common.Hash{})
 	chain.sendChainEvent(core.ChainEvent{
 		Header:       header,
@@ -249,14 +230,14 @@ func TestFullLifecycle(t *testing.T) {
 		t.Fatal("expected tracked transaction")
 	}
 	if info.Status != TxIncluded {
-		t.Fatalf("step 4: expected TxIncluded, got %v", info.Status)
+		t.Fatalf("expected TxIncluded, got %v", info.Status)
 	}
 	if info.BlockNum != 50 {
 		t.Fatalf("expected block number 50, got %d", info.BlockNum)
 	}
 
 	// Step 5: Finalized
-	chain.finalBlock = makeHeader(100, block1Hash)
+	chain.finalBlock = makeHeader(100, common.Hash{0xaa})
 	// Send another chain event to trigger finalization check.
 	header2 := makeHeader(51, header.Hash())
 	chain.sendChainEvent(core.ChainEvent{
