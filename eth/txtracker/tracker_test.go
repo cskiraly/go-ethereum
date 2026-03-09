@@ -144,7 +144,7 @@ func TestAnnouncedToRequested(t *testing.T) {
 	if info.RequestedFrom != "peerA" {
 		t.Fatalf("expected requestedFrom peerA, got %q", info.RequestedFrom)
 	}
-	if info.Requested == 0 {
+	if info.Requested.IsZero() {
 		t.Fatal("expected requested timestamp to be set")
 	}
 }
@@ -169,10 +169,10 @@ func TestRequestedToReceived(t *testing.T) {
 	if info.Status != TxReceived {
 		t.Fatalf("expected TxReceived, got %v", info.Status)
 	}
-	if info.Requested == 0 {
+	if info.Requested.IsZero() {
 		t.Fatal("expected requested timestamp to be preserved")
 	}
-	if info.Received == 0 {
+	if info.Received.IsZero() {
 		t.Fatal("expected received timestamp to be set")
 	}
 }
@@ -248,7 +248,7 @@ func TestReceivedToPooled(t *testing.T) {
 	if info.Status != TxPooled {
 		t.Fatalf("expected TxPooled, got %v", info.Status)
 	}
-	if info.Pooled == 0 {
+	if info.Pooled.IsZero() {
 		t.Fatal("expected pooled timestamp to be set")
 	}
 }

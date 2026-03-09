@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"slices"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
@@ -117,12 +118,12 @@ type txRecord struct {
 	value     *big.Int
 	to        *common.Address
 
-	firstSeen mclock.AbsTime // When first announced or received
-	requested mclock.AbsTime // When body was requested from a peer
-	received  mclock.AbsTime // When full body arrived
-	pooled    mclock.AbsTime // When accepted into pool
-	included  mclock.AbsTime // When included in canonical block
-	finalized mclock.AbsTime // When block was finalized
+	firstSeen time.Time // When first announced or received
+	requested time.Time // When body was requested from a peer
+	received  time.Time // When full body arrived
+	pooled    time.Time // When accepted into pool
+	included  time.Time // When included in canonical block
+	finalized time.Time // When block was finalized
 
 	announcers    []string    // Peers that announced (ordered, first = earliest)
 	requestedFrom string      // Peer we requested the body from
@@ -155,12 +156,12 @@ type TxInfo struct {
 	GasTipCap  *big.Int
 	Value      *big.Int
 	To         *common.Address
-	FirstSeen     mclock.AbsTime
-	Requested     mclock.AbsTime
-	Received      mclock.AbsTime
-	Pooled        mclock.AbsTime
-	Included      mclock.AbsTime
-	Finalized     mclock.AbsTime
+	FirstSeen     time.Time
+	Requested     time.Time
+	Received      time.Time
+	Pooled        time.Time
+	Included      time.Time
+	Finalized     time.Time
 	Announcers    []string
 	RequestedFrom string
 	Deliverer     string
@@ -525,7 +526,7 @@ func (t *Tracker) loop() {
 
 // handleAnnounce processes a batch of transaction hash announcements from a peer.
 func (t *Tracker) handleAnnounce(ev *announceEvent) {
-	now := t.clock.Now()
+	now := time.Now()
 	ps := t.getOrCreatePeer(ev.peer)
 
 	for i, hash := range ev.hashes {
@@ -565,7 +566,7 @@ func (t *Tracker) handleAnnounce(ev *announceEvent) {
 // handleFetchRequested processes notification that transaction bodies were
 // requested from a peer. Only advances Announced records to Requested.
 func (t *Tracker) handleFetchRequested(ev *fetchRequestedEvent) {
-	now := t.clock.Now()
+	now := time.Now()
 
 	for _, hash := range ev.hashes {
 		txFetchRequestedMeter.Mark(1)
@@ -587,7 +588,7 @@ func (t *Tracker) handleFetchRequested(ev *fetchRequestedEvent) {
 
 // handleReceive processes notification that transaction bodies arrived from a peer.
 func (t *Tracker) handleReceive(ev *receiveEvent) {
-	now := t.clock.Now()
+	now := time.Now()
 	ps := t.getOrCreatePeer(ev.peer)
 
 	for _, tx := range ev.txs {
@@ -632,7 +633,7 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 
 // handlePooled processes notification that transactions were accepted into the pool.
 func (t *Tracker) handlePooled(ev *pooledEvent) {
-	now := t.clock.Now()
+	now := time.Now()
 
 	for _, hash := range ev.hashes {
 		txPooledMeter.Mark(1)
@@ -671,7 +672,7 @@ func (t *Tracker) handlePooled(ev *pooledEvent) {
 
 // handleRejected processes notification that transactions were rejected by the pool.
 func (t *Tracker) handleRejected(ev *rejectedEvent) {
-	now := t.clock.Now()
+	now := time.Now()
 
 	for i, hash := range ev.hashes {
 		txRejectedMeter.Mark(1)
@@ -706,7 +707,7 @@ func (t *Tracker) handleRejected(ev *rejectedEvent) {
 // handleChainEvent processes a new block event, marking included transactions
 // and detecting reorgs.
 func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
-	now := t.clock.Now()
+	now := time.Now()
 	blockNum := ev.Header.Number.Uint64()
 	blockHash := ev.Header.Hash()
 	parentHash := ev.Header.ParentHash
@@ -776,7 +777,7 @@ func (t *Tracker) handleReorg(newBlockNum uint64) {
 		if rec.status == TxIncluded && rec.blockNum >= newBlockNum {
 			log.Debug("Transaction reorged", "tx", hash, "block", rec.blockNum)
 			rec.status = TxPooled
-			rec.included = 0
+			rec.included = time.Time{}
 			rec.blockNum = 0
 			rec.blockHash = common.Hash{}
 			t.touchLRU(rec)
@@ -801,7 +802,7 @@ func (t *Tracker) checkFinalization() {
 	for hash, rec := range t.txs {
 		if rec.status == TxIncluded && rec.blockNum <= finalNum {
 			rec.status = TxFinalized
-			rec.finalized = t.clock.Now()
+			rec.finalized = time.Now()
 			t.touchLRU(rec)
 			t.emitEvent(hash, TxIncluded, TxFinalized, rec, "")
 			txFinalizedMeter.Mark(1)
@@ -813,7 +814,7 @@ func (t *Tracker) checkFinalization() {
 // Any transaction appearing in NewTxsEvent that has no prior record is marked
 // as local.
 func (t *Tracker) handleNewTxs(ev core.NewTxsEvent) {
-	now := t.clock.Now()
+	now := time.Now()
 
 	for _, tx := range ev.Txs {
 		hash := tx.Hash()

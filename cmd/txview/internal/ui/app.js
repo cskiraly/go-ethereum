@@ -366,7 +366,8 @@
             var ia = ca.info, ib = cb.info;
             switch (topSortKey) {
                 case 'age':
-                    cmp = (ia.FirstSeen || 0) - (ib.FirstSeen || 0);
+                    var da = parseTS(ia.FirstSeen), db = parseTS(ib.FirstSeen);
+                    cmp = (da ? da.getTime() : 0) - (db ? db.getTime() : 0);
                     break;
                 case 'status':
                     cmp = statusOrd(ia.Status) - statusOrd(ib.Status);
@@ -561,6 +562,7 @@
     }
 
     function renderDetail(hash, info, container) {
+        var base = parseTS(info.FirstSeen);
         var fields = [
             ['Hash', hash],
             ['Status', info.Status],
@@ -574,13 +576,13 @@
             ['Gas Tip Cap', info.GasTipCap ? info.GasTipCap + ' wei' : '-'],
             ['Value', info.Value ? info.Value + ' wei' : '-'],
             ['To', info.To || '-'],
-            ['First Seen', formatTime(info.FirstSeen)],
-            ['Requested', formatTime(info.Requested)],
+            ['First Seen', formatTS(info.FirstSeen, null)],
+            ['Requested', formatTS(info.Requested, base)],
             ['Requested From', info.RequestedFrom || '-'],
-            ['Received', formatTime(info.Received)],
-            ['Pooled', formatTime(info.Pooled)],
-            ['Included', formatTime(info.Included)],
-            ['Finalized', formatTime(info.Finalized)],
+            ['Received', formatTS(info.Received, base)],
+            ['Pooled', formatTS(info.Pooled, base)],
+            ['Included', formatTS(info.Included, base)],
+            ['Finalized', formatTS(info.Finalized, base)],
             ['Deliverer', info.Deliverer || '-'],
             ['Announcers', (info.Announcers || []).join(', ') || '-'],
             ['Block #', info.BlockNum || '-'],
@@ -600,27 +602,26 @@
     // Progress rendering (Top view)
     // ========================================================================
     function renderProgress(info) {
-        if (!info || !info.FirstSeen) return '<span class="top-loading">-</span>';
-        var base = info.FirstSeen;
+        var base = parseTS(info.FirstSeen);
+        if (!base) return '<span class="top-loading">-</span>';
         var steps = [];
 
-        // Always show "seen" as the starting point.
         steps.push('<span class="step step-announced">seen</span>');
 
-        if (info.Requested) {
-            steps.push('<span class="step step-requested">+' + nanosDelta(info.Requested, base) + ' req</span>');
+        if (parseTS(info.Requested)) {
+            steps.push('<span class="step step-requested">+' + msDelta(parseTS(info.Requested), base) + ' req</span>');
         }
-        if (info.Received) {
-            steps.push('<span class="step step-received">+' + nanosDelta(info.Received, base) + ' rcv</span>');
+        if (parseTS(info.Received)) {
+            steps.push('<span class="step step-received">+' + msDelta(parseTS(info.Received), base) + ' rcv</span>');
         }
-        if (info.Pooled) {
-            steps.push('<span class="step step-pooled">+' + nanosDelta(info.Pooled, base) + ' pool</span>');
+        if (parseTS(info.Pooled)) {
+            steps.push('<span class="step step-pooled">+' + msDelta(parseTS(info.Pooled), base) + ' pool</span>');
         }
-        if (info.Included) {
-            steps.push('<span class="step step-included">+' + nanosDelta(info.Included, base) + ' incl</span>');
+        if (parseTS(info.Included)) {
+            steps.push('<span class="step step-included">+' + msDelta(parseTS(info.Included), base) + ' incl</span>');
         }
-        if (info.Finalized) {
-            steps.push('<span class="step step-finalized">+' + nanosDelta(info.Finalized, base) + ' final</span>');
+        if (parseTS(info.Finalized)) {
+            steps.push('<span class="step step-finalized">+' + msDelta(parseTS(info.Finalized), base) + ' final</span>');
         }
         if (info.RejectErr) {
             steps.push('<span class="step step-rejected">rej</span>');
@@ -629,10 +630,11 @@
         return '<span class="progress">' + steps.join('<span class="arrow">\u2192</span>') + '</span>';
     }
 
-    function nanosDelta(ts, base) {
-        var deltaNs = ts - base;
-        if (deltaNs < 0) deltaNs = 0;
-        var deltaSec = deltaNs / 1e9;
+    // msDelta formats the millisecond difference between two Date objects.
+    function msDelta(ts, base) {
+        var deltaMs = ts.getTime() - base.getTime();
+        if (deltaMs < 0) deltaMs = 0;
+        var deltaSec = deltaMs / 1000;
         if (deltaSec < 0.1) return '0s';
         if (deltaSec < 10) return deltaSec.toFixed(1) + 's';
         if (deltaSec < 60) return Math.floor(deltaSec) + 's';
@@ -660,12 +662,23 @@
         return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
     }
 
-    function formatTime(nanos) {
-        if (!nanos) return '-';
-        var secs = Math.floor(nanos / 1e9);
-        if (secs < 60) return secs + 's uptime';
-        if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's uptime';
-        return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm uptime';
+    // parseTS parses an RFC3339 timestamp string into a Date, or null if empty/zero.
+    function parseTS(s) {
+        if (!s || s === '0001-01-01T00:00:00Z') return null;
+        var d = new Date(s);
+        return isNaN(d.getTime()) ? null : d;
+    }
+
+    // formatTS formats a timestamp as "HH:MM:SS.mmm (+Xs from base)" or "-".
+    function formatTS(s, base) {
+        var d = parseTS(s);
+        if (!d) return '-';
+        var abs = d.toLocaleTimeString('en-GB', {hour12: false}) + '.' +
+                  String(d.getMilliseconds()).padStart(3, '0');
+        if (base) {
+            abs += ' (+' + msDelta(d, base) + ')';
+        }
+        return abs;
     }
 
     function formatWei(val) {
