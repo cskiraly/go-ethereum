@@ -62,6 +62,18 @@ Single-goroutine event loop (same pattern as TxFetcher):
   `makeHash(5)` and `makeTx(hash).Hash()`). Removed along with unused `makeTx`.
 - **IMPROVE-1**: Replaced `containsString` helper with `slices.Contains`.
 
+## Codex Review Fixes (commit 6)
+
+- **BUG-4**: `TxRejected` (iota 6) > `TxIncluded` (4) blocked rejected txs from
+  advancing to Included on chain events. Changed guard to `status != TxFinalized`.
+- **BUG-5**: `Get`/`Status`/`GetPeerStats` could deadlock if `Stop()` was called
+  after the query was sent but before the loop processed it. Added quit select
+  around response reads.
+- **BUG-6**: Race between `handleNewTxs` and `handleReceive` could misclassify
+  remote txs as local. `handleReceive` now repairs local flag when it finds a
+  local record with no deliverer.
+- **CLEANUP-1**: Removed dead `lastHeadNum` field.
+
 ## Future Work
 
 - Use tracker data for peer scoring (bandwidth waste detection)
