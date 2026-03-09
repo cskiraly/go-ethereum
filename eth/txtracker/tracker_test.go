@@ -574,6 +574,64 @@ func TestRejectedToIncluded(t *testing.T) {
 	}
 }
 
+func TestChainOnlyTracking(t *testing.T) {
+	tr, _, chain, _ := testTracker(0)
+	defer tr.Stop()
+
+	// A transaction that was never announced, received, or pooled locally —
+	// it appears for the first time in a canonical block.
+	tx := types.NewTx(&types.LegacyTx{Nonce: 200, GasPrice: big.NewInt(1), Gas: 21000})
+	txHash := tx.Hash()
+
+	header := makeHeader(300, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header,
+		Transactions: []*types.Transaction{tx},
+	})
+	waitStep(t, tr)
+
+	info := tr.Get(txHash)
+	if info == nil {
+		t.Fatal("expected chain-only transaction to be tracked")
+	}
+	if info.Status != TxIncluded {
+		t.Fatalf("expected TxIncluded, got %v", info.Status)
+	}
+	if info.BlockNum != 300 {
+		t.Fatalf("expected block number 300, got %d", info.BlockNum)
+	}
+	if info.TxType != 0 {
+		t.Fatalf("expected tx type 0, got %d", info.TxType)
+	}
+}
+
+func TestChainOnlyFinalization(t *testing.T) {
+	tr, _, chain, _ := testTracker(0)
+	defer tr.Stop()
+
+	// Chain-only tx gets included then finalized.
+	tx := types.NewTx(&types.LegacyTx{Nonce: 201, GasPrice: big.NewInt(1), Gas: 21000})
+	txHash := tx.Hash()
+
+	header1 := makeHeader(400, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header1,
+		Transactions: []*types.Transaction{tx},
+	})
+	waitStep(t, tr)
+
+	// Set finalized block past 400, send another chain event to trigger check.
+	chain.finalBlock = makeHeader(500, common.Hash{0xbb})
+	header2 := makeHeader(401, header1.Hash())
+	chain.sendChainEvent(core.ChainEvent{Header: header2})
+	waitStep(t, tr)
+
+	info := tr.Get(txHash)
+	if info.Status != TxFinalized {
+		t.Fatalf("expected TxFinalized, got %v", info.Status)
+	}
+}
+
 func TestShutdownDuringQuery(t *testing.T) {
 	tr, _, _, _ := testTracker(0)
 

@@ -653,7 +653,23 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 
 		rec := t.txs[hash]
 		if rec == nil {
-			// Transaction we never tracked (e.g., from a synced block).
+			// Transaction not previously tracked (e.g., from a synced block
+			// or a peer path we don't observe). Create a record directly
+			// at Included.
+			rec = &txRecord{
+				status:    TxIncluded,
+				txType:    tx.Type(),
+				txSize:    uint32(tx.Size()),
+				firstSeen: now,
+				included:  now,
+				blockNum:  blockNum,
+				blockHash: blockHash,
+			}
+			t.insertRecord(hash, rec)
+			t.emitEvent(hash, 0, TxIncluded, rec, "")
+			txTrackedMeter.Mark(1)
+			txIncludedMeter.Mark(1)
+			txChainOnlyMeter.Mark(1)
 			continue
 		}
 		if rec.status != TxFinalized {

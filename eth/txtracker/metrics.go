@@ -27,6 +27,7 @@ var (
 	txFinalizedMeter = metrics.NewRegisteredMeter("eth/txtracker/finalized", nil)
 	txRejectedMeter  = metrics.NewRegisteredMeter("eth/txtracker/rejected", nil)
 	txReorgedMeter   = metrics.NewRegisteredMeter("eth/txtracker/reorged", nil)
+	txChainOnlyMeter = metrics.NewRegisteredMeter("eth/txtracker/chainonly", nil)
 	txLocalMeter     = metrics.NewRegisteredMeter("eth/txtracker/local", nil)
 	txEvictedMeter   = metrics.NewRegisteredMeter("eth/txtracker/evicted", nil)
 	txTrackerSize    = metrics.NewRegisteredGauge("eth/txtracker/size", nil)
