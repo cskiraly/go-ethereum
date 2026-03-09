@@ -27,16 +27,20 @@ header h1 {
     height: 10px;
     border-radius: 50%;
     background: #666;
+    flex-shrink: 0;
 }
 
 .status-indicator.connected { background: #4caf50; }
 .status-indicator.disconnected { background: #f44336; }
 
+#status-text { font-size: 12px; color: #888; }
+
 .counters {
     display: flex;
-    gap: 12px;
+    gap: 8px;
     margin-left: auto;
     font-size: 12px;
+    flex-wrap: wrap;
 }
 
 .counters span {
@@ -70,43 +74,77 @@ header h1 {
     height: calc(100vh - 90px);
 }
 
-.table-container {
+/* --- Virtual scroll table --- */
+
+.table-area {
     flex: 1;
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
 }
 
-table {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-thead th {
-    position: sticky;
-    top: 0;
+.table-header {
+    display: flex;
+    padding: 0 10px;
     background: #16213e;
-    padding: 6px 10px;
-    text-align: left;
+    border-bottom: 1px solid #0f3460;
     font-weight: 600;
     font-size: 11px;
     text-transform: uppercase;
     color: #888;
-    border-bottom: 1px solid #0f3460;
+    height: 28px;
+    align-items: center;
+    flex-shrink: 0;
 }
 
-tbody tr {
-    cursor: pointer;
-    border-bottom: 1px solid #0f3460;
+.viewport {
+    flex: 1;
+    overflow-y: auto;
+    position: relative;
 }
 
-tbody tr:hover { background: #16213e; }
-tbody tr.selected { background: #0f3460; }
+#scroll-spacer {
+    width: 1px;
+    pointer-events: none;
+}
 
-tbody td {
-    padding: 5px 10px;
-    white-space: nowrap;
+#row-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    will-change: transform;
+}
+
+/* Row and column layout (shared between header and rows) */
+.table-header > span,
+.vrow > span {
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 0 6px;
 }
+
+.col-hash   { width: 180px; flex-shrink: 0; }
+.col-status { width: 90px;  flex-shrink: 0; }
+.col-peer   { width: 140px; flex-shrink: 0; }
+.col-block  { width: 90px;  flex-shrink: 0; }
+.col-age    { width: 70px;  flex-shrink: 0; }
+.col-error  { flex: 1; min-width: 80px; }
+
+.vrow {
+    display: flex;
+    align-items: center;
+    height: 28px;
+    padding: 0 10px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(15, 52, 96, 0.5);
+}
+
+.vrow:hover { background: #16213e; }
+.vrow.selected { background: #0f3460; }
+
+/* --- Status badges --- */
 
 .badge {
     display: inline-block;
@@ -114,6 +152,7 @@ tbody td {
     border-radius: 3px;
     font-size: 11px;
     font-weight: 600;
+    text-align: center;
 }
 
 .badge-announced  { background: #555; color: #ccc; }
@@ -123,6 +162,8 @@ tbody td {
 .badge-finalized  { background: #6a1b9a; color: #e1bee7; }
 .badge-rejected   { background: #c62828; color: #ffcdd2; }
 
+/* --- Detail panel --- */
+
 .detail-panel {
     width: 380px;
     background: #16213e;
@@ -130,6 +171,7 @@ tbody td {
     padding: 16px;
     overflow-y: auto;
     display: none;
+    flex-shrink: 0;
 }
 
 .detail-panel.visible { display: block; }

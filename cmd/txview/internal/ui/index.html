@@ -34,20 +34,19 @@
         </select>
     </div>
     <div class="main-area">
-        <div class="table-container">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Hash</th>
-                        <th>Status</th>
-                        <th>Peer</th>
-                        <th>Block #</th>
-                        <th>Age</th>
-                        <th>Error</th>
-                    </tr>
-                </thead>
-                <tbody id="tx-table"></tbody>
-            </table>
+        <div class="table-area">
+            <div class="table-header">
+                <span class="col-hash">Hash</span>
+                <span class="col-status">Status</span>
+                <span class="col-peer">Peer</span>
+                <span class="col-block">Block #</span>
+                <span class="col-age">Age</span>
+                <span class="col-error">Error</span>
+            </div>
+            <div class="viewport" id="viewport">
+                <div id="scroll-spacer"></div>
+                <div id="row-container"></div>
+            </div>
         </div>
         <div class="detail-panel" id="detail-panel">
             <h2>Transaction Details</h2>
