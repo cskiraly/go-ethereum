@@ -354,38 +354,42 @@
             if (matchesTopFilter(hash, ev)) all.push(hash);
         });
 
-        // Sort by the selected key. Hashes without cached info go to bottom.
+        // Sort by the selected key. For age and status, use event data (available
+        // for every tx) so sorting works across the full set. For RPC-dependent
+        // keys, fall back to cached info (uncached rows go to bottom).
         all.sort(function(a, b) {
-            var ca = topCache.get(a);
-            var cb = topCache.get(b);
-            if (!ca && !cb) return 0;
-            if (!ca) return 1;
-            if (!cb) return -1;
-
+            var ea = txs.get(a), eb = txs.get(b);
             var cmp = 0;
-            var ia = ca.info, ib = cb.info;
             switch (topSortKey) {
                 case 'age':
-                    var da = parseTS(ia.FirstSeen), db = parseTS(ib.FirstSeen);
-                    cmp = (da ? da.getTime() : 0) - (db ? db.getTime() : 0);
+                    cmp = (ea._receivedAt || 0) - (eb._receivedAt || 0);
                     break;
                 case 'status':
-                    cmp = statusOrd(ia.Status) - statusOrd(ib.Status);
+                    cmp = statusOrd(ea.newStatus) - statusOrd(eb.newStatus);
                     break;
-                case 'nonce':
-                    cmp = (ia.Nonce || 0) - (ib.Nonce || 0);
-                    break;
-                case 'gas':
-                    cmp = (ia.Gas || 0) - (ib.Gas || 0);
-                    break;
-                case 'value':
-                    cmp = compareBigInt(ia.Value, ib.Value);
-                    break;
-                case 'gasfeecap':
-                    cmp = compareBigInt(ia.GasFeeCap, ib.GasFeeCap);
-                    break;
-                case 'gastipcap':
-                    cmp = compareBigInt(ia.GasTipCap, ib.GasTipCap);
+                default:
+                    var ca = topCache.get(a), cb = topCache.get(b);
+                    if (!ca && !cb) return 0;
+                    if (!ca) return 1;
+                    if (!cb) return -1;
+                    var ia = ca.info, ib = cb.info;
+                    switch (topSortKey) {
+                        case 'nonce':
+                            cmp = (ia.Nonce || 0) - (ib.Nonce || 0);
+                            break;
+                        case 'gas':
+                            cmp = (ia.Gas || 0) - (ib.Gas || 0);
+                            break;
+                        case 'value':
+                            cmp = compareBigInt(ia.Value, ib.Value);
+                            break;
+                        case 'gasfeecap':
+                            cmp = compareBigInt(ia.GasFeeCap, ib.GasFeeCap);
+                            break;
+                        case 'gastipcap':
+                            cmp = compareBigInt(ia.GasTipCap, ib.GasTipCap);
+                            break;
+                    }
                     break;
             }
             return topSortAsc ? cmp : -cmp;
