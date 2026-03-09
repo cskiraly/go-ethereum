@@ -43,25 +43,34 @@
     filterStatus.addEventListener('change', renderTable);
 
     function connect() {
+        console.log('[txview] connecting to', rpcEndpoint);
         ws = new WebSocket(rpcEndpoint);
 
         ws.onopen = function() {
+            console.log('[txview] WebSocket connected');
             statusDot.className = 'status-indicator connected';
             statusText.textContent = 'connected';
             // Subscribe to events.
-            rpcCall('txtracker_subscribe', ['events'], function(result) {
+            rpcCall('txtracker_subscribe', ['events'], function(result, err) {
+                if (err) {
+                    console.error('[txview] subscribe error:', err);
+                    return;
+                }
+                console.log('[txview] subscribed, id:', result);
                 subId = result;
             });
         };
 
-        ws.onclose = function() {
+        ws.onclose = function(ev) {
+            console.log('[txview] WebSocket closed, code:', ev.code, 'reason:', ev.reason, 'clean:', ev.wasClean);
             statusDot.className = 'status-indicator disconnected';
-            statusText.textContent = 'disconnected';
+            statusText.textContent = 'disconnected (code ' + ev.code + ')';
             subId = null;
             setTimeout(connect, 3000);
         };
 
-        ws.onerror = function() {
+        ws.onerror = function(ev) {
+            console.error('[txview] WebSocket error:', ev);
             ws.close();
         };
 

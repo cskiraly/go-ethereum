@@ -29,6 +29,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/cmd/txview/internal/ui"
 	"github.com/ethereum/go-ethereum/internal/flags"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/urfave/cli/v2"
 )
@@ -83,6 +84,25 @@ func run(ctx *cli.Context) error {
 			r.SetURL(target)
 			// Remove Origin header so geth skips the origin check.
 			r.Out.Header.Del("Origin")
+			log.Info("WS proxy rewrite",
+				"method", r.In.Method,
+				"inURL", r.In.URL.String(),
+				"outURL", r.Out.URL.String(),
+				"upgrade", r.In.Header.Get("Upgrade"),
+				"connection", r.In.Header.Get("Connection"),
+			)
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Error("WS proxy error", "url", r.URL.String(), "err", err)
+			http.Error(w, err.Error(), http.StatusBadGateway)
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			log.Info("WS proxy response",
+				"status", resp.StatusCode,
+				"upgrade", resp.Header.Get("Upgrade"),
+				"connection", resp.Header.Get("Connection"),
+			)
+			return nil
 		},
 	}
 	http.Handle("/ws", wsProxy)
@@ -93,9 +113,11 @@ func run(ctx *cli.Context) error {
 		if r.TLS != nil {
 			scheme = "wss"
 		}
+		wsURL := scheme + "://" + r.Host + "/ws"
+		log.Info("Serving config", "rpcEndpoint", wsURL)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"rpcEndpoint": scheme + "://" + r.Host + "/ws",
+			"rpcEndpoint": wsURL,
 		})
 	})
 
