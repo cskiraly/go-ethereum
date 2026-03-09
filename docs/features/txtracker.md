@@ -52,6 +52,16 @@ Single-goroutine event loop (same pattern as TxFetcher):
 - `eth/handler.go` — Creates, starts, stops tracker; hooks addTxs and peer drop
 - `eth/handler_eth.go` — Feeds announcement and receive events to tracker
 
+## Code Review Fixes (commit 5)
+
+- **BUG-1**: `txIncludedMeter` was firing for every transaction in every block,
+  not just tracked ones. Moved inside the status-update block.
+- **BUG-2**: `status < TxIncluded || status == TxIncluded` simplified to
+  `status <= TxIncluded`.
+- **BUG-3**: `TestPooledToIncluded` was a dead test (hash mismatch between
+  `makeHash(5)` and `makeTx(hash).Hash()`). Removed along with unused `makeTx`.
+- **IMPROVE-1**: Replaced `containsString` helper with `slices.Contains`.
+
 ## Future Work
 
 - Use tracker data for peer scoring (bandwidth waste detection)
