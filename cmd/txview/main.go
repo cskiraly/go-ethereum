@@ -1,0 +1,92 @@
+// Copyright 2026 The go-ethereum Authors
+// This file is part of go-ethereum.
+//
+// go-ethereum is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// go-ethereum is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with go-ethereum. If not, see <http://www.gnu.org/licenses/>.
+
+// txview is a web-based transaction lifecycle viewer for geth's txtracker.
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"os"
+
+	"github.com/ethereum/go-ethereum/cmd/txview/internal/ui"
+	"github.com/ethereum/go-ethereum/internal/flags"
+	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/urfave/cli/v2"
+)
+
+var (
+	rpcFlag = &cli.StringFlag{
+		Name:  "rpc",
+		Usage: "Geth WebSocket RPC endpoint",
+		Value: "ws://localhost:8546",
+	}
+	addrFlag = &cli.StringFlag{
+		Name:  "addr",
+		Usage: "Local HTTP listen address",
+		Value: "localhost:8670",
+	}
+)
+
+var app = flags.NewApp("transaction lifecycle viewer for geth txtracker")
+
+func init() {
+	app.Flags = []cli.Flag{rpcFlag, addrFlag}
+	app.Action = run
+}
+
+func main() {
+	if err := app.Run(os.Args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx *cli.Context) error {
+	endpoint := ctx.String("rpc")
+	addr := ctx.String("addr")
+
+	// Verify geth connection at startup.
+	client, err := rpc.Dial(endpoint)
+	if err != nil {
+		return fmt.Errorf("failed to connect to geth at %s: %w", endpoint, err)
+	}
+	client.Close()
+
+	// Serve embedded UI assets.
+	assets, err := fs.Sub(ui.Assets, ".")
+	if err != nil {
+		return err
+	}
+	http.Handle("/", http.FileServerFS(assets))
+
+	// Config endpoint for the JS client.
+	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"rpcEndpoint": endpoint,
+		})
+	})
+
+	fmt.Printf("txview listening on http://%s\n", addr)
+	fmt.Printf("  Geth RPC: %s\n", endpoint)
+	fmt.Println("  Ensure geth is started with: --ws --ws.api txtracker")
+	fmt.Println()
+
+	return http.ListenAndServe(addr, nil)
+}

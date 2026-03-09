@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>txview - Transaction Lifecycle Viewer</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>txview</h1>
+        <div class="status-indicator disconnected" id="status-dot"></div>
+        <span id="status-text">disconnected</span>
+        <div class="counters">
+            <span>Total: <strong id="cnt-total">0</strong></span>
+            <span>Announced: <strong id="cnt-announced">0</strong></span>
+            <span>Received: <strong id="cnt-received">0</strong></span>
+            <span>Pooled: <strong id="cnt-pooled">0</strong></span>
+            <span>Included: <strong id="cnt-included">0</strong></span>
+            <span>Finalized: <strong id="cnt-finalized">0</strong></span>
+            <span>Rejected: <strong id="cnt-rejected">0</strong></span>
+        </div>
+    </header>
+    <div class="filter-bar">
+        <input type="text" id="filter-input" placeholder="Filter by tx hash or peer prefix...">
+        <select id="filter-status">
+            <option value="">All statuses</option>
+            <option value="announced">Announced</option>
+            <option value="received">Received</option>
+            <option value="pooled">Pooled</option>
+            <option value="included">Included</option>
+            <option value="finalized">Finalized</option>
+            <option value="rejected">Rejected</option>
+        </select>
+    </div>
+    <div class="main-area">
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Hash</th>
+                        <th>Status</th>
+                        <th>Peer</th>
+                        <th>Block #</th>
+                        <th>Age</th>
+                        <th>Error</th>
+                    </tr>
+                </thead>
+                <tbody id="tx-table"></tbody>
+            </table>
+        </div>
+        <div class="detail-panel" id="detail-panel">
+            <h2>Transaction Details</h2>
+            <div id="detail-content"></div>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
