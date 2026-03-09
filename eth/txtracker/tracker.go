@@ -20,6 +20,7 @@ package txtracker
 
 import (
 	"container/list"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
@@ -435,7 +436,7 @@ func (t *Tracker) handleAnnounce(ev *announceEvent) {
 		rec := t.txs[hash]
 		if rec != nil {
 			// Already tracked: just record additional announcer if not duplicate.
-			if !containsString(rec.announcers, ev.peer) {
+			if !slices.Contains(rec.announcers, ev.peer) {
 				rec.announcers = append(rec.announcers, ev.peer)
 			}
 			t.touchLRU(rec)
@@ -578,19 +579,19 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 	// Mark all transactions in the block as included.
 	for _, tx := range ev.Transactions {
 		hash := tx.Hash()
-		txIncludedMeter.Mark(1)
 
 		rec := t.txs[hash]
 		if rec == nil {
 			// Transaction we never tracked (e.g., from a synced block).
 			continue
 		}
-		if rec.status < TxIncluded || rec.status == TxIncluded {
+		if rec.status <= TxIncluded {
 			rec.status = TxIncluded
 			rec.included = now
 			rec.blockNum = blockNum
 			rec.blockHash = blockHash
 			t.touchLRU(rec)
+			txIncludedMeter.Mark(1)
 		}
 	}
 	// Check finalization: advance any included transactions past the finalized block.
@@ -733,12 +734,3 @@ func (t *Tracker) getOrCreatePeer(peer string) *peerStats {
 	return ps
 }
 
-// containsString checks if a string slice contains a given string.
-func containsString(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}

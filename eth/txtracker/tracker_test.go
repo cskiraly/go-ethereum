@@ -97,11 +97,6 @@ func makeHeader(num uint64, parent common.Hash) *types.Header {
 	}
 }
 
-func makeTx(hash common.Hash) *types.Transaction {
-	// Create a simple legacy transaction for testing.
-	return types.NewTx(&types.LegacyTx{Nonce: uint64(hash[0])})
-}
-
 func TestAnnouncedStatus(t *testing.T) {
 	tr, _, _, _ := testTracker(0)
 	defer tr.Stop()
@@ -189,38 +184,6 @@ func TestReceivedToRejected(t *testing.T) {
 	}
 	if info.RejectErr != "underpriced" {
 		t.Fatalf("expected rejection error 'underpriced', got %q", info.RejectErr)
-	}
-}
-
-func TestPooledToIncluded(t *testing.T) {
-	tr, _, chain, _ := testTracker(0)
-	defer tr.Stop()
-
-	hash := makeHash(5)
-	tr.NotifyPooled([]common.Hash{hash})
-	waitStep(t, tr)
-
-	// Simulate block inclusion.
-	tx := makeTx(hash)
-	header := makeHeader(100, common.Hash{0xff})
-	chain.sendChainEvent(core.ChainEvent{
-		Header:       header,
-		Transactions: []*types.Transaction{tx},
-	})
-	waitStep(t, tr)
-
-	info := tr.Get(tx.Hash())
-	// The tx hash won't match our makeHash since makeTx computes a real hash.
-	// Instead query by the actual hash of the tx in the block event.
-	// For the tracker, inclusion is keyed by tx.Hash() from the ChainEvent.
-	// Since our pooled notification used makeHash(5) but the tx has a different
-	// hash, the inclusion won't match. Let's test with a direct approach.
-
-	// Check that the pooled tx is still pooled (it won't be included because
-	// the ChainEvent tx hash differs from makeHash(5)).
-	info = tr.Get(hash)
-	if info == nil || info.Status != TxPooled {
-		t.Fatalf("expected pooled status for original hash, got %v", info)
 	}
 }
 
