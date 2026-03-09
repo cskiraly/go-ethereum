@@ -166,7 +166,7 @@ header h1 {
 .col-peer   { width: 140px; flex-shrink: 0; }
 .col-block  { width: 90px;  flex-shrink: 0; }
 .col-age    { width: 70px;  flex-shrink: 0; }
-.col-error    { width: 140px; flex-shrink: 0; }
+.col-error    { width: 280px; flex-shrink: 0; }
 .col-progress { flex: 1; min-width: 200px; }
 
 /* --- Top view columns --- */
