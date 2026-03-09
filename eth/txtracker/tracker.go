@@ -681,6 +681,16 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 			t.touchLRU(rec)
 			t.emitEvent(hash, oldStatus, TxIncluded, rec, "")
 			txIncludedMeter.Mark(1)
+			switch oldStatus {
+			case TxAnnounced:
+				txIncludedFromAnnouncedMeter.Mark(1)
+			case TxReceived:
+				txIncludedFromReceivedMeter.Mark(1)
+			case TxPooled:
+				txIncludedFromPooledMeter.Mark(1)
+			case TxRejected:
+				txIncludedFromRejectedMeter.Mark(1)
+			}
 		}
 	}
 	// Check finalization: advance any included transactions past the finalized block.
