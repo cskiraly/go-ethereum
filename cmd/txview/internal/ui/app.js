@@ -126,6 +126,79 @@
     setInterval(function() { scheduleRender(); }, 5000);
 
     // ========================================================================
+    // Resizable columns
+    // ========================================================================
+    // Inject a dynamic <style> element to override column widths. This ensures
+    // that both header spans and virtual-scrolled row spans (which are constantly
+    // recreated) pick up the current width.
+    var colStyleEl = document.createElement('style');
+    document.head.appendChild(colStyleEl);
+    var colWidths = {};  // className -> width in px
+
+    function applyColWidths() {
+        var rules = [];
+        for (var cls in colWidths) {
+            rules.push('.' + cls + ' { width: ' + colWidths[cls] + 'px !important; flex: none !important; }');
+        }
+        colStyleEl.textContent = rules.join('\n');
+    }
+
+    // Add resize handles to all header columns (except the last flex column in each view).
+    function setupResizeHandles(header) {
+        var spans = header.querySelectorAll(':scope > span');
+        for (var i = 0; i < spans.length - 1; i++) {
+            var handle = document.createElement('span');
+            handle.className = 'col-resize';
+            spans[i].appendChild(handle);
+        }
+    }
+
+    // Find the feed and top headers and set up handles.
+    var feedHeader = document.querySelector('#view-feed .table-header');
+    setupResizeHandles(feedHeader);
+    setupResizeHandles(topTableHeader);
+
+    // Shared drag state.
+    var resizeCol = null;    // the header <span> being resized
+    var resizeStartX = 0;
+    var resizeStartW = 0;
+    var resizeHandle = null;
+
+    document.addEventListener('mousedown', function(e) {
+        if (!e.target.classList.contains('col-resize')) return;
+        e.preventDefault();
+        resizeHandle = e.target;
+        resizeCol = e.target.parentElement;
+        resizeStartX = e.clientX;
+        resizeStartW = resizeCol.getBoundingClientRect().width;
+        resizeHandle.classList.add('active');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', function(e) {
+        if (!resizeCol) return;
+        var newW = Math.max(40, resizeStartW + (e.clientX - resizeStartX));
+        // Find the column class name (col-* or top-col-*).
+        var cls = resizeCol.className.split(/\s+/).find(function(c) {
+            return c.startsWith('col-') || c.startsWith('top-col-');
+        });
+        if (cls) {
+            colWidths[cls] = Math.round(newW);
+            applyColWidths();
+        }
+    });
+
+    document.addEventListener('mouseup', function() {
+        if (!resizeCol) return;
+        if (resizeHandle) resizeHandle.classList.remove('active');
+        resizeCol = null;
+        resizeHandle = null;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+    });
+
+    // ========================================================================
     // WebSocket
     // ========================================================================
     function connect() {

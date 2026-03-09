@@ -181,6 +181,26 @@ header h1 {
 .top-col-age     { width: 60px;  flex-shrink: 0; text-align: right; }
 .top-col-progress { flex: 1; min-width: 200px; }
 
+/* --- Column resize handles --- */
+.table-header > span {
+    position: relative;
+}
+
+.table-header > span .col-resize {
+    position: absolute;
+    right: -3px;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: col-resize;
+    z-index: 1;
+}
+
+.table-header > span .col-resize:hover,
+.table-header > span .col-resize.active {
+    background: rgba(233, 69, 96, 0.4);
+}
+
 /* --- Sortable headers --- */
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: #e0e0e0; }
