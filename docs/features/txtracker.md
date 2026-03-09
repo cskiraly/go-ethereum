@@ -144,6 +144,22 @@ Alternatively, bind to all interfaces with `--addr 0.0.0.0:8670`. In that
 case geth also needs `--ws.addr 0.0.0.0` and appropriate firewall rules,
 since the browser connects directly to geth's WebSocket.
 
+### Top View Sort Fix
+
+The Top view's sort depended entirely on `topCache` (RPC-fetched `TxInfo`),
+but only ~30 visible rows are fetched at a time. Unfetched rows were pushed to
+the sort bottom (`!ca → return 1`), creating a feedback loop where only the
+initially cached rows ever appeared when sorted.
+
+**Fix**: For `age` and `status`, sort using event subscription data (`txs` Map)
+which is always available for every transaction:
+- `age` → `ev._receivedAt` (wall-clock ms when UI received the first event)
+- `status` → `statusOrd(ev.newStatus)`
+
+RPC-dependent keys (`nonce`, `value`, `gas`, `gasfeecap`, `gastipcap`) keep
+the existing cache-based sort since those values genuinely aren't available
+without a fetch.
+
 ## Future Work
 
 - Use tracker data for peer scoring (bandwidth waste detection)
