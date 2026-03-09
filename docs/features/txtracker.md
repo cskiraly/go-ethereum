@@ -74,8 +74,32 @@ Single-goroutine event loop (same pattern as TxFetcher):
   local record with no deliverer.
 - **CLEANUP-1**: Removed dead `lastHeadNum` field.
 
+## Event Feed (txtracker-feed branch)
+
+Added real-time event feed for state transitions:
+
+- `TxTrackerEvent` struct emitted on every state change via `event.Feed`
+- `SubscribeEvents(ch)` for external consumers
+- `TxStatus.MarshalJSON()` serializes as string (`"pooled"` not `3`)
+- `emitEvent` helper called from each handler after state change, captures
+  old status before overwrite
+
+### RPC API (`txtracker` namespace)
+
+- `txtracker_getTx(hash)` — full lifecycle info
+- `txtracker_getPeerStats(peer)` — peer contribution stats
+- `txtracker_subscribe("events")` — WebSocket subscription for live events,
+  follows the `NewHeads` pattern from `eth/filters/api.go`
+
+### cmd/txview
+
+Standalone web tool for visualizing transaction lifecycles:
+- Connects to geth via WebSocket, subscribes to txtracker events
+- Dark-themed single-page app with no build tooling (embedded via `//go:embed`)
+- Scrollable table with status badges, filter by hash/peer/status
+- Detail panel fetches full info via `txtracker_getTx`
+
 ## Future Work
 
 - Use tracker data for peer scoring (bandwidth waste detection)
 - Filter redundant transaction fetches based on tracker state
-- Expose tracker status via debug API
