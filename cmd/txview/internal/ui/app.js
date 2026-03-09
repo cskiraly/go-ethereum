@@ -108,6 +108,7 @@
             decrementCounter(old.newStatus);
         }
 
+        ev._receivedAt = Date.now();
         txs.set(hash, ev);
         incrementCounter(ev.newStatus);
         counters.total.textContent = txs.size;
@@ -156,7 +157,7 @@
         if (hash === selectedHash) row.classList.add('selected');
 
         const shortHash = hash.substring(0, 10) + '...' + hash.substring(hash.length - 6);
-        const age = ev.timestamp ? timeSince(ev.timestamp) : '-';
+        const age = ev._receivedAt ? timeSince(Date.now() - ev._receivedAt) : '-';
 
         row.innerHTML =
             '<td title="' + hash + '">' + shortHash + '</td>' +
@@ -225,10 +226,9 @@
         detailContent.innerHTML = html;
     }
 
-    function timeSince(nanos) {
-        if (!nanos) return '-';
-        // mclock.AbsTime is nanoseconds since process start; show as relative.
-        const secs = Math.floor(nanos / 1e9);
+    function timeSince(ms) {
+        if (!ms || ms < 0) return '0s';
+        const secs = Math.floor(ms / 1000);
         if (secs < 60) return secs + 's';
         if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
         return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
@@ -236,6 +236,10 @@
 
     function formatTime(nanos) {
         if (!nanos) return '-';
-        return timeSince(nanos) + ' (raw: ' + nanos + ')';
+        // mclock.AbsTime is nanoseconds since geth process start (monotonic).
+        const secs = Math.floor(nanos / 1e9);
+        if (secs < 60) return secs + 's uptime';
+        if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's uptime';
+        return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm uptime';
     }
 })();
