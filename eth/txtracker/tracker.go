@@ -206,7 +206,6 @@ type Tracker struct {
 
 	// Last known chain head for reorg detection.
 	lastHeadHash common.Hash
-	lastHeadNum  uint64
 
 	// Event channels (non-blocking sends from callers).
 	announceCh  chan *announceEvent
@@ -314,7 +313,12 @@ func (t *Tracker) Get(hash common.Hash) *TxInfo {
 	resp := make(chan *TxInfo, 1)
 	select {
 	case t.queryCh <- &txQuery{hash: hash, resp: resp}:
-		return <-resp
+		select {
+		case info := <-resp:
+			return info
+		case <-t.quit:
+			return nil
+		}
 	case <-t.quit:
 		return nil
 	}
@@ -326,7 +330,12 @@ func (t *Tracker) Status(hash common.Hash) TxStatus {
 	resp := make(chan TxStatus, 1)
 	select {
 	case t.statusCh <- &statusQuery{hash: hash, resp: resp}:
-		return <-resp
+		select {
+		case s := <-resp:
+			return s
+		case <-t.quit:
+			return 0
+		}
 	case <-t.quit:
 		return 0
 	}
@@ -337,7 +346,12 @@ func (t *Tracker) GetPeerStats(peer string) PeerStats {
 	resp := make(chan PeerStats, 1)
 	select {
 	case t.peerStatsCh <- &peerStatsQuery{peer: peer, resp: resp}:
-		return <-resp
+		select {
+		case ps := <-resp:
+			return ps
+		case <-t.quit:
+			return PeerStats{}
+		}
 	case <-t.quit:
 		return PeerStats{}
 	}
@@ -490,6 +504,12 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 			rec.received = now
 			rec.deliverer = ev.peer
 			t.touchLRU(rec)
+		} else if rec.local && rec.deliverer == "" {
+			// Repair race: handleNewTxs created this as local before
+			// the receive event was processed.
+			rec.local = false
+			rec.deliverer = ev.peer
+			t.touchLRU(rec)
 		}
 	}
 }
@@ -574,7 +594,6 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 		t.handleReorg(blockNum)
 	}
 	t.lastHeadHash = blockHash
-	t.lastHeadNum = blockNum
 
 	// Mark all transactions in the block as included.
 	for _, tx := range ev.Transactions {
@@ -585,7 +604,7 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 			// Transaction we never tracked (e.g., from a synced block).
 			continue
 		}
-		if rec.status <= TxIncluded {
+		if rec.status != TxFinalized {
 			rec.status = TxIncluded
 			rec.included = now
 			rec.blockNum = blockNum

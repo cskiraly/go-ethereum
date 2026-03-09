@@ -20,6 +20,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
@@ -555,6 +556,101 @@ func TestStatusUntracked(t *testing.T) {
 
 	if s := tr.Status(makeHash(99)); s != 0 {
 		t.Fatalf("expected 0 for untracked, got %v", s)
+	}
+}
+
+func TestRejectedToIncluded(t *testing.T) {
+	tr, _, chain, _ := testTracker(0)
+	defer tr.Stop()
+
+	tx := types.NewTx(&types.LegacyTx{Nonce: 77, GasPrice: big.NewInt(1), Gas: 21000})
+	txHash := tx.Hash()
+
+	// Receive and reject the transaction (e.g., underpriced locally).
+	tr.NotifyReceived("peerA", []common.Hash{txHash})
+	waitStep(t, tr)
+	tr.NotifyRejected([]common.Hash{txHash}, []error{errors.New("underpriced")})
+	waitStep(t, tr)
+
+	if s := tr.Status(txHash); s != TxRejected {
+		t.Fatalf("expected TxRejected, got %v", s)
+	}
+
+	// The transaction is mined by another node and appears in a canonical block.
+	header := makeHeader(200, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header,
+		Transactions: []*types.Transaction{tx},
+	})
+	waitStep(t, tr)
+
+	info := tr.Get(txHash)
+	if info.Status != TxIncluded {
+		t.Fatalf("expected TxIncluded after chain event, got %v", info.Status)
+	}
+	if info.BlockNum != 200 {
+		t.Fatalf("expected block number 200, got %d", info.BlockNum)
+	}
+}
+
+func TestShutdownDuringQuery(t *testing.T) {
+	tr, _, _, _ := testTracker(0)
+
+	// Seed one record so Get returns non-nil under normal operation.
+	hash := makeHash(1)
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	// Stop the tracker, then query — should return zero values, not hang.
+	tr.Stop()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if info := tr.Get(hash); info != nil {
+			t.Error("expected nil from Get after Stop")
+		}
+		if s := tr.Status(hash); s != 0 {
+			t.Errorf("expected 0 from Status after Stop, got %v", s)
+		}
+		if ps := tr.GetPeerStats("peerA"); ps.Announced != 0 {
+			t.Errorf("expected zero PeerStats after Stop, got %+v", ps)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("query methods hung after Stop (deadlock)")
+	}
+}
+
+func TestReceiveRepairsLocalFlag(t *testing.T) {
+	tr, _, _, pool := testTracker(0)
+	defer tr.Stop()
+
+	tx := types.NewTx(&types.LegacyTx{Nonce: 55, GasPrice: big.NewInt(1), Gas: 21000})
+	hash := tx.Hash()
+
+	// Simulate the race: NewTxsEvent arrives before the receive event.
+	pool.sendNewTxs(core.NewTxsEvent{Txs: []*types.Transaction{tx}})
+	waitStep(t, tr)
+
+	info := tr.Get(hash)
+	if !info.Local {
+		t.Fatal("expected local=true before receive repair")
+	}
+
+	// Now the receive event arrives from the peer.
+	tr.NotifyReceived("peerA", []common.Hash{hash})
+	waitStep(t, tr)
+
+	info = tr.Get(hash)
+	if info.Local {
+		t.Fatal("expected local=false after receive repair")
+	}
+	if info.Deliverer != "peerA" {
+		t.Fatalf("expected deliverer peerA, got %q", info.Deliverer)
 	}
 }
 
