@@ -121,6 +121,83 @@ func TestAnnouncedStatus(t *testing.T) {
 	}
 }
 
+func TestAnnouncedToRequested(t *testing.T) {
+	tr, clock, _, _ := testTracker(0)
+	defer tr.Stop()
+
+	clock.Run(1)
+	hash := makeHash(10)
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	tr.NotifyFetchRequested("peerA", []common.Hash{hash})
+	waitStep(t, tr)
+
+	info := tr.Get(hash)
+	if info.Status != TxRequested {
+		t.Fatalf("expected TxRequested, got %v", info.Status)
+	}
+	if info.RequestedFrom != "peerA" {
+		t.Fatalf("expected requestedFrom peerA, got %q", info.RequestedFrom)
+	}
+	if info.Requested == 0 {
+		t.Fatal("expected requested timestamp to be set")
+	}
+}
+
+func TestRequestedToReceived(t *testing.T) {
+	tr, clock, _, _ := testTracker(0)
+	defer tr.Stop()
+
+	clock.Run(1)
+	hash := makeHash(11)
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	tr.NotifyFetchRequested("peerA", []common.Hash{hash})
+	waitStep(t, tr)
+
+	tr.NotifyReceived("peerA", []common.Hash{hash})
+	waitStep(t, tr)
+
+	info := tr.Get(hash)
+	if info.Status != TxReceived {
+		t.Fatalf("expected TxReceived, got %v", info.Status)
+	}
+	if info.Requested == 0 {
+		t.Fatal("expected requested timestamp to be preserved")
+	}
+	if info.Received == 0 {
+		t.Fatal("expected received timestamp to be set")
+	}
+}
+
+func TestFetchRequestedIgnoredIfNotAnnounced(t *testing.T) {
+	tr, _, _, _ := testTracker(0)
+	defer tr.Stop()
+
+	// Fetch requested for untracked tx should be a no-op.
+	hash := makeHash(12)
+	tr.NotifyFetchRequested("peerA", []common.Hash{hash})
+	waitStep(t, tr)
+
+	if info := tr.Get(hash); info != nil {
+		t.Fatal("expected untracked tx to remain untracked")
+	}
+
+	// Fetch requested for already-received tx should not regress status.
+	hash2 := makeHash(13)
+	tr.NotifyReceived("peerA", []common.Hash{hash2})
+	waitStep(t, tr)
+
+	tr.NotifyFetchRequested("peerB", []common.Hash{hash2})
+	waitStep(t, tr)
+
+	if s := tr.Status(hash2); s != TxReceived {
+		t.Fatalf("expected TxReceived (no regression), got %v", s)
+	}
+}
+
 func TestAnnouncedToReceived(t *testing.T) {
 	tr, _, _, _ := testTracker(0)
 	defer tr.Stop()

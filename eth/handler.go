@@ -177,6 +177,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		if p == nil {
 			return errors.New("unknown peer")
 		}
+		h.txTracker.NotifyFetchRequested(peer, hashes)
 		return p.RequestTxs(hashes)
 	}
 	addTxs := func(txs []*types.Transaction) []error {

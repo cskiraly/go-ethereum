@@ -20,8 +20,9 @@ import "github.com/ethereum/go-ethereum/metrics"
 
 var (
 	txTrackedMeter   = metrics.NewRegisteredMeter("eth/txtracker/tracked", nil)
-	txAnnouncedMeter = metrics.NewRegisteredMeter("eth/txtracker/announced", nil)
-	txReceivedMeter  = metrics.NewRegisteredMeter("eth/txtracker/received", nil)
+	txAnnouncedMeter       = metrics.NewRegisteredMeter("eth/txtracker/announced", nil)
+	txFetchRequestedMeter  = metrics.NewRegisteredMeter("eth/txtracker/fetch_requested", nil)
+	txReceivedMeter        = metrics.NewRegisteredMeter("eth/txtracker/received", nil)
 	txPooledMeter    = metrics.NewRegisteredMeter("eth/txtracker/pooled", nil)
 	txIncludedMeter              = metrics.NewRegisteredMeter("eth/txtracker/included", nil)
 	txIncludedFromAnnouncedMeter = metrics.NewRegisteredMeter("eth/txtracker/included/from_announced", nil)

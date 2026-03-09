@@ -36,6 +36,7 @@
     const counters = {
         total: document.getElementById('cnt-total'),
         announced: document.getElementById('cnt-announced'),
+        requested: document.getElementById('cnt-requested'),
         received: document.getElementById('cnt-received'),
         pooled: document.getElementById('cnt-pooled'),
         included: document.getElementById('cnt-included'),
@@ -268,6 +269,8 @@
             ['Type', info.TxType],
             ['Size', info.TxSize + ' bytes'],
             ['First Seen', formatTime(info.FirstSeen)],
+            ['Requested', formatTime(info.Requested)],
+            ['Requested From', info.RequestedFrom || '-'],
             ['Received', formatTime(info.Received)],
             ['Pooled', formatTime(info.Pooled)],
             ['Included', formatTime(info.Included)],

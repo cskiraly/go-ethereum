@@ -36,6 +36,7 @@ type TxStatus uint8
 
 const (
 	TxAnnounced TxStatus = iota + 1 // Hash announced by peer, body not yet received
+	TxRequested                      // Body requested from peer, awaiting response
 	TxReceived                       // Full body received from peer
 	TxPooled                         // Accepted into local transaction pool
 	TxIncluded                       // Mined into a canonical block
@@ -48,6 +49,8 @@ func (s TxStatus) String() string {
 	switch s {
 	case TxAnnounced:
 		return "announced"
+	case TxRequested:
+		return "requested"
 	case TxReceived:
 		return "received"
 	case TxPooled:
@@ -86,8 +89,9 @@ const (
 	defaultMaxEntries = 65536
 
 	// Channel sizes for the event loop.
-	announceChanSize = 1024
-	receiveChanSize  = 256
+	announceChanSize      = 1024
+	fetchRequestChanSize = 256
+	receiveChanSize      = 256
 	pooledChanSize   = 256
 	rejectedChanSize = 256
 	peerDropChanSize = 64
@@ -104,13 +108,15 @@ type txRecord struct {
 	txSize uint32 // Size from announcement metadata
 
 	firstSeen mclock.AbsTime // When first announced or received
+	requested mclock.AbsTime // When body was requested from a peer
 	received  mclock.AbsTime // When full body arrived
 	pooled    mclock.AbsTime // When accepted into pool
 	included  mclock.AbsTime // When included in canonical block
 	finalized mclock.AbsTime // When block was finalized
 
-	announcers []string    // Peers that announced (ordered, first = earliest)
-	deliverer  string      // Peer that delivered the full transaction
+	announcers    []string    // Peers that announced (ordered, first = earliest)
+	requestedFrom string      // Peer we requested the body from
+	deliverer     string      // Peer that delivered the full transaction
 	blockNum   uint64      // Block number (when included)
 	blockHash  common.Hash // Block hash (when included)
 	rejectErr  string      // Rejection reason (when status == TxRejected)
@@ -132,13 +138,15 @@ type TxInfo struct {
 	Local      bool
 	TxType     uint8
 	TxSize     uint32
-	FirstSeen  mclock.AbsTime
-	Received   mclock.AbsTime
-	Pooled     mclock.AbsTime
-	Included   mclock.AbsTime
-	Finalized  mclock.AbsTime
-	Announcers []string
-	Deliverer  string
+	FirstSeen     mclock.AbsTime
+	Requested     mclock.AbsTime
+	Received      mclock.AbsTime
+	Pooled        mclock.AbsTime
+	Included      mclock.AbsTime
+	Finalized     mclock.AbsTime
+	Announcers    []string
+	RequestedFrom string
+	Deliverer     string
 	BlockNum   uint64
 	BlockHash  common.Hash
 	RejectErr  string
@@ -171,6 +179,11 @@ type announceEvent struct {
 	hashes []common.Hash
 	types  []byte
 	sizes  []uint32
+}
+
+type fetchRequestedEvent struct {
+	peer   string
+	hashes []common.Hash
 }
 
 type receiveEvent struct {
@@ -227,8 +240,9 @@ type Tracker struct {
 	lastHeadHash common.Hash
 
 	// Event channels (buffered; senders block when full or on quit).
-	announceCh  chan *announceEvent
-	receiveCh   chan *receiveEvent
+	announceCh      chan *announceEvent
+	fetchRequestCh  chan *fetchRequestedEvent
+	receiveCh       chan *receiveEvent
 	pooledCh    chan *pooledEvent
 	rejectedCh  chan *rejectedEvent
 	peerDropCh  chan string
@@ -264,8 +278,9 @@ func New(config Config) *Tracker {
 		txpool:      config.TxPool,
 		maxEntries:  maxEntries,
 		evictList:   list.New(),
-		announceCh:  make(chan *announceEvent, announceChanSize),
-		receiveCh:   make(chan *receiveEvent, receiveChanSize),
+		announceCh:     make(chan *announceEvent, announceChanSize),
+		fetchRequestCh: make(chan *fetchRequestedEvent, fetchRequestChanSize),
+		receiveCh:      make(chan *receiveEvent, receiveChanSize),
 		pooledCh:    make(chan *pooledEvent, pooledChanSize),
 		rejectedCh:  make(chan *rejectedEvent, rejectedChanSize),
 		peerDropCh:  make(chan string, peerDropChanSize),
@@ -292,6 +307,14 @@ func (t *Tracker) Stop() {
 func (t *Tracker) NotifyAnnounced(peer string, hashes []common.Hash, types []byte, sizes []uint32) {
 	select {
 	case t.announceCh <- &announceEvent{peer: peer, hashes: hashes, types: types, sizes: sizes}:
+	case <-t.quit:
+	}
+}
+
+// NotifyFetchRequested records that transaction bodies were requested from a peer.
+func (t *Tracker) NotifyFetchRequested(peer string, hashes []common.Hash) {
+	select {
+	case t.fetchRequestCh <- &fetchRequestedEvent{peer: peer, hashes: hashes}:
 	case <-t.quit:
 	}
 }
@@ -427,6 +450,9 @@ func (t *Tracker) loop() {
 		case ev := <-t.announceCh:
 			t.handleAnnounce(ev)
 
+		case ev := <-t.fetchRequestCh:
+			t.handleFetchRequested(ev)
+
 		case ev := <-t.receiveCh:
 			t.handleReceive(ev)
 
@@ -516,6 +542,29 @@ func (t *Tracker) handleAnnounce(ev *announceEvent) {
 
 		// This peer is the first announcer.
 		ps.firstAnnouncer++
+	}
+}
+
+// handleFetchRequested processes notification that transaction bodies were
+// requested from a peer. Only advances Announced records to Requested.
+func (t *Tracker) handleFetchRequested(ev *fetchRequestedEvent) {
+	now := t.clock.Now()
+
+	for _, hash := range ev.hashes {
+		txFetchRequestedMeter.Mark(1)
+
+		rec := t.txs[hash]
+		if rec == nil {
+			continue
+		}
+		// Only advance if currently Announced (not yet requested or received).
+		if rec.status == TxAnnounced {
+			rec.status = TxRequested
+			rec.requested = now
+			rec.requestedFrom = ev.peer
+			t.touchLRU(rec)
+			t.emitEvent(hash, TxAnnounced, TxRequested, rec, ev.peer)
+		}
 	}
 }
 
@@ -773,19 +822,21 @@ func (t *Tracker) answerQuery(hash common.Hash) *TxInfo {
 		return nil
 	}
 	info := &TxInfo{
-		Status:    rec.status,
-		Local:     rec.local,
-		TxType:    rec.txType,
-		TxSize:    rec.txSize,
-		FirstSeen: rec.firstSeen,
-		Received:  rec.received,
-		Pooled:    rec.pooled,
-		Included:  rec.included,
-		Finalized: rec.finalized,
-		Deliverer: rec.deliverer,
-		BlockNum:  rec.blockNum,
-		BlockHash: rec.blockHash,
-		RejectErr: rec.rejectErr,
+		Status:        rec.status,
+		Local:         rec.local,
+		TxType:        rec.txType,
+		TxSize:        rec.txSize,
+		FirstSeen:     rec.firstSeen,
+		Requested:     rec.requested,
+		Received:      rec.received,
+		Pooled:        rec.pooled,
+		Included:      rec.included,
+		Finalized:     rec.finalized,
+		RequestedFrom: rec.requestedFrom,
+		Deliverer:     rec.deliverer,
+		BlockNum:      rec.blockNum,
+		BlockHash:     rec.blockHash,
+		RejectErr:     rec.rejectErr,
 	}
 	// Copy announcers to avoid data races.
 	if len(rec.announcers) > 0 {
