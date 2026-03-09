@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	stdlog "log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -29,7 +30,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/cmd/txview/internal/ui"
 	"github.com/ethereum/go-ethereum/internal/flags"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/urfave/cli/v2"
 )
@@ -84,24 +84,18 @@ func run(ctx *cli.Context) error {
 			r.SetURL(target)
 			// Remove Origin header so geth skips the origin check.
 			r.Out.Header.Del("Origin")
-			log.Info("WS proxy rewrite",
-				"method", r.In.Method,
-				"inURL", r.In.URL.String(),
-				"outURL", r.Out.URL.String(),
-				"upgrade", r.In.Header.Get("Upgrade"),
-				"connection", r.In.Header.Get("Connection"),
-			)
+			stdlog.Printf("[proxy] rewrite: %s %s -> %s (Upgrade: %q, Connection: %q)",
+				r.In.Method, r.In.URL.String(), r.Out.URL.String(),
+				r.In.Header.Get("Upgrade"), r.In.Header.Get("Connection"))
+			stdlog.Printf("[proxy] outgoing headers: %v", r.Out.Header)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Error("WS proxy error", "url", r.URL.String(), "err", err)
+			stdlog.Printf("[proxy] ERROR: %s %s: %v", r.Method, r.URL.String(), err)
 			http.Error(w, err.Error(), http.StatusBadGateway)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			log.Info("WS proxy response",
-				"status", resp.StatusCode,
-				"upgrade", resp.Header.Get("Upgrade"),
-				"connection", resp.Header.Get("Connection"),
-			)
+			stdlog.Printf("[proxy] response: status=%d, Upgrade=%q, Connection=%q",
+				resp.StatusCode, resp.Header.Get("Upgrade"), resp.Header.Get("Connection"))
 			return nil
 		},
 	}
@@ -114,7 +108,7 @@ func run(ctx *cli.Context) error {
 			scheme = "wss"
 		}
 		wsURL := scheme + "://" + r.Host + "/ws"
-		log.Info("Serving config", "rpcEndpoint", wsURL)
+		stdlog.Printf("[config] serving rpcEndpoint=%s", wsURL)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"rpcEndpoint": wsURL,
