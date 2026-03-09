@@ -409,6 +409,9 @@ func (s *Ethereum) APIs() []rpc.API {
 		}, {
 			Namespace: "net",
 			Service:   s.netRPCService,
+		}, {
+			Namespace: "txtracker",
+			Service:   NewTxTrackerAPI(s.handler.txTracker),
 		},
 	}...)
 }
