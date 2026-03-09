@@ -82,6 +82,10 @@ func run(ctx *cli.Context) error {
 	wsProxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
+			// SetURL preserves the incoming path (/ws), but geth serves
+			// WebSocket at the root. Override to the target's path.
+			r.Out.URL.Path = target.Path
+			r.Out.URL.RawPath = ""
 			// Remove Origin header so geth skips the origin check.
 			r.Out.Header.Del("Origin")
 			stdlog.Printf("[proxy] rewrite: %s %s -> %s (Upgrade: %q, Connection: %q)",
