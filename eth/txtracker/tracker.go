@@ -747,6 +747,7 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 			rec.included = now
 			rec.blockNum = blockNum
 			rec.blockHash = blockHash
+			fillTxMeta(rec, tx)
 			t.touchLRU(rec)
 			t.emitEvent(hash, oldStatus, TxIncluded, rec, "")
 			txIncludedMeter.Mark(1)
