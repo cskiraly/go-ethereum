@@ -21,6 +21,7 @@ package txtracker
 import (
 	"container/list"
 	"encoding/json"
+	"math/big"
 	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -107,6 +108,14 @@ type txRecord struct {
 	txType uint8  // Consensus tx type from announcement metadata
 	txSize uint32 // Size from announcement metadata
 
+	// Transaction metadata (populated when full body is received).
+	nonce     uint64
+	gas       uint64
+	gasFeeCap *big.Int
+	gasTipCap *big.Int
+	value     *big.Int
+	to        *common.Address
+
 	firstSeen mclock.AbsTime // When first announced or received
 	requested mclock.AbsTime // When body was requested from a peer
 	received  mclock.AbsTime // When full body arrived
@@ -138,6 +147,12 @@ type TxInfo struct {
 	Local      bool
 	TxType     uint8
 	TxSize     uint32
+	Nonce      uint64
+	Gas        uint64
+	GasFeeCap  *big.Int
+	GasTipCap  *big.Int
+	Value      *big.Int
+	To         *common.Address
 	FirstSeen     mclock.AbsTime
 	Requested     mclock.AbsTime
 	Received      mclock.AbsTime
@@ -187,8 +202,8 @@ type fetchRequestedEvent struct {
 }
 
 type receiveEvent struct {
-	peer   string
-	hashes []common.Hash
+	peer string
+	txs  []*types.Transaction
 }
 
 type pooledEvent struct {
@@ -320,9 +335,9 @@ func (t *Tracker) NotifyFetchRequested(peer string, hashes []common.Hash) {
 }
 
 // NotifyReceived records that transaction bodies were received from a peer.
-func (t *Tracker) NotifyReceived(peer string, hashes []common.Hash) {
+func (t *Tracker) NotifyReceived(peer string, txs []*types.Transaction) {
 	select {
-	case t.receiveCh <- &receiveEvent{peer: peer, hashes: hashes}:
+	case t.receiveCh <- &receiveEvent{peer: peer, txs: txs}:
 	case <-t.quit:
 	}
 }
@@ -573,7 +588,8 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 	now := t.clock.Now()
 	ps := t.getOrCreatePeer(ev.peer)
 
-	for _, hash := range ev.hashes {
+	for _, tx := range ev.txs {
+		hash := tx.Hash()
 		ps.delivered++
 		txReceivedMeter.Mark(1)
 
@@ -586,6 +602,7 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 				received:  now,
 				deliverer: ev.peer,
 			}
+			fillTxMeta(rec, tx)
 			t.insertRecord(hash, rec)
 			t.emitEvent(hash, 0, TxReceived, rec, ev.peer)
 			txTrackedMeter.Mark(1)
@@ -597,6 +614,7 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 			rec.status = TxReceived
 			rec.received = now
 			rec.deliverer = ev.peer
+			fillTxMeta(rec, tx)
 			t.touchLRU(rec)
 			t.emitEvent(hash, oldStatus, TxReceived, rec, ev.peer)
 		} else if rec.local && rec.deliverer == "" {
@@ -604,6 +622,7 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 			// the receive event was processed.
 			rec.local = false
 			rec.deliverer = ev.peer
+			fillTxMeta(rec, tx)
 			t.touchLRU(rec)
 		}
 	}
@@ -707,13 +726,12 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 			// at Included.
 			rec = &txRecord{
 				status:    TxIncluded,
-				txType:    tx.Type(),
-				txSize:    uint32(tx.Size()),
 				firstSeen: now,
 				included:  now,
 				blockNum:  blockNum,
 				blockHash: blockHash,
 			}
+			fillTxMeta(rec, tx)
 			t.insertRecord(hash, rec)
 			t.emitEvent(hash, 0, TxIncluded, rec, "")
 			txTrackedMeter.Mark(1)
@@ -803,11 +821,10 @@ func (t *Tracker) handleNewTxs(ev core.NewTxsEvent) {
 		rec := &txRecord{
 			status:    TxPooled,
 			local:     true,
-			txType:    tx.Type(),
-			txSize:    uint32(tx.Size()),
 			firstSeen: now,
 			pooled:    now,
 		}
+		fillTxMeta(rec, tx)
 		t.insertRecord(hash, rec)
 		t.emitEvent(hash, 0, TxPooled, rec, "")
 		txTrackedMeter.Mark(1)
@@ -826,6 +843,12 @@ func (t *Tracker) answerQuery(hash common.Hash) *TxInfo {
 		Local:         rec.local,
 		TxType:        rec.txType,
 		TxSize:        rec.txSize,
+		Nonce:         rec.nonce,
+		Gas:           rec.gas,
+		GasFeeCap:     rec.gasFeeCap,
+		GasTipCap:     rec.gasTipCap,
+		Value:         rec.value,
+		To:            rec.to,
 		FirstSeen:     rec.firstSeen,
 		Requested:     rec.requested,
 		Received:      rec.received,
@@ -878,6 +901,19 @@ func (t *Tracker) evictOldest() {
 }
 
 // getOrCreatePeer returns the peerStats for a peer, creating it if needed.
+// fillTxMeta populates transaction metadata fields on a record from a full
+// transaction object. Also updates txType and txSize to accurate values.
+func fillTxMeta(rec *txRecord, tx *types.Transaction) {
+	rec.txType = tx.Type()
+	rec.txSize = uint32(tx.Size())
+	rec.nonce = tx.Nonce()
+	rec.gas = tx.Gas()
+	rec.gasFeeCap = tx.GasFeeCap()
+	rec.gasTipCap = tx.GasTipCap()
+	rec.value = tx.Value()
+	rec.to = tx.To()
+}
+
 func (t *Tracker) getOrCreatePeer(peer string) *peerStats {
 	ps := t.peers[peer]
 	if ps == nil {

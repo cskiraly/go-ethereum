@@ -70,11 +70,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err := handleTransactions(peer, txs, true); err != nil {
 			return fmt.Errorf("Transactions: %v", err)
 		}
-		hashes := make([]common.Hash, len(txs))
-		for i, tx := range txs {
-			hashes[i] = tx.Hash()
-		}
-		h.txTracker.NotifyReceived(peer.ID(), hashes)
+		h.txTracker.NotifyReceived(peer.ID(), txs)
 		return h.txFetcher.Enqueue(peer.ID(), txs, false)
 
 	case *eth.PooledTransactionsPacket:
@@ -85,11 +81,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err := handleTransactions(peer, txs, false); err != nil {
 			return fmt.Errorf("PooledTransactions: %v", err)
 		}
-		hashes := make([]common.Hash, len(txs))
-		for i, tx := range txs {
-			hashes[i] = tx.Hash()
-		}
-		h.txTracker.NotifyReceived(peer.ID(), hashes)
+		h.txTracker.NotifyReceived(peer.ID(), txs)
 		return h.txFetcher.Enqueue(peer.ID(), txs, true)
 
 	default:

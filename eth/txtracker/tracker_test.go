@@ -91,6 +91,10 @@ func makeHash(i byte) common.Hash {
 	return common.Hash{i}
 }
 
+func makeTx(nonce uint64) *types.Transaction {
+	return types.NewTx(&types.LegacyTx{Nonce: nonce, GasPrice: big.NewInt(1), Gas: 21000})
+}
+
 func makeHeader(num uint64, parent common.Hash) *types.Header {
 	return &types.Header{
 		Number:     new(big.Int).SetUint64(num),
@@ -150,14 +154,15 @@ func TestRequestedToReceived(t *testing.T) {
 	defer tr.Stop()
 
 	clock.Run(1)
-	hash := makeHash(11)
+	tx := makeTx(11)
+	hash := tx.Hash()
 	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
 	waitStep(t, tr)
 
 	tr.NotifyFetchRequested("peerA", []common.Hash{hash})
 	waitStep(t, tr)
 
-	tr.NotifyReceived("peerA", []common.Hash{hash})
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
 	waitStep(t, tr)
 
 	info := tr.Get(hash)
@@ -186,8 +191,9 @@ func TestFetchRequestedIgnoredIfNotAnnounced(t *testing.T) {
 	}
 
 	// Fetch requested for already-received tx should not regress status.
-	hash2 := makeHash(13)
-	tr.NotifyReceived("peerA", []common.Hash{hash2})
+	tx2 := makeTx(13)
+	hash2 := tx2.Hash()
+	tr.NotifyReceived("peerA", []*types.Transaction{tx2})
 	waitStep(t, tr)
 
 	tr.NotifyFetchRequested("peerB", []common.Hash{hash2})
@@ -202,11 +208,12 @@ func TestAnnouncedToReceived(t *testing.T) {
 	tr, _, _, _ := testTracker(0)
 	defer tr.Stop()
 
-	hash := makeHash(2)
+	tx := makeTx(2)
+	hash := tx.Hash()
 	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{200})
 	waitStep(t, tr)
 
-	tr.NotifyReceived("peerB", []common.Hash{hash})
+	tr.NotifyReceived("peerB", []*types.Transaction{tx})
 	waitStep(t, tr)
 
 	info := tr.Get(hash)
@@ -229,8 +236,9 @@ func TestReceivedToPooled(t *testing.T) {
 	// Advance clock so timestamps are non-zero.
 	clock.Run(1)
 
-	hash := makeHash(3)
-	tr.NotifyReceived("peerA", []common.Hash{hash})
+	tx := makeTx(3)
+	hash := tx.Hash()
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
 	waitStep(t, tr)
 
 	tr.NotifyPooled([]common.Hash{hash})
@@ -249,8 +257,9 @@ func TestReceivedToRejected(t *testing.T) {
 	tr, _, _, _ := testTracker(0)
 	defer tr.Stop()
 
-	hash := makeHash(4)
-	tr.NotifyReceived("peerA", []common.Hash{hash})
+	tx := makeTx(4)
+	hash := tx.Hash()
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
 	waitStep(t, tr)
 
 	tr.NotifyRejected([]common.Hash{hash}, []error{errors.New("underpriced")})
@@ -281,7 +290,7 @@ func TestFullLifecycle(t *testing.T) {
 	}
 
 	// Step 2: Received
-	tr.NotifyReceived("peerB", []common.Hash{txHash})
+	tr.NotifyReceived("peerB", []*types.Transaction{tx})
 	waitStep(t, tr)
 	if s := tr.Status(txHash); s != TxReceived {
 		t.Fatalf("step 2: expected TxReceived, got %v", s)
@@ -399,15 +408,18 @@ func TestEvictionLRU(t *testing.T) {
 	tr, _, _, _ := testTracker(5)
 	defer tr.Stop()
 
+	// Use real txs so we can call NotifyReceived with matching hashes.
+	txs := make([]*types.Transaction, 5)
 	hashes := make([]common.Hash, 5)
-	for i := range hashes {
-		hashes[i] = makeHash(byte(i + 1))
+	for i := range txs {
+		txs[i] = makeTx(uint64(i + 1))
+		hashes[i] = txs[i].Hash()
 		tr.NotifyAnnounced("peerA", []common.Hash{hashes[i]}, []byte{0}, []uint32{100})
 		waitStep(t, tr)
 	}
 
 	// Touch hashes[0] by receiving it — moves it to front of LRU.
-	tr.NotifyReceived("peerB", []common.Hash{hashes[0]})
+	tr.NotifyReceived("peerB", []*types.Transaction{txs[0]})
 	waitStep(t, tr)
 
 	// Add a 6th — should evict hashes[1] (now oldest), not hashes[0].
@@ -427,7 +439,8 @@ func TestPeerStats(t *testing.T) {
 	tr, _, _, _ := testTracker(0)
 	defer tr.Stop()
 
-	hash1 := makeHash(1)
+	tx1 := makeTx(1)
+	hash1 := tx1.Hash()
 	hash2 := makeHash(2)
 
 	// peerA announces hash1 (first announcer) and hash2.
@@ -439,7 +452,7 @@ func TestPeerStats(t *testing.T) {
 	waitStep(t, tr)
 
 	// peerA delivers hash1.
-	tr.NotifyReceived("peerA", []common.Hash{hash1})
+	tr.NotifyReceived("peerA", []*types.Transaction{tx1})
 	waitStep(t, tr)
 
 	// hash1 gets pooled.
@@ -565,8 +578,9 @@ func TestReceiveWithoutAnnounce(t *testing.T) {
 	tr, _, _, _ := testTracker(0)
 	defer tr.Stop()
 
-	hash := makeHash(1)
-	tr.NotifyReceived("peerA", []common.Hash{hash})
+	tx := makeTx(1)
+	hash := tx.Hash()
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
 	waitStep(t, tr)
 
 	info := tr.Get(hash)
@@ -625,7 +639,7 @@ func TestRejectedToIncluded(t *testing.T) {
 	txHash := tx.Hash()
 
 	// Receive and reject the transaction (e.g., underpriced locally).
-	tr.NotifyReceived("peerA", []common.Hash{txHash})
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
 	waitStep(t, tr)
 	tr.NotifyRejected([]common.Hash{txHash}, []error{errors.New("underpriced")})
 	waitStep(t, tr)
@@ -758,7 +772,7 @@ func TestReceiveRepairsLocalFlag(t *testing.T) {
 	}
 
 	// Now the receive event arrives from the peer.
-	tr.NotifyReceived("peerA", []common.Hash{hash})
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
 	waitStep(t, tr)
 
 	info = tr.Get(hash)
@@ -788,7 +802,7 @@ func TestEventFeed(t *testing.T) {
 	waitStep(t, tr)
 
 	// Step 2: Received
-	tr.NotifyReceived("peerB", []common.Hash{txHash})
+	tr.NotifyReceived("peerB", []*types.Transaction{tx})
 	waitStep(t, tr)
 
 	// Step 3: Pooled
