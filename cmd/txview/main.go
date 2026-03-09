@@ -88,19 +88,10 @@ func run(ctx *cli.Context) error {
 			r.Out.URL.RawPath = ""
 			// Remove Origin header so geth skips the origin check.
 			r.Out.Header.Del("Origin")
-			stdlog.Printf("[proxy] rewrite: %s %s -> %s (Upgrade: %q, Connection: %q)",
-				r.In.Method, r.In.URL.String(), r.Out.URL.String(),
-				r.In.Header.Get("Upgrade"), r.In.Header.Get("Connection"))
-			stdlog.Printf("[proxy] outgoing headers: %v", r.Out.Header)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			stdlog.Printf("[proxy] ERROR: %s %s: %v", r.Method, r.URL.String(), err)
+			stdlog.Printf("[proxy] error: %s %s: %v", r.Method, r.URL.String(), err)
 			http.Error(w, err.Error(), http.StatusBadGateway)
-		},
-		ModifyResponse: func(resp *http.Response) error {
-			stdlog.Printf("[proxy] response: status=%d, Upgrade=%q, Connection=%q",
-				resp.StatusCode, resp.Header.Get("Upgrade"), resp.Header.Get("Connection"))
-			return nil
 		},
 	}
 	http.Handle("/ws", wsProxy)
@@ -112,7 +103,6 @@ func run(ctx *cli.Context) error {
 			scheme = "wss"
 		}
 		wsURL := scheme + "://" + r.Host + "/ws"
-		stdlog.Printf("[config] serving rpcEndpoint=%s", wsURL)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"rpcEndpoint": wsURL,

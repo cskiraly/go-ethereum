@@ -694,16 +694,13 @@ func (t *Tracker) handleReorg(newBlockNum uint64) {
 // block is finalized.
 func (t *Tracker) checkFinalization() {
 	if t.chain == nil {
-		log.Debug("checkFinalization: chain is nil")
 		return
 	}
 	finalBlock := t.chain.CurrentFinalBlock()
 	if finalBlock == nil {
-		log.Debug("checkFinalization: no finalized block yet")
 		return
 	}
 	finalNum := finalBlock.Number.Uint64()
-	log.Debug("checkFinalization", "finalizedBlock", finalNum, "trackedTxs", len(t.txs))
 
 	for hash, rec := range t.txs {
 		if rec.status == TxIncluded && rec.blockNum <= finalNum {
