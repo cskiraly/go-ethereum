@@ -299,9 +299,12 @@
                 '<span class="col-peer"></span>' +
                 '<span class="col-block"></span>' +
                 '<span class="col-age"></span>' +
-                '<span class="col-error"></span>';
+                '<span class="col-error"></span>' +
+                '<span class="col-progress"></span>';
             rowContainer.appendChild(row);
         }
+
+        var fetchNeeded = [];
 
         for (var i = 0; i < count; i++) {
             var idx = startIdx + i;
@@ -327,6 +330,23 @@
             cols[3].textContent = ev.blockNum || '-';
             cols[4].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
             cols[5].textContent = ev.rejectErr || '';
+
+            var cached = topCache.get(hash);
+            if (cached) {
+                cols[6].innerHTML = renderProgress(cached.info);
+            } else {
+                cols[6].textContent = '\u2026';
+                if (!topInflight.has(hash)) {
+                    var entry = topCache.get(hash);
+                    if (!entry || (now - entry.fetchedAt) > CACHE_STALE_MS) {
+                        fetchNeeded.push(hash);
+                    }
+                }
+            }
+        }
+
+        if (fetchNeeded.length > 0) {
+            fetchTopBatch(fetchNeeded);
         }
     }
 
@@ -603,7 +623,7 @@
     }
 
     // ========================================================================
-    // Progress rendering (Top view)
+    // Progress rendering (shared by Feed and Top views)
     // ========================================================================
     function renderProgress(info) {
         var base = parseTS(info.FirstSeen);
