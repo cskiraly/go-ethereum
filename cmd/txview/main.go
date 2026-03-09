@@ -22,7 +22,10 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/cmd/txview/internal/ui"
 	"github.com/ethereum/go-ethereum/internal/flags"
@@ -68,6 +71,28 @@ func run(ctx *cli.Context) error {
 	}
 	client.Close()
 
+	// Reverse proxy for /ws so the browser connects same-origin (avoids
+	// geth's WebSocket origin check).
+	httpEndpoint := strings.Replace(strings.Replace(endpoint, "ws://", "http://", 1), "wss://", "https://", 1)
+	target, err := url.Parse(httpEndpoint)
+	if err != nil {
+		return fmt.Errorf("invalid RPC endpoint URL: %w", err)
+	}
+	wsProxy := httputil.NewSingleHostReverseProxy(target)
+	http.Handle("/ws", wsProxy)
+
+	// Config endpoint tells the JS to use the proxied /ws path.
+	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		scheme := "ws"
+		if r.TLS != nil {
+			scheme = "wss"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"rpcEndpoint": scheme + "://" + r.Host + "/ws",
+		})
+	})
+
 	// Serve embedded UI assets.
 	assets, err := fs.Sub(ui.Assets, ".")
 	if err != nil {
@@ -75,16 +100,8 @@ func run(ctx *cli.Context) error {
 	}
 	http.Handle("/", http.FileServerFS(assets))
 
-	// Config endpoint for the JS client.
-	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"rpcEndpoint": endpoint,
-		})
-	})
-
 	fmt.Printf("txview listening on http://%s\n", addr)
-	fmt.Printf("  Geth RPC: %s\n", endpoint)
+	fmt.Printf("  Geth RPC: %s (proxied at /ws)\n", endpoint)
 	fmt.Println("  Ensure geth is started with: --ws --ws.api txtracker")
 	fmt.Println()
 

@@ -94,6 +94,7 @@ Added real-time event feed for state transitions:
 ### cmd/txview
 
 Standalone web tool for visualizing transaction lifecycles:
+- Proxies WebSocket through itself (avoids geth's cross-origin rejection)
 - Connects to geth via WebSocket, subscribes to txtracker events
 - Dark-themed single-page app with no build tooling (embedded via `//go:embed`)
 - Scrollable table with status badges, filter by hash/peer/status
