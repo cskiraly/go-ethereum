@@ -109,6 +109,7 @@ type txRecord struct {
 	txSize uint32 // Size from announcement metadata
 
 	// Transaction metadata (populated when full body is received).
+	from      common.Address
 	nonce     uint64
 	gas       uint64
 	gasFeeCap *big.Int
@@ -147,6 +148,7 @@ type TxInfo struct {
 	Local      bool
 	TxType     uint8
 	TxSize     uint32
+	From       common.Address
 	Nonce      uint64
 	Gas        uint64
 	GasFeeCap  *big.Int
@@ -843,6 +845,7 @@ func (t *Tracker) answerQuery(hash common.Hash) *TxInfo {
 		Local:         rec.local,
 		TxType:        rec.txType,
 		TxSize:        rec.txSize,
+		From:          rec.from,
 		Nonce:         rec.nonce,
 		Gas:           rec.gas,
 		GasFeeCap:     rec.gasFeeCap,
@@ -912,6 +915,9 @@ func fillTxMeta(rec *txRecord, tx *types.Transaction) {
 	rec.gasTipCap = tx.GasTipCap()
 	rec.value = tx.Value()
 	rec.to = tx.To()
+	if from, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx); err == nil {
+		rec.from = from
+	}
 }
 
 func (t *Tracker) getOrCreatePeer(peer string) *peerStats {

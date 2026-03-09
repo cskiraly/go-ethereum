@@ -268,6 +268,7 @@
             ['Local', info.Local ? 'yes' : 'no'],
             ['Type', info.TxType],
             ['Size', info.TxSize + ' bytes'],
+            ['From', info.From || '-'],
             ['Nonce', info.Nonce],
             ['Gas', info.Gas],
             ['Gas Fee Cap', info.GasFeeCap ? info.GasFeeCap + ' wei' : '-'],
