@@ -126,27 +126,46 @@
     setInterval(function() { scheduleRender(); }, 5000);
 
     // ========================================================================
-    // Resizable columns
+    // Resizable & reorderable columns
     // ========================================================================
-    // Inject a dynamic <style> element to override column widths. This ensures
-    // that both header spans and virtual-scrolled row spans (which are constantly
-    // recreated) pick up the current width.
+    // A dynamic <style> element overrides column widths and order. Both header
+    // spans and virtual-scrolled row spans pick up the rules automatically.
     var colStyleEl = document.createElement('style');
     document.head.appendChild(colStyleEl);
     var colWidths = {};  // className -> width in px
 
-    function applyColWidths() {
+    // Column order arrays — index = CSS order value.
+    var feedColOrder = ['col-hash', 'col-status', 'col-peer', 'col-block', 'col-age', 'col-error', 'col-progress'];
+    var topColOrder = ['top-col-hash', 'top-col-status', 'top-col-from', 'top-col-nonce', 'top-col-value', 'top-col-feecap', 'top-col-tipcap', 'top-col-gas', 'top-col-age', 'top-col-progress'];
+
+    // Extract the column class (col-* or top-col-*) from an element.
+    function getColClass(el) {
+        return el.className.split(/\s+/).find(function(c) {
+            return (c.startsWith('col-') || c.startsWith('top-col-')) && c !== 'col-resize';
+        });
+    }
+
+    function applyColStyles() {
         var rules = [];
         for (var cls in colWidths) {
             rules.push('.' + cls + ' { width: ' + colWidths[cls] + 'px !important; flex: none !important; }');
         }
+        // Emit order rules for both views.
+        var orders = [feedColOrder, topColOrder];
+        for (var v = 0; v < orders.length; v++) {
+            for (var i = 0; i < orders[v].length; i++) {
+                rules.push('.' + orders[v][i] + ' { order: ' + i + '; }');
+            }
+        }
         colStyleEl.textContent = rules.join('\n');
     }
 
-    // Add resize handles to all header columns (except the last flex column in each view).
+    applyColStyles();
+
+    // Add resize handles to all header columns.
     function setupResizeHandles(header) {
         var spans = header.querySelectorAll(':scope > span');
-        for (var i = 0; i < spans.length - 1; i++) {
+        for (var i = 0; i < spans.length; i++) {
             var handle = document.createElement('span');
             handle.className = 'col-resize';
             spans[i].appendChild(handle);
@@ -158,8 +177,8 @@
     setupResizeHandles(feedHeader);
     setupResizeHandles(topTableHeader);
 
-    // Shared drag state.
-    var resizeCol = null;    // the header <span> being resized
+    // --- Column resize (drag on handle) ---
+    var resizeCol = null;
     var resizeStartX = 0;
     var resizeStartW = 0;
     var resizeHandle = null;
@@ -179,13 +198,10 @@
     document.addEventListener('mousemove', function(e) {
         if (!resizeCol) return;
         var newW = Math.max(40, resizeStartW + (e.clientX - resizeStartX));
-        // Find the column class name (col-* or top-col-*).
-        var cls = resizeCol.className.split(/\s+/).find(function(c) {
-            return c.startsWith('col-') || c.startsWith('top-col-');
-        });
+        var cls = getColClass(resizeCol);
         if (cls) {
             colWidths[cls] = Math.round(newW);
-            applyColWidths();
+            applyColStyles();
         }
     });
 
@@ -197,6 +213,79 @@
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
     });
+
+    // --- Column reorder (drag-and-drop on header spans) ---
+    function setupColumnDrag(header, orderArray) {
+        var spans = header.querySelectorAll(':scope > span');
+        for (var i = 0; i < spans.length; i++) {
+            spans[i].draggable = true;
+        }
+
+        header.addEventListener('dragstart', function(e) {
+            // Don't start drag from the resize handle.
+            if (e.target.classList.contains('col-resize')) {
+                e.preventDefault();
+                return;
+            }
+            var span = e.target.closest('.table-header > span');
+            if (!span) return;
+            var cls = getColClass(span);
+            if (!cls) return;
+            e.dataTransfer.setData('text/plain', cls);
+            e.dataTransfer.effectAllowed = 'move';
+            span.classList.add('col-dragging');
+        });
+
+        header.addEventListener('dragend', function(e) {
+            var span = e.target.closest('.table-header > span');
+            if (span) span.classList.remove('col-dragging');
+            // Clear all drop indicators.
+            var all = header.querySelectorAll(':scope > span');
+            for (var i = 0; i < all.length; i++) {
+                all[i].classList.remove('col-drag-over');
+            }
+        });
+
+        header.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            var span = e.target.closest('.table-header > span');
+            if (!span) return;
+            // Highlight only the hovered column.
+            var all = header.querySelectorAll(':scope > span');
+            for (var i = 0; i < all.length; i++) {
+                all[i].classList.remove('col-drag-over');
+            }
+            span.classList.add('col-drag-over');
+        });
+
+        header.addEventListener('dragleave', function(e) {
+            var span = e.target.closest('.table-header > span');
+            if (span) span.classList.remove('col-drag-over');
+        });
+
+        header.addEventListener('drop', function(e) {
+            e.preventDefault();
+            var draggedCls = e.dataTransfer.getData('text/plain');
+            var span = e.target.closest('.table-header > span');
+            if (!span) return;
+            var targetCls = getColClass(span);
+            if (!targetCls || draggedCls === targetCls) return;
+
+            // Move dragged column to the target's position.
+            var dragIdx = orderArray.indexOf(draggedCls);
+            if (dragIdx < 0) return;
+            orderArray.splice(dragIdx, 1);
+            var targetIdx = orderArray.indexOf(targetCls);
+            orderArray.splice(targetIdx, 0, draggedCls);
+
+            applyColStyles();
+            scheduleRender();
+        });
+    }
+
+    setupColumnDrag(feedHeader, feedColOrder);
+    setupColumnDrag(topTableHeader, topColOrder);
 
     // ========================================================================
     // WebSocket

@@ -201,6 +201,19 @@ header h1 {
     background: rgba(233, 69, 96, 0.4);
 }
 
+/* --- Column drag-and-drop reorder --- */
+.table-header > span[draggable] {
+    cursor: grab;
+}
+
+.table-header > span.col-dragging {
+    opacity: 0.4;
+}
+
+.table-header > span.col-drag-over {
+    border-left: 2px solid #e94560;
+}
+
 /* --- Sortable headers --- */
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: #e0e0e0; }
