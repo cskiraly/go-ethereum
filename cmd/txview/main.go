@@ -78,7 +78,13 @@ func run(ctx *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("invalid RPC endpoint URL: %w", err)
 	}
-	wsProxy := httputil.NewSingleHostReverseProxy(target)
+	wsProxy := &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(target)
+			// Remove Origin header so geth skips the origin check.
+			r.Out.Header.Del("Origin")
+		},
+	}
 	http.Handle("/ws", wsProxy)
 
 	// Config endpoint tells the JS to use the proxied /ws path.
