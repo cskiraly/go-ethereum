@@ -631,13 +631,17 @@ func (p *BlobPool) recheck(addr common.Address, inclusions map[common.Hash]uint6
 			ids    []uint64
 			nonces []uint64
 		)
+		reason := "included"
+		if gapped {
+			reason = "nonce gap"
+		}
 		for i := 0; i < len(txs); i++ {
 			ids = append(ids, txs[i].id)
 			nonces = append(nonces, txs[i].nonce)
 
 			p.stored -= uint64(txs[i].storageSize)
 			p.lookup.untrack(txs[i])
-			p.trackRemoved(txs[i].hash, "included")
+			p.trackRemoved(txs[i].hash, reason)
 
 			// Included transactions blobs need to be moved to the limbo
 			if filled && inclusions != nil {
@@ -1852,7 +1856,7 @@ func (p *BlobPool) drop() {
 	}
 	p.stored -= uint64(drop.storageSize)
 	p.lookup.untrack(drop)
-	p.trackRemoved(drop.hash, "evicted")
+	p.trackRemoved(drop.hash, "capacity")
 
 	// Remove the transaction from the pool's eviction heap:
 	//   - If the entire account was dropped, pop off the address

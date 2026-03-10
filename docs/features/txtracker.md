@@ -442,9 +442,17 @@ add eviction), `"replaced"` (same-nonce higher-fee replacement),
 truncation), `"capacity"` (queue truncation), `"nonce expired"` (demote
 low nonce), `"underfunded"` (demote insufficient balance).
 
-*blobpool*: `"included"` (gapped/filled reset), `"nonce expired"` (overlap
-below chain state), `"underpriced"` (SetGasTip cascade), `"replaced"`
-(same-nonce replacement), `"evicted"` (eviction heap drop).
+*blobpool*: `"included"` (filled reset — all nonces consumed by chain),
+`"nonce gap"` (dangling txs with gap above chain nonce),
+`"nonce expired"` (overlap below chain state), `"underpriced"` (SetGasTip
+cascade), `"replaced"` (same-nonce replacement), `"capacity"` (eviction
+heap overflow).
+
+Shared reasons across both pools: `"replaced"`, `"underpriced"`,
+`"nonce expired"`, `"capacity"`. Pool-specific reasons reflect removal
+paths that only exist in one pool (e.g. legacypool has queue lifetime
+expiry, pending rate limiting, and balance-based demotion; blobpool has
+nonce gap detection and filled-range inclusion cleanup).
 
 **Recovery paths from TxDropped**: A dropped transaction can re-enter the
 lifecycle:
