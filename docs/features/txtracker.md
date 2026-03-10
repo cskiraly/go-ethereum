@@ -46,6 +46,14 @@ Single-goroutine event loop (same pattern as TxFetcher):
    Tracks announcements, deliveries, useful deliveries, and first-announcer
    counts per peer. Stats are cleared on peer disconnect.
 
+5. **Finalization detection**: `checkFinalization()` scans all `TxIncluded`
+   entries and advances those at or below `CurrentFinalBlock()` to
+   `TxFinalized`. Runs both on `ChainEvent` and on a 5-second periodic
+   timer, because `SetFinalized` (called by the Engine API's
+   `ForkchoiceUpdated`) fires independently of and after `ChainEvent`.
+   Caches `lastFinalNum` to skip redundant scans when the finalized pointer
+   hasn't advanced.
+
 ### Files
 
 - `eth/txtracker/tracker.go` — Core types, event loop, state machine
@@ -309,6 +317,18 @@ since the browser connects directly to geth's WebSocket.
   remote txs as local. `handleReceive` now repairs local flag when it finds a
   local record with no deliverer.
 - **CLEANUP-1**: Removed dead `lastHeadNum` field.
+
+### Finalization Timing Fix
+
+`checkFinalization` only ran inside `handleChainEvent`, but `SetFinalized`
+is called by the Engine API (`ForkchoiceUpdated`) after the `ChainEvent`
+fires. This meant the tracker always read a stale finalized pointer. Under
+heavy announce load, the event loop could fall further behind, delaying
+finalization indefinitely.
+
+**Fix**: Added a 5-second periodic ticker that calls `checkFinalization`
+independently of chain events. Added `lastFinalNum` cache to skip redundant
+full map scans when the finalized block hasn't advanced.
 
 ### Top View Sort Fix
 
