@@ -34,6 +34,8 @@
 
     // --- Stats view state ---
     let statsViewDirty = true;
+    let cumRejected = 0;         // monotonic: total txs that ever entered rejected
+    let cumDropped = 0;          // monotonic: total txs that ever entered dropped
 
     // --- Type filter state (shared across all panes) ---
     let typeFilter = new Set([0, 1, 2, 3, 4]);
@@ -473,6 +475,10 @@
         txs.set(hash, ev);
         incrementCounter(ev.newStatus);
         counters.total.textContent = txs.size;
+
+        // Track cumulative entries into sink states.
+        if (ev.newStatus === 'rejected' && (!old || old.newStatus !== 'rejected')) cumRejected++;
+        if (ev.newStatus === 'dropped' && (!old || old.newStatus !== 'dropped')) cumDropped++;
 
         // Invalidate top cache for this tx (status changed).
         topCache.delete(hash);
@@ -1230,10 +1236,10 @@
             drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 - 6,
                       'Rejected', 'start', '#e0e0e0');
             drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 8,
-                      counts.rejected.toLocaleString() + ' now', 'start', '#888', '10');
-            if (nRejected !== counts.rejected) {
+                      cumRejected.toLocaleString() + ' total', 'start', '#888', '10');
+            if (counts.rejected !== cumRejected) {
                 drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 20,
-                          nRejected.toLocaleString() + ' total', 'start', '#555', '9');
+                          counts.rejected.toLocaleString() + ' now', 'start', '#555', '9');
             }
         }
 
@@ -1253,10 +1259,10 @@
             drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 - 6,
                       'Dropped', 'start', '#e0e0e0');
             drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 8,
-                      counts.dropped.toLocaleString() + ' now', 'start', '#888', '10');
-            if (nDropped !== counts.dropped) {
+                      cumDropped.toLocaleString() + ' total', 'start', '#888', '10');
+            if (counts.dropped !== cumDropped) {
                 drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 20,
-                          nDropped.toLocaleString() + ' total', 'start', '#555', '9');
+                          counts.dropped.toLocaleString() + ' now', 'start', '#555', '9');
             }
             // Show drop reason breakdown.
             var reasonKeys = Object.keys(dropReasons).sort(function(a, b) { return dropReasons[b] - dropReasons[a]; });
@@ -1265,7 +1271,7 @@
                 for (var ri = 0; ri < reasonKeys.length; ri++) {
                     parts.push(dropReasons[reasonKeys[ri]] + ' ' + reasonKeys[ri]);
                 }
-                var baseY = dropY + dropBarH / 2 + (nDropped !== counts.dropped ? 32 : 20);
+                var baseY = dropY + dropBarH / 2 + (counts.dropped !== cumDropped ? 32 : 20);
                 drawLabel(svg, dropX + NODE_W + 6, baseY, parts.join(', '), 'start', '#777', '9');
             }
         }
