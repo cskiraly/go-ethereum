@@ -434,25 +434,38 @@ carried through `RemovedTxsEvent.Reasons` (parallel to `Hashes`), stored
 in `txRecord.dropReason`, surfaced in `TxInfo.DropReason` and
 `TxTrackerEvent.DropReason`, and displayed in the browser UI.
 
-Reason strings by pool:
+Reason strings shared by both pools:
 
-*legacypool*: `"expired"` (queue lifetime), `"underpriced"` (SetGasTip or
-add eviction), `"replaced"` (same-nonce higher-fee replacement),
-`"invalid"` (promoteExecutables validation), `"rate limited"` (pending
-truncation), `"capacity"` (queue truncation), `"nonce expired"` (demote
-low nonce), `"underfunded"` (demote insufficient balance).
+| Reason          | Trigger                        | legacypool call site           | blobpool call site          |
+|-----------------|--------------------------------|--------------------------------|-----------------------------|
+| `"replaced"`    | Same-nonce higher-fee tx added | `add`, `enqueueTx`, `promoteTx`| `add` (replacement path)    |
+| `"underpriced"` | Tx below minimum gas tip       | `SetGasTip`, `add`, `promoteTx`| `SetGasTip` (+ cascade)     |
+| `"nonce expired"`| Nonce already consumed by chain| `demoteUnexecutables`          | `reset` (overlap path)      |
+| `"capacity"`    | Pool overflow eviction         | `truncateQueue`                | `drop`                      |
 
-*blobpool*: `"included"` (filled reset — all nonces consumed by chain),
-`"nonce gap"` (dangling txs with gap above chain nonce),
-`"nonce expired"` (overlap below chain state), `"underpriced"` (SetGasTip
-cascade), `"replaced"` (same-nonce replacement), `"capacity"` (eviction
-heap overflow).
+Reason strings specific to legacypool:
 
-Shared reasons across both pools: `"replaced"`, `"underpriced"`,
-`"nonce expired"`, `"capacity"`. Pool-specific reasons reflect removal
-paths that only exist in one pool (e.g. legacypool has queue lifetime
-expiry, pending rate limiting, and balance-based demotion; blobpool has
-nonce gap detection and filled-range inclusion cleanup).
+| Reason          | Trigger                                            | Call site              |
+|-----------------|----------------------------------------------------|------------------------|
+| `"expired"`     | Queue entry exceeds lifetime (`Lifetime` config)   | evict timer loop       |
+| `"invalid"`     | Fails validation after reorg (balance/nonce shift)  | `promoteExecutables`   |
+| `"rate limited"`| Pending count exceeds per-account fairness limit    | `truncatePending`      |
+| `"underfunded"` | Balance too low or gas exceeds block limit          | `demoteUnexecutables`  |
+
+Reason strings specific to blobpool:
+
+| Reason          | Trigger                                            | Call site              |
+|-----------------|----------------------------------------------------|------------------------|
+| `"included"`    | All nonces consumed by chain (filled range)        | `reset` (filled path)  |
+| `"nonce gap"`   | Nonce gap above chain state (dangling txs)         | `reset` (gapped path)  |
+
+The pool-specific reasons reflect removal paths that only exist in one
+pool. Legacypool has queue lifetime expiry, pending rate limiting,
+post-reorg validation, and balance-based demotion. Blobpool has nonce gap
+detection and filled-range inclusion cleanup. Both `"included"` and
+`"nonce gap"` removals from blobpool are typically invisible to the
+tracker because those transactions have already advanced to `TxIncluded`
+via `ChainEvent` before the pool removal event arrives.
 
 **Recovery paths from TxDropped**: A dropped transaction can re-enter the
 lifecycle:
