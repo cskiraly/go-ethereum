@@ -44,12 +44,13 @@
                 <option value="rejected">Rejected</option>
                 <option value="dropped">Dropped</option>
             </select>
+            <span class="type-label">Type</span>
             <div class="type-filter" id="feed-type-filter">
-                <label><input type="checkbox" value="0" checked> Legacy</label>
-                <label><input type="checkbox" value="1" checked> ACL</label>
-                <label><input type="checkbox" value="2" checked> DynFee</label>
-                <label><input type="checkbox" value="3" checked> Blob</label>
-                <label><input type="checkbox" value="4" checked> SetCode</label>
+                <label title="Legacy (type 0)"><input type="checkbox" value="0" checked>0</label>
+                <label title="Access List (type 1)"><input type="checkbox" value="1" checked>1</label>
+                <label title="Dynamic Fee (type 2)"><input type="checkbox" value="2" checked>2</label>
+                <label title="Blob (type 3)"><input type="checkbox" value="3" checked>3</label>
+                <label title="SetCode (type 4)"><input type="checkbox" value="4" checked>4</label>
             </div>
         </div>
         <div class="main-area">
@@ -91,12 +92,13 @@
                 <option value="rejected">Rejected</option>
                 <option value="dropped">Dropped</option>
             </select>
+            <span class="type-label">Type</span>
             <div class="type-filter" id="top-type-filter">
-                <label><input type="checkbox" value="0" checked> Legacy</label>
-                <label><input type="checkbox" value="1" checked> ACL</label>
-                <label><input type="checkbox" value="2" checked> DynFee</label>
-                <label><input type="checkbox" value="3" checked> Blob</label>
-                <label><input type="checkbox" value="4" checked> SetCode</label>
+                <label title="Legacy (type 0)"><input type="checkbox" value="0" checked>0</label>
+                <label title="Access List (type 1)"><input type="checkbox" value="1" checked>1</label>
+                <label title="Dynamic Fee (type 2)"><input type="checkbox" value="2" checked>2</label>
+                <label title="Blob (type 3)"><input type="checkbox" value="3" checked>3</label>
+                <label title="SetCode (type 4)"><input type="checkbox" value="4" checked>4</label>
             </div>
         </div>
         <div class="main-area">
@@ -128,6 +130,16 @@
 
     <!-- Stats view -->
     <div id="view-stats" class="view">
+        <div class="filter-bar">
+            <span class="type-label">Type</span>
+            <div class="type-filter" id="stats-type-filter">
+                <label title="Legacy (type 0)"><input type="checkbox" value="0" checked>0</label>
+                <label title="Access List (type 1)"><input type="checkbox" value="1" checked>1</label>
+                <label title="Dynamic Fee (type 2)"><input type="checkbox" value="2" checked>2</label>
+                <label title="Blob (type 3)"><input type="checkbox" value="3" checked>3</label>
+                <label title="SetCode (type 4)"><input type="checkbox" value="4" checked>4</label>
+            </div>
+        </div>
         <div class="stats-area">
             <svg id="sankey-svg"></svg>
         </div>

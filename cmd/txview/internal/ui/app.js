@@ -38,6 +38,7 @@
     // --- Type filter state ---
     let feedTypeFilter = new Set([0, 1, 2, 3, 4]);
     let topTypeFilter = new Set([0, 1, 2, 3, 4]);
+    let statsTypeFilter = new Set([0, 1, 2, 3, 4]);
 
     // --- DOM refs: shared ---
     const statusDot = document.getElementById('status-dot');
@@ -110,12 +111,16 @@
     document.getElementById('feed-type-filter').addEventListener('change', function() {
         feedTypeFilter = getCheckedTypes('feed-type-filter');
         feedViewDirty = true;
-        statsViewDirty = true;
         scheduleRender();
     });
     document.getElementById('top-type-filter').addEventListener('change', function() {
         topTypeFilter = getCheckedTypes('top-type-filter');
         topViewDirty = true;
+        scheduleRender();
+    });
+    document.getElementById('stats-type-filter').addEventListener('change', function() {
+        statsTypeFilter = getCheckedTypes('stats-type-filter');
+        statsViewDirty = true;
         scheduleRender();
     });
 
@@ -1045,7 +1050,7 @@
         svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
 
         var total = 0;
-        txs.forEach(function(ev) { if (feedTypeFilter.has(ev._txType || 0)) total++; });
+        txs.forEach(function(ev) { if (statsTypeFilter.has(ev._txType || 0)) total++; });
         if (total === 0) {
             drawLabel(svg, W / 2, H / 2, 'Waiting for transactions\u2026', 'middle', '#888', '14');
             return;
@@ -1068,7 +1073,7 @@
         var nReorged = 0;  // total reorg events (included → pooled)
 
         txs.forEach(function(ev) {
-            if (!feedTypeFilter.has(ev._txType || 0)) return;
+            if (!statsTypeFilter.has(ev._txType || 0)) return;
             var s = ev.newStatus;
             if (counts.hasOwnProperty(s)) counts[s]++;
             nReorged += ev._reorgCount || 0;
