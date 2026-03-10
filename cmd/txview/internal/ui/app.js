@@ -35,6 +35,10 @@
     // --- Stats view state ---
     let statsViewDirty = true;
 
+    // --- Type filter state ---
+    let feedTypeFilter = new Set([0, 1, 2, 3]);
+    let topTypeFilter = new Set([0, 1, 2, 3]);
+
     // --- DOM refs: shared ---
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
@@ -95,6 +99,25 @@
     topFilterInput.addEventListener('input', function() { topViewDirty = true; scheduleRender(); });
     topFilterStatus.addEventListener('change', function() { topViewDirty = true; scheduleRender(); });
     topViewport.addEventListener('scroll', scheduleRender);
+
+    // Type filter helpers and events.
+    function getCheckedTypes(containerId) {
+        var s = new Set();
+        var boxes = document.getElementById(containerId).querySelectorAll('input:checked');
+        for (var i = 0; i < boxes.length; i++) s.add(parseInt(boxes[i].value));
+        return s;
+    }
+    document.getElementById('feed-type-filter').addEventListener('change', function() {
+        feedTypeFilter = getCheckedTypes('feed-type-filter');
+        feedViewDirty = true;
+        statsViewDirty = true;
+        scheduleRender();
+    });
+    document.getElementById('top-type-filter').addEventListener('change', function() {
+        topTypeFilter = getCheckedTypes('top-type-filter');
+        topViewDirty = true;
+        scheduleRender();
+    });
 
     // Sortable column headers in top view.
     topTableHeader.addEventListener('click', function(e) {
@@ -424,6 +447,7 @@
             ev._firstStatus = old._firstStatus;
             ev._wasRequested = old._wasRequested || ev.newStatus === 'requested';
             ev._reorgCount = old._reorgCount || 0;
+            ev._txType = ev.txType || old._txType || 0;
             // Track backward transition: included → pooled (reorg).
             if (old.newStatus === 'included' && ev.newStatus === 'pooled') {
                 ev._reorgCount++;
@@ -433,6 +457,7 @@
             ev._firstStatus = ev.newStatus;
             ev._wasRequested = ev.newStatus === 'requested';
             ev._reorgCount = 0;
+            ev._txType = ev.txType || 0;
         }
         txs.set(hash, ev);
         incrementCounter(ev.newStatus);
@@ -484,6 +509,7 @@
     // Feed view
     // ========================================================================
     function matchesFeedFilter(hash, ev) {
+        if (!feedTypeFilter.has(ev._txType || 0)) return false;
         var status = filterStatus.value;
         if (status && ev.newStatus !== status) return false;
         var text = filterInput.value;
@@ -590,6 +616,7 @@
     // Top view
     // ========================================================================
     function matchesTopFilter(hash, ev) {
+        if (!topTypeFilter.has(ev._txType || 0)) return false;
         var status = topFilterStatus.value;
         if (status && ev.newStatus !== status) return false;
         var text = topFilterInput.value;
@@ -1017,7 +1044,8 @@
         while (svg.firstChild) svg.removeChild(svg.firstChild);
         svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
 
-        var total = txs.size;
+        var total = 0;
+        txs.forEach(function(ev) { if (feedTypeFilter.has(ev._txType || 0)) total++; });
         if (total === 0) {
             drawLabel(svg, W / 2, H / 2, 'Waiting for transactions\u2026', 'middle', '#888', '14');
             return;
@@ -1040,6 +1068,7 @@
         var nReorged = 0;  // total reorg events (included → pooled)
 
         txs.forEach(function(ev) {
+            if (!feedTypeFilter.has(ev._txType || 0)) return;
             var s = ev.newStatus;
             if (counts.hasOwnProperty(s)) counts[s]++;
             nReorged += ev._reorgCount || 0;

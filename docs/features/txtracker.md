@@ -252,7 +252,7 @@ state — only events arriving after the WebSocket connects are visible.
 - **Top view**: sortable table of all tracked txs with on-demand RPC fetch
 - **Stats view**: Sankey diagram showing transaction flow through lifecycle stages,
   with now/total labels per node and backward links for reorgs
-- Filter by hash/peer/status, resizable and reorderable columns
+- Filter by hash/peer/status/transaction type, resizable and reorderable columns
 - Resizable detail panel with drag handle (200–800px)
 - Detachable detail panel: pop out to `/tx/0x...` for side-by-side workflows
 - LRU eviction stats panel below the Sankey diagram
@@ -442,6 +442,21 @@ and `handleRejected` all accept `TxDropped` as a valid source status.
 **UI**: Dropped counter in header badges, dropped filter option, dropped
 step in progress pipeline, and a Dropped node in the Sankey diagram
 branching off from Pooled (similar to Rejected branching off Received).
+
+### Transaction Type Filter
+
+`TxType uint8` was added to `TxTrackerEvent` so the browser receives the
+Ethereum transaction type (legacy=0, access list=1, dynamic fee=2, blob=3)
+with every subscription event, without needing an RPC fetch.
+
+The browser stores `_txType` on each event (preserving the type from earlier
+events if a new event has type 0). Checkbox groups in both Feed and Top filter
+bars let the user toggle visibility per type. The Stats view Sankey diagram
+also respects the Feed type filter, counting only matching transactions.
+
+Type 0 serves double duty as both "legacy" and "type not yet known" (e.g.,
+announced but metadata not yet received). This is acceptable since legacy
+transactions are genuinely type 0.
 
 ## Future Work
 

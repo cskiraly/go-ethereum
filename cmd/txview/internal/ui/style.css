@@ -101,6 +101,23 @@ header h1 {
 
 .filter-bar input { width: 360px; }
 
+.type-filter {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 12px;
+}
+.type-filter label {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    color: #aaa;
+}
+.type-filter input[type="checkbox"] {
+    accent-color: #e94560;
+}
+
 .main-area {
     display: flex;
     height: calc(100vh - 130px);

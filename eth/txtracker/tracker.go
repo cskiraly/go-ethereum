@@ -87,6 +87,7 @@ type TxTrackerEvent struct {
 	BlockHash common.Hash    `json:"blockHash,omitempty"`
 	RejectErr string         `json:"rejectErr,omitempty"`
 	Local     bool           `json:"local,omitempty"`
+	TxType    uint8          `json:"txType"`
 }
 
 const (
@@ -494,6 +495,7 @@ func (t *Tracker) emitEvent(hash common.Hash, oldStatus, newStatus TxStatus, rec
 		BlockHash: rec.blockHash,
 		RejectErr: rec.rejectErr,
 		Local:     rec.local,
+		TxType:    rec.txType,
 	}
 	select {
 	case t.emitCh <- ev:
