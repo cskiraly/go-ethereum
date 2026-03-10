@@ -349,3 +349,85 @@ header h1 {
     word-break: break-all;
     font-size: 12px;
 }
+
+/* --- Detail panel resize handle --- */
+.detail-panel {
+    position: relative;
+}
+
+.detail-resize {
+    position: absolute;
+    left: -3px;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: col-resize;
+    z-index: 1;
+}
+
+.detail-resize:hover,
+.detail-resize.active {
+    background: rgba(233, 69, 96, 0.4);
+}
+
+/* --- Detail popout button --- */
+.detail-popout {
+    font-size: 16px;
+    color: #888;
+    cursor: pointer;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-right: 4px;
+}
+
+.detail-popout:hover {
+    color: #e0e0e0;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.detail-header-buttons {
+    display: flex;
+    align-items: center;
+}
+
+/* --- Standalone detail page --- */
+.detail-standalone {
+    max-width: 700px;
+    margin: 20px auto;
+    padding: 0 20px;
+}
+
+.detail-standalone .field {
+    margin-bottom: 8px;
+}
+
+.detail-standalone .field label {
+    display: block;
+    font-size: 10px;
+    text-transform: uppercase;
+    color: #888;
+    margin-bottom: 2px;
+}
+
+.detail-standalone .field .value {
+    word-break: break-all;
+    font-size: 12px;
+}
+
+.detail-standalone .loading {
+    color: #888;
+    font-style: italic;
+    text-align: center;
+    margin-top: 40px;
+}
+
+.detail-standalone .back-link {
+    color: #e94560;
+    text-decoration: none;
+    font-size: 12px;
+}
+
+.detail-standalone .back-link:hover {
+    text-decoration: underline;
+}

@@ -298,6 +298,52 @@
     setupColumnDrag(topTableHeader, topColOrder);
 
     // ========================================================================
+    // Resizable detail panel
+    // ========================================================================
+    var detailResizePanel = null;
+    var detailResizeStartX = 0;
+    var detailResizeStartW = 0;
+    var detailResizeHandle = null;
+
+    document.addEventListener('mousedown', function(e) {
+        if (!e.target.classList.contains('detail-resize')) return;
+        e.preventDefault();
+        detailResizeHandle = e.target;
+        detailResizePanel = e.target.closest('.detail-panel');
+        detailResizeStartX = e.clientX;
+        detailResizeStartW = detailResizePanel.getBoundingClientRect().width;
+        detailResizeHandle.classList.add('active');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', function(e) {
+        if (!detailResizePanel) return;
+        var newW = detailResizeStartW - (e.clientX - detailResizeStartX);
+        newW = Math.max(200, Math.min(800, newW));
+        detailResizePanel.style.width = newW + 'px';
+    });
+
+    document.addEventListener('mouseup', function() {
+        if (!detailResizePanel) return;
+        if (detailResizeHandle) detailResizeHandle.classList.remove('active');
+        detailResizePanel = null;
+        detailResizeHandle = null;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+    });
+
+    // ========================================================================
+    // Popout detail panel
+    // ========================================================================
+    detailPanel.querySelector('.detail-popout').addEventListener('click', function() {
+        if (selectedHash) window.open('/tx/' + selectedHash, '_blank');
+    });
+    topDetailPanel.querySelector('.detail-popout').addEventListener('click', function() {
+        if (selectedHash) window.open('/tx/' + selectedHash, '_blank');
+    });
+
+    // ========================================================================
     // WebSocket
     // ========================================================================
     function connect() {

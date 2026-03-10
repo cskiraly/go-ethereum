@@ -20,6 +20,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	stdlog "log"
 	"net/http"
@@ -107,6 +108,18 @@ func run(ctx *cli.Context) error {
 		json.NewEncoder(w).Encode(map[string]string{
 			"rpcEndpoint": wsURL,
 		})
+	})
+
+	// Serve standalone transaction detail page for /tx/0x... URLs.
+	http.HandleFunc("/tx/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := ui.Assets.Open("detail.html")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer f.Close()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		io.Copy(w, f)
 	})
 
 	// Serve embedded UI assets.
