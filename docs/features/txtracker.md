@@ -53,7 +53,17 @@ Single-goroutine event loop (same pattern as TxFetcher):
    Tracks announcements, deliveries, useful deliveries, and first-announcer
    counts per peer. Stats are cleared on peer disconnect.
 
-5. **Finalization detection**: `checkFinalization()` scans all `TxIncluded`
+5. **Finalized-block skip**: Transactions first seen in blocks at or below
+   `lastFinalNum` are not tracked. During chain sync, `handleChainEvent` fires
+   for every imported block — including thousands of already-finalized blocks.
+   Creating records for their transactions would waste LRU capacity (evicting
+   interesting P2P-observed records) and flood the event feed with noise.
+   The guard (`rec == nil && blockNum <= t.lastFinalNum`) only skips **new**
+   records; transactions already tracked via P2P are still updated to
+   `TxIncluded` normally. Before the CL first reports a finalized block,
+   `lastFinalNum` is 0, so no blocks are skipped.
+
+6. **Finalization detection**: `checkFinalization()` scans all `TxIncluded`
    entries and advances those at or below `CurrentFinalBlock()` to
    `TxFinalized`. Runs both on `ChainEvent` and on a 5-second periodic
    timer, because `SetFinalized` (called by the Engine API's

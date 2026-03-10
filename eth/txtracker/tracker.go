@@ -880,6 +880,12 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 		hash := tx.Hash()
 
 		rec := t.txs[hash]
+		if rec == nil && blockNum <= t.lastFinalNum {
+			// Block is already finalized — no point tracking a transaction
+			// we first see at this stage. It didn't come through P2P and
+			// will never provide useful lifecycle data.
+			continue
+		}
 		if rec == nil {
 			// Transaction not previously tracked (e.g., from a synced block
 			// or a peer path we don't observe). Create a record directly
