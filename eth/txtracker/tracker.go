@@ -815,6 +815,7 @@ func (t *Tracker) checkFinalization() {
 	}
 	finalBlock := t.chain.CurrentFinalBlock()
 	if finalBlock == nil {
+		log.Trace("Finalization check: no finalized block available")
 		return
 	}
 	finalNum := finalBlock.Number.Uint64()
@@ -823,8 +824,10 @@ func (t *Tracker) checkFinalization() {
 	if finalNum <= t.lastFinalNum {
 		return
 	}
+	log.Debug("Finalization advancing", "old", t.lastFinalNum, "new", finalNum)
 	t.lastFinalNum = finalNum
 
+	var count int
 	for hash, rec := range t.txs {
 		if rec.status == TxIncluded && rec.blockNum <= finalNum {
 			rec.status = TxFinalized
@@ -832,7 +835,11 @@ func (t *Tracker) checkFinalization() {
 			t.touchLRU(rec)
 			t.emitEvent(hash, TxIncluded, TxFinalized, rec, "")
 			txFinalizedMeter.Mark(1)
+			count++
 		}
+	}
+	if count > 0 {
+		log.Debug("Finalized transactions", "count", count, "finalBlock", finalNum)
 	}
 }
 
