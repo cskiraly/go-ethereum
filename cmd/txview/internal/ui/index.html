@@ -161,13 +161,13 @@
         <div class="main-area">
             <div class="table-area">
                 <div class="table-header" id="peers-table-header">
-                    <span class="peers-col-id">Peer</span>
-                    <span class="peers-col-announced sortable active-sort sort-desc" data-sort="announced">Announced</span>
-                    <span class="peers-col-delivered sortable" data-sort="delivered">Delivered</span>
-                    <span class="peers-col-useful sortable" data-sort="useful">Useful</span>
-                    <span class="peers-col-first sortable" data-sort="first">1st Announce</span>
-                    <span class="peers-col-useful-pct sortable" data-sort="useful-pct">Useful %</span>
-                    <span class="peers-col-first-pct sortable" data-sort="first-pct">1st %</span>
+                    <span class="peers-col-id" title="Peer node ID">Peer</span>
+                    <span class="peers-col-announced sortable active-sort sort-desc" data-sort="announced" title="Transaction hashes announced via NewPooledTransactionHashes (excludes unsolicited broadcasts)">Announced</span>
+                    <span class="peers-col-delivered sortable" data-sort="delivered" title="Transaction bodies received from this peer (solicited PooledTransactions responses and unsolicited Transactions broadcasts)">Delivered</span>
+                    <span class="peers-col-useful sortable" data-sort="useful" title="Deliveries accepted into the transaction pool (not duplicates or already-known)">Useful</span>
+                    <span class="peers-col-first sortable" data-sort="first" title="Times this peer was the first to announce a transaction before any other peer">1st Announce</span>
+                    <span class="peers-col-useful-pct sortable" data-sort="useful-pct" title="Useful / Delivered — what fraction of deliveries were novel and accepted">Useful %</span>
+                    <span class="peers-col-first-pct sortable" data-sort="first-pct" title="1st Announce / Announced — what fraction of announcements were first-seen from this peer">1st %</span>
                 </div>
                 <div class="viewport" id="peers-viewport">
                     <div id="peers-scroll-spacer"></div>
