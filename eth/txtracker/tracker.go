@@ -788,6 +788,11 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 	}
 	t.lastHeadHash = blockHash
 
+	// Finalize before inserting new transactions. The new block may advance
+	// the finalized pointer, and inserting its transactions first could LRU-
+	// evict the very TxIncluded records that are now finalizable.
+	t.checkFinalization()
+
 	// Mark all transactions in the block as included.
 	for _, tx := range ev.Transactions {
 		hash := tx.Hash()
@@ -836,8 +841,6 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 			}
 		}
 	}
-	// Check finalization: advance any included transactions past the finalized block.
-	t.checkFinalization()
 }
 
 // handleReorg reverts TxIncluded transactions back to TxPooled when a reorg
@@ -1004,8 +1007,30 @@ func (t *Tracker) evictOldest() {
 		return
 	}
 	hash := t.evictList.Remove(back).(common.Hash)
+	rec := t.txs[hash]
 	delete(t.txs, hash)
+
 	txEvictedMeter.Mark(1)
+	if rec != nil {
+		switch rec.status {
+		case TxAnnounced:
+			txEvictedAnnouncedMeter.Mark(1)
+		case TxRequested:
+			txEvictedRequestedMeter.Mark(1)
+		case TxReceived:
+			txEvictedReceivedMeter.Mark(1)
+		case TxPooled:
+			txEvictedPooledMeter.Mark(1)
+		case TxIncluded:
+			txEvictedIncludedMeter.Mark(1)
+		case TxFinalized:
+			txEvictedFinalizedMeter.Mark(1)
+		case TxRejected:
+			txEvictedRejectedMeter.Mark(1)
+		case TxDropped:
+			txEvictedDroppedMeter.Mark(1)
+		}
+	}
 	txTrackerSize.Update(int64(len(t.txs)))
 }
 
