@@ -222,7 +222,7 @@ scratch on each page load:
 
 | Structure | Contents |
 |---|---|
-| `txs` (Map: hash → event) | Every subscription event, annotated with `_receivedAt`, `_firstStatus`, `_wasRequested` for Sankey path classification |
+| `txs` (Map: hash → event) | Every subscription event, annotated with `_receivedAt`, `_firstStatus`, `_wasRequested` for Sankey path classification. `peer` and `_txType` are carried forward from earlier events so the deliverer peer remains visible across all lifecycle stages. |
 | `topCache` (Map: hash → {info, fetchedAt}) | Cached `txtracker_getTx` results for visible rows, refetched when stale (>5s) |
 | `topInflight` (Set) | Hashes currently being fetched to deduplicate RPC calls |
 | `visibleHashes` / `topVisibleHashes` | Filtered+sorted hash arrays rebuilt on dirty render |

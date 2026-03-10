@@ -456,6 +456,7 @@
             ev._wasRequested = old._wasRequested || ev.newStatus === 'requested';
             ev._reorgCount = old._reorgCount || 0;
             ev._txType = ev.txType || old._txType || 0;
+            ev.peer = ev.peer || old.peer;
             // Track backward transition: included → pooled (reorg).
             if (old.newStatus === 'included' && ev.newStatus === 'pooled') {
                 ev._reorgCount++;
