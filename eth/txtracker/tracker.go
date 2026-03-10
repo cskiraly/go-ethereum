@@ -101,11 +101,11 @@ const (
 	rejectedChanSize = 256
 	peerDropChanSize = 64
 	queryChanSize    = 64
-	chainEventSize       = 10
-	newTxsEventSize      = 128
+	chainEventSize        = 10
+	newTxsEventSize       = 128
+	removedTxsEventSize   = 128
 	finalizeCheckInterval = 5 * time.Second
-	dropCheckInterval     = 30 * time.Second
-	emitChanSize         = 4096 // buffered to avoid blocking the event loop
+	emitChanSize          = 4096 // buffered to avoid blocking the event loop
 )
 
 // txRecord is the internal per-transaction lifecycle record.
@@ -194,10 +194,10 @@ type BlockchainReader interface {
 }
 
 // TxPoolReader abstracts the transaction pool for new transaction event
-// subscription and pool membership queries.
+// subscription and removal event subscription.
 type TxPoolReader interface {
 	SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) event.Subscription
-	Has(hash common.Hash) bool
+	SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription
 }
 
 // Internal event types for the single-goroutine event loop.
@@ -244,11 +244,10 @@ type peerStatsQuery struct {
 
 // Config holds the configuration for a Tracker.
 type Config struct {
-	MaxEntries        int
-	DropCheckInterval time.Duration // 0 uses default (30s)
-	Clock             mclock.Clock
-	Chain             BlockchainReader
-	TxPool            TxPoolReader
+	MaxEntries int
+	Clock      mclock.Clock
+	Chain      BlockchainReader
+	TxPool     TxPoolReader
 }
 
 // Tracker maintains per-transaction lifecycle records from first announcement
@@ -261,9 +260,8 @@ type Tracker struct {
 	chain     BlockchainReader
 	txpool    TxPoolReader
 
-	maxEntries        int
-	dropCheckIvl      time.Duration
-	evictList         *list.List // LRU ordered by last update (front = most recent)
+	maxEntries int
+	evictList  *list.List // LRU ordered by last update (front = most recent)
 
 	// Last known chain head for reorg detection.
 	lastHeadHash common.Hash
@@ -300,23 +298,18 @@ func New(config Config) *Tracker {
 	if maxEntries <= 0 {
 		maxEntries = defaultMaxEntries
 	}
-	dropIvl := config.DropCheckInterval
-	if dropIvl <= 0 {
-		dropIvl = dropCheckInterval
-	}
 	clock := config.Clock
 	if clock == nil {
 		clock = mclock.System{}
 	}
 	return &Tracker{
-		txs:         make(map[common.Hash]*txRecord),
-		peers:       make(map[string]*peerStats),
-		clock:       clock,
-		chain:       config.Chain,
-		txpool:      config.TxPool,
-		maxEntries:   maxEntries,
-		dropCheckIvl: dropIvl,
-		evictList:    list.New(),
+		txs:        make(map[common.Hash]*txRecord),
+		peers:      make(map[string]*peerStats),
+		clock:      clock,
+		chain:      config.Chain,
+		txpool:     config.TxPool,
+		maxEntries: maxEntries,
+		evictList:  list.New(),
 		announceCh:     make(chan *announceEvent, announceChanSize),
 		fetchRequestCh: make(chan *fetchRequestedEvent, fetchRequestChanSize),
 		receiveCh:      make(chan *receiveEvent, receiveChanSize),
@@ -504,6 +497,15 @@ func (t *Tracker) loop() {
 		defer txsSub.Unsubscribe()
 	}
 
+	// Subscribe to removed transaction events for pool drop detection.
+	var removedTxsCh chan core.RemovedTxsEvent
+	var removedSub event.Subscription
+	if t.txpool != nil {
+		removedTxsCh = make(chan core.RemovedTxsEvent, removedTxsEventSize)
+		removedSub = t.txpool.SubscribeRemovedTransactions(removedTxsCh)
+		defer removedSub.Unsubscribe()
+	}
+
 	// Periodic finalization check. SetFinalized is called by the Engine API
 	// (ForkchoiceUpdated) independently of ChainEvent, so checking only on
 	// ChainEvent can miss finalization advances. This timer ensures we
@@ -514,16 +516,6 @@ func (t *Tracker) loop() {
 		finalizeTicker = time.NewTicker(finalizeCheckInterval)
 		finalizeTickerCh = finalizeTicker.C
 		defer finalizeTicker.Stop()
-	}
-
-	// Periodic pool drop check. Detects transactions that were accepted
-	// into the pool but later evicted (capacity, replacement, timeout).
-	var dropTicker *time.Ticker
-	var dropTickerCh <-chan time.Time
-	if t.txpool != nil {
-		dropTicker = time.NewTicker(t.dropCheckIvl)
-		dropTickerCh = dropTicker.C
-		defer dropTicker.Stop()
 	}
 
 	// Signal that subscriptions are set up.
@@ -555,6 +547,9 @@ func (t *Tracker) loop() {
 		case ev := <-newTxsCh:
 			t.handleNewTxs(ev)
 
+		case ev := <-removedTxsCh:
+			t.handleRemovedTxs(ev)
+
 		case q := <-t.queryCh:
 			q.resp <- t.answerQuery(q.hash)
 
@@ -581,9 +576,6 @@ func (t *Tracker) loop() {
 
 		case <-finalizeTickerCh:
 			t.checkFinalization()
-
-		case <-dropTickerCh:
-			t.checkPoolDrops()
 
 		case <-t.quit:
 			return
@@ -903,29 +895,21 @@ func (t *Tracker) checkFinalization() {
 	}
 }
 
-// checkPoolDrops detects transactions that were accepted into the pool but
-// have since been evicted. Only transactions at TxPooled are checked.
-func (t *Tracker) checkPoolDrops() {
-	if t.txpool == nil {
-		return
-	}
+// handleRemovedTxs processes a RemovedTxsEvent, marking pooled transactions
+// as dropped. Transactions already at TxIncluded or TxFinalized are ignored
+// since pool removal events also fire for transactions that get mined.
+func (t *Tracker) handleRemovedTxs(ev core.RemovedTxsEvent) {
 	now := time.Now()
-	var count int
-	for hash, rec := range t.txs {
-		if rec.status != TxPooled {
+	for _, hash := range ev.Hashes {
+		rec := t.txs[hash]
+		if rec == nil || rec.status != TxPooled {
 			continue
 		}
-		if !t.txpool.Has(hash) {
-			rec.status = TxDropped
-			rec.dropped = now
-			t.touchLRU(rec)
-			t.emitEvent(hash, TxPooled, TxDropped, rec, "")
-			txDroppedMeter.Mark(1)
-			count++
-		}
-	}
-	if count > 0 {
-		log.Debug("Detected pool drops", "count", count)
+		rec.status = TxDropped
+		rec.dropped = now
+		t.touchLRU(rec)
+		t.emitEvent(hash, TxPooled, TxDropped, rec, "")
+		txDroppedMeter.Mark(1)
 	}
 }
 

@@ -95,6 +95,10 @@ type txPool interface {
 	// or also for reorged out ones.
 	SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) event.Subscription
 
+	// SubscribeRemovedTransactions subscribes to transaction removal events,
+	// fired when previously accepted transactions are evicted from the pool.
+	SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription
+
 	// FilterType returns whether the given tx type is supported by the txPool.
 	FilterType(kind byte) bool
 }
