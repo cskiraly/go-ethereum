@@ -747,6 +747,19 @@
         });
     }
 
+    function closeDetail(panel) {
+        panel.classList.remove('visible');
+        selectedHash = null;
+        scheduleRender();
+    }
+
+    detailPanel.querySelector('.detail-close').addEventListener('click', function() {
+        closeDetail(detailPanel);
+    });
+    topDetailPanel.querySelector('.detail-close').addEventListener('click', function() {
+        closeDetail(topDetailPanel);
+    });
+
     function renderDetail(hash, info, container) {
         var base = parseTS(info.FirstSeen);
         var fields = [

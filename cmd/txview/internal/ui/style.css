@@ -294,10 +294,31 @@ header h1 {
 
 .detail-panel.visible { display: block; }
 
-.detail-panel h2 {
-    font-size: 14px;
+.detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     margin-bottom: 12px;
+}
+
+.detail-header h2 {
+    font-size: 14px;
     color: #e94560;
+    margin: 0;
+}
+
+.detail-close {
+    font-size: 20px;
+    color: #888;
+    cursor: pointer;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.detail-close:hover {
+    color: #e0e0e0;
+    background: rgba(255, 255, 255, 0.1);
 }
 
 .detail-panel .field {
