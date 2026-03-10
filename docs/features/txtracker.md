@@ -11,11 +11,16 @@ and the blockchain (inclusion/finalization).
 
 ```
 P2P path:    Announced → Requested → Received → Pooled → Included → Finalized
-                                        │          ↑         │
-                                        │          └─────────┘ (reorg)
-                                        └──→ Rejected
+                                        │          ↑ ↑       │
+                                        │          │ └───────┘ (reorg)
+                                        └──→ Rejected │
+                                                      ↓
+                                                   Dropped → {Requested, Received, Pooled, Included}
 
 Local path:  (local submit) → Pooled → Included → Finalized
+                                 │        ↑
+                                 ↓        │
+                              Dropped ────┘
 ```
 
 ## Architecture
@@ -382,6 +387,35 @@ which is always available for every transaction:
 RPC-dependent keys (`nonce`, `value`, `gas`, `gasfeecap`, `gastipcap`) keep
 the existing cache-based sort since those values genuinely aren't available
 without a fetch.
+
+### Pool Drop Detection
+
+The pool doesn't fire events when transactions are evicted (time-based,
+capacity, replacement). Previously, once a transaction reached `TxPooled`
+it would stay there until included or LRU-evicted from the tracker — even
+if the pool had long since dropped it.
+
+**New status**: `TxDropped` (iota 8) — transaction was accepted into the pool
+but is no longer present. Detected via periodic polling.
+
+**Detection**: A configurable-interval ticker (`dropCheckInterval`, default
+30s) iterates all `TxPooled` records and calls `TxPoolReader.Has(hash)`. If
+the pool no longer contains the transaction, it transitions to `TxDropped`.
+
+**Recovery paths from TxDropped**: A dropped transaction can re-enter the
+lifecycle:
+- Dropped → Requested (peer re-announces, fetcher re-requests)
+- Dropped → Received (peer broadcasts again)
+- Dropped → Pooled (re-accepted into pool via `NewTxsEvent`)
+- Dropped → Included (mined despite being dropped from local pool)
+- Dropped → Rejected (re-submitted but now rejected)
+
+**Guard changes**: `handleFetchRequested`, `handleReceive`, `handlePooled`,
+and `handleRejected` all accept `TxDropped` as a valid source status.
+
+**UI**: Dropped counter in header badges, dropped filter option, dropped
+step in progress pipeline, and a Dropped node in the Sankey diagram
+branching off from Pooled (similar to Rejected branching off Received).
 
 ## Future Work
 
