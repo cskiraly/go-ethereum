@@ -1256,7 +1256,7 @@
         // 9. Private → Included (from below-left, feeding into included node).
         if (nPrivate > 0) {
             var privBarH = sh(nPrivate);
-            var privX = colX(3.7);
+            var privX = colX(3.9);
             var privY = Math.max(inclNode.y + inclNode.h + 30, yTop + availH * 0.7);
             if (privY + privBarH > H - 30) privY = H - 30 - privBarH;
 
