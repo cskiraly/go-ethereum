@@ -10,10 +10,10 @@ and the blockchain (inclusion/finalization).
 ## Lifecycle State Machine
 
 ```
-P2P path:    Announced → Received → Pooled → Included → Finalized
-                            │          ↑         │
-                            │          └─────────┘ (reorg)
-                            └──→ Rejected
+P2P path:    Announced → Requested → Received → Pooled → Included → Finalized
+                                        │          ↑         │
+                                        │          └─────────┘ (reorg)
+                                        └──→ Rejected
 
 Local path:  (local submit) → Pooled → Included → Finalized
 ```
@@ -53,6 +53,7 @@ Single-goroutine event loop (same pattern as TxFetcher):
 - `eth/txtracker/tracker_test.go` — Unit tests
 - `eth/handler.go` — Creates, starts, stops tracker; hooks addTxs and peer drop
 - `eth/handler_eth.go` — Feeds announcement and receive events to tracker
+- `eth/api_txtracker.go` — RPC API (GetTx, GetPeerStats, Events subscription)
 
 ## Event Feed & RPC API
 
@@ -176,7 +177,7 @@ and browser (UI).
 
 **Geth (txtracker namespace)** owns all transaction lifecycle data. It
 tracks every transaction from first announcement through finalization,
-maintaining timestamps, peer attribution, and status for each. Two RPC
+maintaining timestamps, peer attribution, and status for each. Three RPC
 methods expose this:
 
 - `txtracker_subscribe("events")` — streams lifecycle events (announced,
@@ -185,6 +186,7 @@ methods expose this:
 - `txtracker_getTx(hash)` — returns the full record: From, To, Nonce, Gas,
   fee caps, Value, type, size, all timestamps, Deliverer, Announcers,
   block info, and rejection error.
+- `txtracker_getPeerStats(peer)` — per-peer contribution statistics.
 
 **txview binary** (`cmd/txview/main.go`) is a stateless bridge. It does no
 data processing or caching — it exists solely to let a browser talk to geth
