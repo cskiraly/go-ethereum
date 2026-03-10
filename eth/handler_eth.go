@@ -67,10 +67,12 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err != nil {
 			return fmt.Errorf("Transactions: %v", err)
 		}
+		// Notify tracker before adding to pool so the receive event is
+		// queued ahead of the NewTxsEvent that txpool.Add triggers.
+		h.txTracker.NotifyReceived(peer.ID(), txs)
 		if err := handleTransactions(peer, txs, true); err != nil {
 			return fmt.Errorf("Transactions: %v", err)
 		}
-		h.txTracker.NotifyReceived(peer.ID(), txs)
 		return h.txFetcher.Enqueue(peer.ID(), txs, false)
 
 	case *eth.PooledTransactionsPacket:
@@ -78,10 +80,12 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err != nil {
 			return fmt.Errorf("PooledTransactions: %v", err)
 		}
+		// Notify tracker before adding to pool so the receive event is
+		// queued ahead of the NewTxsEvent that txpool.Add triggers.
+		h.txTracker.NotifyReceived(peer.ID(), txs)
 		if err := handleTransactions(peer, txs, false); err != nil {
 			return fmt.Errorf("PooledTransactions: %v", err)
 		}
-		h.txTracker.NotifyReceived(peer.ID(), txs)
 		return h.txFetcher.Enqueue(peer.ID(), txs, true)
 
 	default:

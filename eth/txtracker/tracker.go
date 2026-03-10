@@ -631,7 +631,7 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 			txTrackedMeter.Mark(1)
 			continue
 		}
-		// Only advance if status is before Received (i.e., Announced).
+		// Only advance if status is before Received (i.e., Announced or Requested).
 		if rec.status < TxReceived {
 			oldStatus := rec.status
 			rec.status = TxReceived
@@ -640,11 +640,13 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 			fillTxMeta(rec, tx)
 			t.touchLRU(rec)
 			t.emitEvent(hash, oldStatus, TxReceived, rec, ev.peer)
-		} else if rec.local && rec.deliverer == "" {
-			// Repair race: handleNewTxs created this as local before
-			// the receive event was processed.
-			rec.local = false
+		} else if rec.received.IsZero() {
+			// Record already advanced past Received (e.g., handleNewTxs
+			// created it at TxPooled before this receive event was
+			// processed). Backfill receive metadata and fix local flag.
+			rec.received = now
 			rec.deliverer = ev.peer
+			rec.local = false
 			fillTxMeta(rec, tx)
 			t.touchLRU(rec)
 		}
