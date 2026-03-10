@@ -40,6 +40,7 @@
 
     // --- Type filter state (shared across all panes) ---
     let typeFilter = new Set([0, 1, 2, 3, 4]);
+    let showPrivate = true;        // show txs first seen in a block
 
     // --- DOM refs: shared ---
     const statusDot = document.getElementById('status-dot');
@@ -129,6 +130,24 @@
             scheduleRender();
         });
     });
+
+    // Private transaction toggle (synced across all panes).
+    var privateCbs = document.querySelectorAll('.private-cb');
+    function syncPrivateCbs(source) {
+        for (var i = 0; i < privateCbs.length; i++) {
+            privateCbs[i].checked = showPrivate;
+        }
+    }
+    for (var pi = 0; pi < privateCbs.length; pi++) {
+        privateCbs[pi].addEventListener('change', function(e) {
+            showPrivate = e.target.checked;
+            syncPrivateCbs(e.target);
+            feedViewDirty = true;
+            topViewDirty = true;
+            statsViewDirty = true;
+            scheduleRender();
+        });
+    }
 
     // Sortable column headers in top view.
     topTableHeader.addEventListener('click', function(e) {
@@ -527,8 +546,13 @@
     // ========================================================================
     // Feed view
     // ========================================================================
+    function isPrivateTx(ev) {
+        return ev._firstStatus === 'included' || ev._firstStatus === 'finalized';
+    }
+
     function matchesFeedFilter(hash, ev) {
         if (!typeFilter.has(ev._txType || 0)) return false;
+        if (!showPrivate && isPrivateTx(ev)) return false;
         var status = filterStatus.value;
         if (status && ev.newStatus !== status) return false;
         var text = filterInput.value;
@@ -636,6 +660,7 @@
     // ========================================================================
     function matchesTopFilter(hash, ev) {
         if (!typeFilter.has(ev._txType || 0)) return false;
+        if (!showPrivate && isPrivateTx(ev)) return false;
         var status = topFilterStatus.value;
         if (status && ev.newStatus !== status) return false;
         var text = topFilterInput.value;
@@ -1065,7 +1090,11 @@
         svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
 
         var total = 0;
-        txs.forEach(function(ev) { if (typeFilter.has(ev._txType || 0)) total++; });
+        txs.forEach(function(ev) {
+            if (!typeFilter.has(ev._txType || 0)) return;
+            if (!showPrivate && isPrivateTx(ev)) return;
+            total++;
+        });
         if (total === 0) {
             drawLabel(svg, W / 2, H / 2, 'Waiting for transactions\u2026', 'middle', '#888', '14');
             return;
@@ -1091,6 +1120,7 @@
 
         txs.forEach(function(ev) {
             if (!typeFilter.has(ev._txType || 0)) return;
+            if (!showPrivate && isPrivateTx(ev)) return;
             var s = ev.newStatus;
             if (counts.hasOwnProperty(s)) counts[s]++;
             nReorged += ev._reorgCount || 0;
@@ -1102,7 +1132,7 @@
             }
 
             // Private: first seen already included in chain.
-            if (ev._firstStatus === 'included' || ev._firstStatus === 'finalized') {
+            if (isPrivateTx(ev)) {
                 if (s === 'included') privatePath.included++;
                 if (s === 'finalized') privatePath.finalized++;
                 return;

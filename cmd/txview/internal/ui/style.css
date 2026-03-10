@@ -129,6 +129,22 @@ header h1 {
     height: 12px;
     margin: 0;
 }
+.private-toggle {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    color: #aaa;
+    cursor: pointer;
+    margin-left: 6px;
+}
+.private-toggle:hover { color: #e0e0e0; }
+.private-toggle input[type="checkbox"] {
+    accent-color: #e94560;
+    width: 12px;
+    height: 12px;
+    margin: 0;
+}
 
 .main-area {
     display: flex;
