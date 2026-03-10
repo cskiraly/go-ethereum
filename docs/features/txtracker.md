@@ -233,6 +233,15 @@ txtracker work.
 
 ### Pre-existing components (master)
 
+**eth peer knownTxs** (`eth/protocols/eth/peer.go`) tracks which transaction
+hashes a peer already knows about, to avoid redundant sends. Each peer has a
+`knownCache` (`mapset.Set[common.Hash]`, capacity **32,768**). Hashes are
+marked known when sending full txs, announcing hashes, replying to
+`GetPooledTransactions`, or receiving announcements/broadcasts. Used by
+`BroadcastTransactions()` to skip peers that already have a tx. Eviction is
+random (`Pop()`) when over capacity — not LRU. Garbage collected with the
+peer struct on disconnect.
+
 **tx_fetcher** (`eth/fetcher/tx_fetcher.go`) tracks transactions through a
 three-stage fetch pipeline (wait → announce → fetch). Per-transaction state
 is ephemeral — cleaned up on delivery, timeout, or peer disconnect. Two LRU
@@ -296,6 +305,7 @@ record, not the peer record): `announcers []string`, `requestedFrom string`,
 
 | Component | Strategy | Capacity | Time limit | Peer disconnect |
 |-----------|----------|----------|------------|-----------------|
+| eth peer knownTxs | random eviction | 32,768 per peer | none | GC with peer |
 | tx_fetcher (underpriced) | LRU + TTL | 32,768 | 5 min | n/a |
 | tx_fetcher (on-chain) | LRU | 32,768 | purge on reorg | n/a |
 | tx_fetcher (pipeline) | explicit cleanup | unbounded | 500ms / 5s timeouts | full cleanup |
