@@ -44,6 +44,7 @@ const (
 	TxIncluded                       // Mined into a canonical block
 	TxFinalized                      // Containing block is finalized
 	TxRejected                       // Pool rejected the transaction
+	TxDropped                        // Evicted from pool after being accepted
 )
 
 // String returns a human-readable name for the status.
@@ -63,6 +64,8 @@ func (s TxStatus) String() string {
 		return "finalized"
 	case TxRejected:
 		return "rejected"
+	case TxDropped:
+		return "dropped"
 	default:
 		return "unknown"
 	}
@@ -101,6 +104,7 @@ const (
 	chainEventSize       = 10
 	newTxsEventSize      = 128
 	finalizeCheckInterval = 5 * time.Second
+	dropCheckInterval     = 30 * time.Second
 	emitChanSize         = 4096 // buffered to avoid blocking the event loop
 )
 
@@ -126,6 +130,7 @@ type txRecord struct {
 	pooled    time.Time // When accepted into pool
 	included  time.Time // When included in canonical block
 	finalized time.Time // When block was finalized
+	dropped   time.Time // When evicted from pool
 
 	announcers    []string    // Peers that announced (ordered, first = earliest)
 	requestedFrom string      // Peer we requested the body from
@@ -164,6 +169,7 @@ type TxInfo struct {
 	Pooled        time.Time
 	Included      time.Time
 	Finalized     time.Time
+	Dropped       time.Time
 	Announcers    []string
 	RequestedFrom string
 	Deliverer     string
@@ -188,9 +194,10 @@ type BlockchainReader interface {
 }
 
 // TxPoolReader abstracts the transaction pool for new transaction event
-// subscription.
+// subscription and pool membership queries.
 type TxPoolReader interface {
 	SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) event.Subscription
+	Has(hash common.Hash) bool
 }
 
 // Internal event types for the single-goroutine event loop.
@@ -237,10 +244,11 @@ type peerStatsQuery struct {
 
 // Config holds the configuration for a Tracker.
 type Config struct {
-	MaxEntries int
-	Clock      mclock.Clock
-	Chain      BlockchainReader
-	TxPool     TxPoolReader
+	MaxEntries        int
+	DropCheckInterval time.Duration // 0 uses default (30s)
+	Clock             mclock.Clock
+	Chain             BlockchainReader
+	TxPool            TxPoolReader
 }
 
 // Tracker maintains per-transaction lifecycle records from first announcement
@@ -253,8 +261,9 @@ type Tracker struct {
 	chain     BlockchainReader
 	txpool    TxPoolReader
 
-	maxEntries int
-	evictList  *list.List // LRU ordered by last update (front = most recent)
+	maxEntries        int
+	dropCheckIvl      time.Duration
+	evictList         *list.List // LRU ordered by last update (front = most recent)
 
 	// Last known chain head for reorg detection.
 	lastHeadHash common.Hash
@@ -291,6 +300,10 @@ func New(config Config) *Tracker {
 	if maxEntries <= 0 {
 		maxEntries = defaultMaxEntries
 	}
+	dropIvl := config.DropCheckInterval
+	if dropIvl <= 0 {
+		dropIvl = dropCheckInterval
+	}
 	clock := config.Clock
 	if clock == nil {
 		clock = mclock.System{}
@@ -301,8 +314,9 @@ func New(config Config) *Tracker {
 		clock:       clock,
 		chain:       config.Chain,
 		txpool:      config.TxPool,
-		maxEntries:  maxEntries,
-		evictList:   list.New(),
+		maxEntries:   maxEntries,
+		dropCheckIvl: dropIvl,
+		evictList:    list.New(),
 		announceCh:     make(chan *announceEvent, announceChanSize),
 		fetchRequestCh: make(chan *fetchRequestedEvent, fetchRequestChanSize),
 		receiveCh:      make(chan *receiveEvent, receiveChanSize),
@@ -502,6 +516,16 @@ func (t *Tracker) loop() {
 		defer finalizeTicker.Stop()
 	}
 
+	// Periodic pool drop check. Detects transactions that were accepted
+	// into the pool but later evicted (capacity, replacement, timeout).
+	var dropTicker *time.Ticker
+	var dropTickerCh <-chan time.Time
+	if t.txpool != nil {
+		dropTicker = time.NewTicker(t.dropCheckIvl)
+		dropTickerCh = dropTicker.C
+		defer dropTicker.Stop()
+	}
+
 	// Signal that subscriptions are set up.
 	close(t.ready)
 
@@ -557,6 +581,9 @@ func (t *Tracker) loop() {
 
 		case <-finalizeTickerCh:
 			t.checkFinalization()
+
+		case <-dropTickerCh:
+			t.checkPoolDrops()
 
 		case <-t.quit:
 			return
@@ -620,13 +647,14 @@ func (t *Tracker) handleFetchRequested(ev *fetchRequestedEvent) {
 		if rec == nil {
 			continue
 		}
-		// Only advance if currently Announced (not yet requested or received).
-		if rec.status == TxAnnounced {
+		// Advance if currently Announced or Dropped (re-fetch cycle).
+		if rec.status == TxAnnounced || rec.status == TxDropped {
+			oldStatus := rec.status
 			rec.status = TxRequested
 			rec.requested = now
 			rec.requestedFrom = ev.peer
 			t.touchLRU(rec)
-			t.emitEvent(hash, TxAnnounced, TxRequested, rec, ev.peer)
+			t.emitEvent(hash, oldStatus, TxRequested, rec, ev.peer)
 		}
 	}
 }
@@ -656,8 +684,8 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 			txTrackedMeter.Mark(1)
 			continue
 		}
-		// Only advance if status is before Received (i.e., Announced or Requested).
-		if rec.status < TxReceived {
+		// Advance if status is before Received or Dropped (re-fetch).
+		if rec.status < TxReceived || rec.status == TxDropped {
 			oldStatus := rec.status
 			rec.status = TxReceived
 			rec.received = now
@@ -699,14 +727,17 @@ func (t *Tracker) handlePooled(ev *pooledEvent) {
 			txTrackedMeter.Mark(1)
 			continue
 		}
-		// Only advance if not already pooled or beyond.
-		if rec.status < TxPooled {
+		// Advance if not already pooled or beyond, or if re-entering from Dropped.
+		if rec.status < TxPooled || rec.status == TxDropped {
 			oldStatus := rec.status
 			rec.status = TxPooled
 			rec.pooled = now
 			t.touchLRU(rec)
 			t.emitEvent(hash, oldStatus, TxPooled, rec, "")
 
+			if oldStatus == TxDropped {
+				txReaddedMeter.Mark(1)
+			}
 			// Update useful delivery stat for the deliverer.
 			if rec.deliverer != "" {
 				if ps := t.peers[rec.deliverer]; ps != nil {
@@ -738,8 +769,8 @@ func (t *Tracker) handleRejected(ev *rejectedEvent) {
 			txTrackedMeter.Mark(1)
 			continue
 		}
-		// Only mark as rejected if not already pooled or included.
-		if rec.status < TxPooled {
+		// Mark as rejected if not yet pooled/included, or if dropped (re-submit rejected).
+		if rec.status < TxPooled || rec.status == TxDropped {
 			oldStatus := rec.status
 			rec.status = TxRejected
 			if i < len(ev.errs) && ev.errs[i] != nil {
@@ -808,6 +839,8 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 				txIncludedFromPooledMeter.Mark(1)
 			case TxRejected:
 				txIncludedFromRejectedMeter.Mark(1)
+			case TxDropped:
+				txIncludedFromDroppedMeter.Mark(1)
 			}
 		}
 	}
@@ -870,6 +903,32 @@ func (t *Tracker) checkFinalization() {
 	}
 }
 
+// checkPoolDrops detects transactions that were accepted into the pool but
+// have since been evicted. Only transactions at TxPooled are checked.
+func (t *Tracker) checkPoolDrops() {
+	if t.txpool == nil {
+		return
+	}
+	now := time.Now()
+	var count int
+	for hash, rec := range t.txs {
+		if rec.status != TxPooled {
+			continue
+		}
+		if !t.txpool.Has(hash) {
+			rec.status = TxDropped
+			rec.dropped = now
+			t.touchLRU(rec)
+			t.emitEvent(hash, TxPooled, TxDropped, rec, "")
+			txDroppedMeter.Mark(1)
+			count++
+		}
+	}
+	if count > 0 {
+		log.Debug("Detected pool drops", "count", count)
+	}
+}
+
 // handleNewTxs processes NewTxsEvent to detect locally-submitted transactions.
 // Any transaction appearing in NewTxsEvent that has no prior record is marked
 // as local.
@@ -920,6 +979,7 @@ func (t *Tracker) answerQuery(hash common.Hash) *TxInfo {
 		Pooled:        rec.pooled,
 		Included:      rec.included,
 		Finalized:     rec.finalized,
+		Dropped:       rec.dropped,
 		RequestedFrom: rec.requestedFrom,
 		Deliverer:     rec.deliverer,
 		BlockNum:      rec.blockNum,

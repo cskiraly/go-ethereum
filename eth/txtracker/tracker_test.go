@@ -50,10 +50,18 @@ func (m *mockChain) sendChainEvent(ev core.ChainEvent) {
 // mockTxPool is a minimal TxPoolReader for tests.
 type mockTxPool struct {
 	txsFeed event.Feed
+	hashes  map[common.Hash]bool // set of hashes "in the pool"
 }
 
 func (m *mockTxPool) SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) event.Subscription {
 	return m.txsFeed.Subscribe(ch)
+}
+
+func (m *mockTxPool) Has(hash common.Hash) bool {
+	if m.hashes == nil {
+		return false
+	}
+	return m.hashes[hash]
 }
 
 func (m *mockTxPool) sendNewTxs(ev core.NewTxsEvent) {
@@ -71,10 +79,11 @@ func testTracker(maxEntries int) (*Tracker, *mclock.Simulated, *mockChain, *mock
 		maxEntries = defaultMaxEntries
 	}
 	tr := New(Config{
-		MaxEntries: maxEntries,
-		Clock:      clock,
-		Chain:      chain,
-		TxPool:     pool,
+		MaxEntries:        maxEntries,
+		DropCheckInterval: 50 * time.Millisecond, // fast for tests
+		Clock:             clock,
+		Chain:             chain,
+		TxPool:            pool,
 	})
 	tr.Start()
 	<-tr.ready // Wait for the event loop to subscribe to feeds.
@@ -799,6 +808,128 @@ func TestReceiveRepairsLocalFlag(t *testing.T) {
 	}
 }
 
+func TestPoolDropDetection(t *testing.T) {
+	tr, _, _, pool := testTracker(0)
+	defer tr.Stop()
+
+	hash := makeHash(1)
+
+	// Add to pool tracking and mock pool.
+	pool.hashes = map[common.Hash]bool{hash: true}
+	tr.NotifyPooled([]common.Hash{hash})
+	waitStep(t, tr)
+
+	if s := tr.Status(hash); s != TxPooled {
+		t.Fatalf("expected TxPooled, got %v", s)
+	}
+
+	// Remove from mock pool — drop check should detect it.
+	delete(pool.hashes, hash)
+	// Trigger drop check manually via the ticker (we can't easily trigger
+	// the ticker, so we use a small timeout to let the 30s ticker run).
+	// Instead, directly test the method by waiting for the ticker.
+	// For unit tests, we can just wait for the next tick by adjusting the
+	// interval or using the step channel. Since the ticker runs on real
+	// time, let's just check the status after a small sleep.
+	time.Sleep(200 * time.Millisecond) // wait for drop check ticker (50ms in tests)
+
+	if s := tr.Status(hash); s != TxDropped {
+		t.Fatalf("expected TxDropped, got %v", s)
+	}
+
+	info := tr.Get(hash)
+	if info.Dropped.IsZero() {
+		t.Fatal("expected non-zero Dropped timestamp")
+	}
+}
+
+func TestDroppedToIncluded(t *testing.T) {
+	tr, _, chain, pool := testTracker(0)
+	defer tr.Stop()
+
+	tx := types.NewTx(&types.LegacyTx{Nonce: 200, GasPrice: big.NewInt(1), Gas: 21000})
+	hash := tx.Hash()
+
+	// Pool the tx, then drop it.
+	pool.hashes = map[common.Hash]bool{hash: true}
+	tr.NotifyPooled([]common.Hash{hash})
+	waitStep(t, tr)
+
+	delete(pool.hashes, hash)
+	time.Sleep(200 * time.Millisecond) // wait for drop check ticker (50ms in tests)
+
+	if s := tr.Status(hash); s != TxDropped {
+		t.Fatalf("expected TxDropped, got %v", s)
+	}
+
+	// Now include it in a block.
+	header := makeHeader(50, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header,
+		Transactions: []*types.Transaction{tx},
+	})
+	waitStep(t, tr)
+
+	if s := tr.Status(hash); s != TxIncluded {
+		t.Fatalf("expected TxIncluded, got %v", s)
+	}
+}
+
+func TestDroppedToPooled(t *testing.T) {
+	tr, _, _, pool := testTracker(0)
+	defer tr.Stop()
+
+	hash := makeHash(2)
+
+	// Pool the tx, then drop it.
+	pool.hashes = map[common.Hash]bool{hash: true}
+	tr.NotifyPooled([]common.Hash{hash})
+	waitStep(t, tr)
+
+	delete(pool.hashes, hash)
+	time.Sleep(200 * time.Millisecond) // wait for drop check ticker (50ms in tests)
+
+	if s := tr.Status(hash); s != TxDropped {
+		t.Fatalf("expected TxDropped, got %v", s)
+	}
+
+	// Re-add to pool.
+	pool.hashes[hash] = true
+	tr.NotifyPooled([]common.Hash{hash})
+	waitStep(t, tr)
+
+	if s := tr.Status(hash); s != TxPooled {
+		t.Fatalf("expected TxPooled after re-add, got %v", s)
+	}
+}
+
+func TestDroppedToRequested(t *testing.T) {
+	tr, _, _, pool := testTracker(0)
+	defer tr.Stop()
+
+	hash := makeHash(3)
+
+	// Pool the tx, then drop it.
+	pool.hashes = map[common.Hash]bool{hash: true}
+	tr.NotifyPooled([]common.Hash{hash})
+	waitStep(t, tr)
+
+	delete(pool.hashes, hash)
+	time.Sleep(200 * time.Millisecond) // wait for drop check ticker (50ms in tests)
+
+	if s := tr.Status(hash); s != TxDropped {
+		t.Fatalf("expected TxDropped, got %v", s)
+	}
+
+	// Re-request (peer re-announced, fetcher requesting again).
+	tr.NotifyFetchRequested("peerC", []common.Hash{hash})
+	waitStep(t, tr)
+
+	if s := tr.Status(hash); s != TxRequested {
+		t.Fatalf("expected TxRequested after re-request, got %v", s)
+	}
+}
+
 func TestEventFeed(t *testing.T) {
 	tr, _, chain, _ := testTracker(0)
 	defer tr.Stop()
@@ -925,6 +1056,7 @@ func TestStatusString(t *testing.T) {
 		{TxIncluded, "included"},
 		{TxFinalized, "finalized"},
 		{TxRejected, "rejected"},
+		{TxDropped, "dropped"},
 		{0, "unknown"},
 	}
 	for _, tt := range tests {
