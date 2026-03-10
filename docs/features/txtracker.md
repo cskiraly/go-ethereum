@@ -93,12 +93,76 @@ Added real-time event feed for state transitions:
 
 ### cmd/txview
 
-Standalone web tool for visualizing transaction lifecycles:
-- Proxies WebSocket through itself (avoids geth's cross-origin rejection)
-- Connects to geth via WebSocket, subscribes to txtracker events
+Standalone web tool for visualizing transaction lifecycles.
+
+#### System Design
+
+txview has a three-tier architecture: geth (data), txview binary (bridge),
+and browser (UI).
+
+**Geth (txtracker namespace)** owns all transaction lifecycle data. It
+tracks every transaction from first announcement through finalization,
+maintaining timestamps, peer attribution, and status for each. Two RPC
+methods expose this:
+
+- `txtracker_subscribe("events")` — streams lifecycle events (announced,
+  requested, received, pooled, included, finalized, rejected) as they
+  happen, each carrying txHash, newStatus, peer, blockNum, rejectErr, etc.
+- `txtracker_getTx(hash)` — returns the full record: From, To, Nonce, Gas,
+  fee caps, Value, type, size, all timestamps, Deliverer, Announcers,
+  block info, and rejection error.
+
+**txview binary** (`cmd/txview/main.go`) is a stateless bridge. It does no
+data processing or caching — it exists solely to let a browser talk to geth
+without cross-origin issues:
+
+1. *WebSocket reverse proxy* (`/ws`) — proxies browser connections to
+   geth's WebSocket endpoint, stripping the Origin header to bypass geth's
+   origin check.
+2. *Config endpoint* (`/config`) — returns JSON with the proxied WebSocket
+   URL so the JS knows where to connect.
+3. *Static file server* (`/`) — serves the embedded UI assets (HTML, JS,
+   CSS) from `embed.FS`.
+4. *Detail page route* (`/tx/`) — serves `detail.html` for standalone
+   per-transaction URLs.
+
+**Browser** (`app.js`) maintains all UI state in memory, rebuilt from
+scratch on each page load:
+
+| Structure | Contents |
+|---|---|
+| `txs` (Map: hash → event) | Every subscription event, annotated with `_receivedAt`, `_firstStatus`, `_wasRequested` for Sankey path classification |
+| `topCache` (Map: hash → {info, fetchedAt}) | Cached `txtracker_getTx` results for visible rows, refetched when stale (>5s) |
+| `topInflight` (Set) | Hashes currently being fetched to deduplicate RPC calls |
+| `visibleHashes` / `topVisibleHashes` | Filtered+sorted hash arrays rebuilt on dirty render |
+| `selectedHash` | Currently selected tx for the detail panel |
+| `colWidths`, `feedColOrder`, `topColOrder` | Column resize widths and drag-reorder state |
+| Status counters | Incremented/decremented per event for the header badges |
+
+The browser has no persistent storage. Refreshing the page resets all
+state — only events arriving after the WebSocket connects are visible.
+
+```
+┌──────────┐  subscribe/getTx   ┌──────────────┐  /ws proxy   ┌─────────┐
+│   geth   │◄──────────────────►│ txview binary │◄────────────►│ browser │
+│ txtracker│  (WebSocket RPC)   │  (stateless)  │  (same-origin│  app.js │
+└──────────┘                    └──────────────┘   WebSocket)  └─────────┘
+                                  │ /config (JSON)      ▲
+                                  │ / (static files)    │
+                                  │ /tx/:hash (detail)  │
+                                  └─────────────────────┘
+                                        HTTP
+```
+
+#### Features
+
 - Dark-themed single-page app with no build tooling (embedded via `//go:embed`)
-- Scrollable table with status badges, filter by hash/peer/status
-- Detail panel fetches full info via `txtracker_getTx`
+- **Feed view**: real-time scrollable event stream with virtual scrolling
+- **Top view**: sortable table of all tracked txs with on-demand RPC fetch
+- **Stats view**: Sankey diagram showing transaction flow through lifecycle stages
+- Filter by hash/peer/status, resizable and reorderable columns
+- Resizable detail panel with drag handle (200–800px)
+- Detachable detail panel: pop out to `/tx/0x...` for side-by-side workflows
 
 #### Building
 
