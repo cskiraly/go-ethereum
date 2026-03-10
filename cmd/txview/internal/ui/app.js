@@ -1028,10 +1028,10 @@
         var nRequested = counts.requested;  // pending at requested
 
         // Total entering the requested node = at requested + all req-path beyond.
-        var reqTotal = nRequested + reqPath.received + reqPath.pooled + reqPath.included + reqPath.finalized + reqPath.rejected;
+        var reqTotal = nRequested + reqPath.received + reqPath.pooled + reqPath.included + reqPath.finalized + reqPath.rejected + reqPath.dropped;
 
         // Total unsolicited reaching received+.
-        var unsolTotal = unsolPath.received + unsolPath.pooled + unsolPath.included + unsolPath.finalized + unsolPath.rejected;
+        var unsolTotal = unsolPath.received + unsolPath.pooled + unsolPath.included + unsolPath.finalized + unsolPath.rejected + unsolPath.dropped;
 
         // Non-private total entering announced.
         var announcedTotal = total - nPrivate;
@@ -1169,10 +1169,10 @@
                       nDropped.toLocaleString(), 'start', '#888', '10');
         }
 
-        // 9. Private → Included (from below).
+        // 9. Private → Included (from below-left, feeding into included node).
         if (nPrivate > 0) {
             var privBarH = sh(nPrivate);
-            var privX = colX(4.3);
+            var privX = colX(3.7);
             var privY = Math.max(inclNode.y + inclNode.h + 30, yTop + availH * 0.7);
             if (privY + privBarH > H - 30) privY = H - 30 - privBarH;
 
@@ -1182,10 +1182,10 @@
                      SANKEY_COLORS.private);
             // Private node.
             drawNode(svg, privX, privY, NODE_W, privBarH, SANKEY_COLORS.private);
-            drawLabel(svg, privX + NODE_W + 6, privY + privBarH / 2 - 6,
-                      'Private', 'start', '#e0e0e0');
-            drawLabel(svg, privX + NODE_W + 6, privY + privBarH / 2 + 8,
-                      nPrivate.toLocaleString(), 'start', '#888', '10');
+            drawLabel(svg, privX - 6, privY + privBarH / 2 - 6,
+                      'Private', 'end', '#e0e0e0');
+            drawLabel(svg, privX - 6, privY + privBarH / 2 + 8,
+                      nPrivate.toLocaleString(), 'end', '#888', '10');
         }
 
         // -----------------------------------------------------------
