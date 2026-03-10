@@ -1087,6 +1087,7 @@
         var privatePath = { included: 0, finalized: 0 };
         var nReorged = 0;  // total reorg events (included → pooled)
         var dropReasons = {}; // reason string -> count
+        var rejectReasons = {}; // reason string -> count
 
         txs.forEach(function(ev) {
             if (!typeFilter.has(ev._txType || 0)) return;
@@ -1095,6 +1096,9 @@
             nReorged += ev._reorgCount || 0;
             if (s === 'dropped' && ev._dropReason) {
                 dropReasons[ev._dropReason] = (dropReasons[ev._dropReason] || 0) + 1;
+            }
+            if (s === 'rejected' && ev.rejectErr) {
+                rejectReasons[ev.rejectErr] = (rejectReasons[ev.rejectErr] || 0) + 1;
             }
 
             // Private: first seen already included in chain.
@@ -1242,6 +1246,16 @@
             if (counts.rejected !== cumRejected) {
                 drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 20,
                           counts.rejected.toLocaleString() + ' now', 'start', '#555', '9');
+            }
+            // Show reject reason breakdown.
+            var rejReasonKeys = Object.keys(rejectReasons).sort(function(a, b) { return rejectReasons[b] - rejectReasons[a]; });
+            if (rejReasonKeys.length > 0) {
+                var rejParts = [];
+                for (var ri = 0; ri < rejReasonKeys.length; ri++) {
+                    rejParts.push(rejectReasons[rejReasonKeys[ri]] + ' ' + rejReasonKeys[ri]);
+                }
+                var rejBaseY = rejY + rejBarH / 2 + (counts.rejected !== cumRejected ? 32 : 20);
+                drawLabel(svg, rejX + NODE_W + 6, rejBaseY, rejParts.join(', '), 'start', '#777', '9');
             }
         }
 
