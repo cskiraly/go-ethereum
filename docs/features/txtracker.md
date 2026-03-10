@@ -250,10 +250,27 @@ state — only events arriving after the WebSocket connects are visible.
 - Dark-themed single-page app with no build tooling (embedded via `//go:embed`)
 - **Feed view**: real-time scrollable event stream with virtual scrolling
 - **Top view**: sortable table of all tracked txs with on-demand RPC fetch
-- **Stats view**: Sankey diagram showing transaction flow through lifecycle stages
+- **Stats view**: Sankey diagram showing transaction flow through lifecycle stages,
+  with now/total labels per node and backward links for reorgs
 - Filter by hash/peer/status, resizable and reorderable columns
 - Resizable detail panel with drag handle (200–800px)
 - Detachable detail panel: pop out to `/tx/0x...` for side-by-side workflows
+- LRU eviction stats panel below the Sankey diagram
+
+#### Sankey Diagram
+
+Each node shows two labels:
+- **"X now"**: transactions currently at this state
+- **"Y total"**: cumulative count of all txs that ever reached this state (hidden
+  when equal to "now")
+
+Forward flows (left to right) are filled bands connecting consecutive states.
+Terminal states (Rejected, Dropped) branch downward from their source.
+
+**Backward links** visualize reorgs (Included → Pooled). These are drawn as
+dashed amber arcs below the main flow, labeled with the reorg count. The
+`_reorgCount` field on each tx event tracks how many times that transaction
+was reverted from included back to the pool.
 
 ### Usage
 
