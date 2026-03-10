@@ -224,7 +224,90 @@ RPC-dependent keys (`nonce`, `value`, `gas`, `gasfeecap`, `gastipcap`) keep
 the existing cache-based sort since those values genuinely aren't available
 without a fetch.
 
+## Transaction Retention & Eviction
+
+Transactions are tracked in multiple components simultaneously, each with
+different retention strategies. The components below are grouped by whether
+they existed on master before this branch or were added as part of the
+txtracker work.
+
+### Pre-existing components (master)
+
+**tx_fetcher** (`eth/fetcher/tx_fetcher.go`) tracks transactions through a
+three-stage fetch pipeline (wait → announce → fetch). Per-transaction state
+is ephemeral — cleaned up on delivery, timeout, or peer disconnect. Two LRU
+caches provide longer-term memory:
+
+| Cache | Capacity | TTL | Purpose |
+|-------|----------|-----|---------|
+| `underpriced` | 32,768 entries | 5 min | Avoid re-requesting recently rejected underpriced txs |
+| `txOnChainCache` | 32,768 entries | none (purged on reorg) | Avoid re-fetching recently mined txs |
+
+Fetch pipeline timers: `txArriveTimeout` = 500ms (wait before requesting),
+`txFetchTimeout` = 5s (max time to wait for a response).
+
+**legacypool** (`core/txpool/legacypool/`) has time-based and capacity-based
+eviction:
+
+- *Queued (non-executable) txs*: evicted after `Lifetime` (default **3 hours**),
+  checked every minute. The heartbeat resets when new txs arrive for the account.
+- *Capacity limits*: `GlobalSlots` = 5,120 executable, `GlobalQueue` = 1,024
+  non-executable. When exceeded, lowest-priced txs are evicted.
+- *Per-account limits*: `AccountSlots` = 16 executable, `AccountQueue` = 64
+  non-executable.
+
+**blobpool** (`core/txpool/blobpool/`) has price-based eviction via an eviction
+heap, plus special handling for nonce-gapped transactions:
+
+- *Gapped txs*: kept for `gappedLifetime` = 1 min, max 128 globally. This
+  handles brief reordering; after that they're dropped to prevent DoS.
+- *Oversaturated pool*: evicts cheapest transactions based on dynamic fee
+  calculation (considers both base fee and blob fee).
+
+### Added by txtracker branch
+
+**txtracker** (`eth/txtracker/tracker.go`) uses LRU eviction with no
+time-based expiry:
+
+- Bounded to `maxEntries` (default **65,536**). Each status transition moves
+  the entry to the LRU front. Finalized and rejected txs age out naturally
+  since they receive no further updates.
+- No time-based expiry — a transaction stays tracked as long as it keeps
+  receiving status updates or hasn't been pushed out by newer entries.
+
+Per-peer statistics (`peerStats`) are created lazily on first announcement
+and **deleted entirely on peer disconnect** (`NotifyPeerDrop`). Fields
+tracked per peer: `announced`, `delivered`, `usefulDelivery`,
+`firstAnnouncer`. These are transient — no persistence across reconnects.
+
+Per-transaction peer attribution survives peer disconnect (stored on the tx
+record, not the peer record): `announcers []string`, `requestedFrom string`,
+`deliverer string`. These are evicted with the tx via LRU.
+
+**txview browser** (`cmd/txview/internal/ui/app.js`) has **no eviction**:
+
+- The `txs` Map grows unbounded as subscription events arrive.
+- `topCache` entries go stale after 5s and are refetched, but the main event
+  map never shrinks.
+- Page refresh is the only cleanup — clears all state and starts fresh.
+- Long sessions will consume increasing browser memory.
+
+### Summary
+
+| Component | Strategy | Capacity | Time limit | Peer disconnect |
+|-----------|----------|----------|------------|-----------------|
+| tx_fetcher (underpriced) | LRU + TTL | 32,768 | 5 min | n/a |
+| tx_fetcher (on-chain) | LRU | 32,768 | purge on reorg | n/a |
+| tx_fetcher (pipeline) | explicit cleanup | unbounded | 500ms / 5s timeouts | full cleanup |
+| legacypool (queued) | time-based | 1,024 global | 3 hours | n/a |
+| legacypool (pending) | price-based | 5,120 global | none | n/a |
+| blobpool (gapped) | time-based | 128 global | 1 min | n/a |
+| blobpool (main) | price-based | blob space limits | none | n/a |
+| **txtracker** | **LRU** | **65,536** | **none** | **stats deleted, tx records kept** |
+| **txview browser** | **none** | **unbounded** | **page refresh** | **n/a** |
+
 ## Future Work
 
 - Use tracker data for peer scoring (bandwidth waste detection)
 - Filter redundant transaction fetches based on tracker state
+- Add eviction to txview browser (e.g., drop oldest entries past a threshold)
