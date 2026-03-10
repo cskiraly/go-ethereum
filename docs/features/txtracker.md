@@ -20,13 +20,15 @@ Local path:  (local submit) → Pooled → Included → Finalized
 
 ## Architecture
 
+### Event Loop
+
 Single-goroutine event loop (same pattern as TxFetcher):
 - All state lives in the loop goroutine, no locks needed
 - Callers send events via buffered channels (non-blocking)
 - Queries use request/response channels (blocking)
 - Chain events and pool events come via standard subscriptions
 
-## Key Design Decisions
+### Key Design Decisions
 
 1. **No modifications to core/ packages**: The tracker subscribes to
    `ChainEvent` and `NewTxsEvent` via standard interfaces. Local transactions
@@ -44,7 +46,7 @@ Single-goroutine event loop (same pattern as TxFetcher):
    Tracks announcements, deliveries, useful deliveries, and first-announcer
    counts per peer. Stats are cleared on peer disconnect.
 
-## Files
+### Files
 
 - `eth/txtracker/tracker.go` — Core types, event loop, state machine
 - `eth/txtracker/metrics.go` — Meter and gauge registrations
@@ -52,31 +54,11 @@ Single-goroutine event loop (same pattern as TxFetcher):
 - `eth/handler.go` — Creates, starts, stops tracker; hooks addTxs and peer drop
 - `eth/handler_eth.go` — Feeds announcement and receive events to tracker
 
-## Code Review Fixes (commit 5)
+## Event Feed & RPC API
 
-- **BUG-1**: `txIncludedMeter` was firing for every transaction in every block,
-  not just tracked ones. Moved inside the status-update block.
-- **BUG-2**: `status < TxIncluded || status == TxIncluded` simplified to
-  `status <= TxIncluded`.
-- **BUG-3**: `TestPooledToIncluded` was a dead test (hash mismatch between
-  `makeHash(5)` and `makeTx(hash).Hash()`). Removed along with unused `makeTx`.
-- **IMPROVE-1**: Replaced `containsString` helper with `slices.Contains`.
+### Event Feed
 
-## Codex Review Fixes (commit 6)
-
-- **BUG-4**: `TxRejected` (iota 6) > `TxIncluded` (4) blocked rejected txs from
-  advancing to Included on chain events. Changed guard to `status != TxFinalized`.
-- **BUG-5**: `Get`/`Status`/`GetPeerStats` could deadlock if `Stop()` was called
-  after the query was sent but before the loop processed it. Added quit select
-  around response reads.
-- **BUG-6**: Race between `handleNewTxs` and `handleReceive` could misclassify
-  remote txs as local. `handleReceive` now repairs local flag when it finds a
-  local record with no deliverer.
-- **CLEANUP-1**: Removed dead `lastHeadNum` field.
-
-## Event Feed (txtracker-feed branch)
-
-Added real-time event feed for state transitions:
+Real-time event feed for state transitions:
 
 - `TxTrackerEvent` struct emitted on every state change via `event.Feed`
 - `SubscribeEvents(ch)` for external consumers
@@ -91,11 +73,103 @@ Added real-time event feed for state transitions:
 - `txtracker_subscribe("events")` — WebSocket subscription for live events,
   follows the `NewHeads` pattern from `eth/filters/api.go`
 
-### cmd/txview
+## Transaction Retention & Eviction
+
+Transactions are tracked in multiple components simultaneously, each with
+different retention strategies. The components below are grouped by whether
+they existed on master before this branch or were added as part of the
+txtracker work.
+
+### Pre-existing components (master)
+
+**eth peer knownTxs** (`eth/protocols/eth/peer.go`) tracks which transaction
+hashes a peer already knows about, to avoid redundant sends. Each peer has a
+`knownCache` (`mapset.Set[common.Hash]`, capacity **32,768**). Hashes are
+marked known when sending full txs, announcing hashes, replying to
+`GetPooledTransactions`, or receiving announcements/broadcasts. Used by
+`BroadcastTransactions()` to skip peers that already have a tx. Eviction is
+random (`Pop()`) when over capacity — not LRU. Garbage collected with the
+peer struct on disconnect.
+
+**tx_fetcher** (`eth/fetcher/tx_fetcher.go`) tracks transactions through a
+three-stage fetch pipeline (wait → announce → fetch). Per-transaction state
+is ephemeral — cleaned up on delivery, timeout, or peer disconnect. Two LRU
+caches provide longer-term memory:
+
+| Cache | Capacity | TTL | Purpose |
+|-------|----------|-----|---------|
+| `underpriced` | 32,768 entries | 5 min | Avoid re-requesting recently rejected underpriced txs |
+| `txOnChainCache` | 32,768 entries | none (purged on reorg) | Avoid re-fetching recently mined txs |
+
+Fetch pipeline timers: `txArriveTimeout` = 500ms (wait before requesting),
+`txFetchTimeout` = 5s (max time to wait for a response).
+
+**legacypool** (`core/txpool/legacypool/`) has time-based and capacity-based
+eviction:
+
+- *Queued (non-executable) txs*: evicted after `Lifetime` (default **3 hours**),
+  checked every minute. The heartbeat resets when new txs arrive for the account.
+- *Capacity limits*: `GlobalSlots` = 5,120 executable, `GlobalQueue` = 1,024
+  non-executable. When exceeded, lowest-priced txs are evicted.
+- *Per-account limits*: `AccountSlots` = 16 executable, `AccountQueue` = 64
+  non-executable.
+
+**blobpool** (`core/txpool/blobpool/`) has price-based eviction via an eviction
+heap, plus special handling for nonce-gapped transactions:
+
+- *Gapped txs*: kept for `gappedLifetime` = 1 min, max 128 globally. This
+  handles brief reordering; after that they're dropped to prevent DoS.
+- *Oversaturated pool*: evicts cheapest transactions based on dynamic fee
+  calculation (considers both base fee and blob fee).
+
+### Txtracker
+
+**txtracker** (`eth/txtracker/tracker.go`) uses LRU eviction with no
+time-based expiry:
+
+- Bounded to `maxEntries` (default **65,536**). Each status transition moves
+  the entry to the LRU front. Finalized and rejected txs age out naturally
+  since they receive no further updates.
+- No time-based expiry — a transaction stays tracked as long as it keeps
+  receiving status updates or hasn't been pushed out by newer entries.
+
+Per-peer statistics (`peerStats`) are created lazily on first announcement
+and **deleted entirely on peer disconnect** (`NotifyPeerDrop`). Fields
+tracked per peer: `announced`, `delivered`, `usefulDelivery`,
+`firstAnnouncer`. These are transient — no persistence across reconnects.
+
+Per-transaction peer attribution survives peer disconnect (stored on the tx
+record, not the peer record): `announcers []string`, `requestedFrom string`,
+`deliverer string`. These are evicted with the tx via LRU.
+
+**txview browser** (`cmd/txview/internal/ui/app.js`) has **no eviction**:
+
+- The `txs` Map grows unbounded as subscription events arrive.
+- `topCache` entries go stale after 5s and are refetched, but the main event
+  map never shrinks.
+- Page refresh is the only cleanup — clears all state and starts fresh.
+- Long sessions will consume increasing browser memory.
+
+### Summary
+
+| Component | Strategy | Capacity | Time limit | Peer disconnect |
+|-----------|----------|----------|------------|-----------------|
+| eth peer knownTxs | random eviction | 32,768 per peer | none | GC with peer |
+| tx_fetcher (underpriced) | LRU + TTL | 32,768 | 5 min | n/a |
+| tx_fetcher (on-chain) | LRU | 32,768 | purge on reorg | n/a |
+| tx_fetcher (pipeline) | explicit cleanup | unbounded | 500ms / 5s timeouts | full cleanup |
+| legacypool (queued) | time-based | 1,024 global | 3 hours | n/a |
+| legacypool (pending) | price-based | 5,120 global | none | n/a |
+| blobpool (gapped) | time-based | 128 global | 1 min | n/a |
+| blobpool (main) | price-based | blob space limits | none | n/a |
+| **txtracker** | **LRU** | **65,536** | **none** | **stats deleted, tx records kept** |
+| **txview browser** | **none** | **unbounded** | **page refresh** | **n/a** |
+
+## txview — Web UI
 
 Standalone web tool for visualizing transaction lifecycles.
 
-#### System Design
+### System Design
 
 txview has a three-tier architecture: geth (data), txview binary (bridge),
 and browser (UI).
@@ -154,7 +228,7 @@ state — only events arriving after the WebSocket connects are visible.
                                         HTTP
 ```
 
-#### Features
+### Features
 
 - Dark-themed single-page app with no build tooling (embedded via `//go:embed`)
 - **Feed view**: real-time scrollable event stream with virtual scrolling
@@ -163,6 +237,8 @@ state — only events arriving after the WebSocket connects are visible.
 - Filter by hash/peer/status, resizable and reorderable columns
 - Resizable detail panel with drag handle (200–800px)
 - Detachable detail panel: pop out to `/tx/0x...` for side-by-side workflows
+
+### Usage
 
 #### Building
 
@@ -208,6 +284,30 @@ Alternatively, bind to all interfaces with `--addr 0.0.0.0:8670`. In that
 case geth also needs `--ws.addr 0.0.0.0` and appropriate firewall rules,
 since the browser connects directly to geth's WebSocket.
 
+## Changelog
+
+### Code Review Fixes (commit 5)
+
+- **BUG-1**: `txIncludedMeter` was firing for every transaction in every block,
+  not just tracked ones. Moved inside the status-update block.
+- **BUG-2**: `status < TxIncluded || status == TxIncluded` simplified to
+  `status <= TxIncluded`.
+- **BUG-3**: `TestPooledToIncluded` was a dead test (hash mismatch between
+  `makeHash(5)` and `makeTx(hash).Hash()`). Removed along with unused `makeTx`.
+- **IMPROVE-1**: Replaced `containsString` helper with `slices.Contains`.
+
+### Codex Review Fixes (commit 6)
+
+- **BUG-4**: `TxRejected` (iota 6) > `TxIncluded` (4) blocked rejected txs from
+  advancing to Included on chain events. Changed guard to `status != TxFinalized`.
+- **BUG-5**: `Get`/`Status`/`GetPeerStats` could deadlock if `Stop()` was called
+  after the query was sent but before the loop processed it. Added quit select
+  around response reads.
+- **BUG-6**: Race between `handleNewTxs` and `handleReceive` could misclassify
+  remote txs as local. `handleReceive` now repairs local flag when it finds a
+  local record with no deliverer.
+- **CLEANUP-1**: Removed dead `lastHeadNum` field.
+
 ### Top View Sort Fix
 
 The Top view's sort depended entirely on `topCache` (RPC-fetched `TxInfo`),
@@ -223,98 +323,6 @@ which is always available for every transaction:
 RPC-dependent keys (`nonce`, `value`, `gas`, `gasfeecap`, `gastipcap`) keep
 the existing cache-based sort since those values genuinely aren't available
 without a fetch.
-
-## Transaction Retention & Eviction
-
-Transactions are tracked in multiple components simultaneously, each with
-different retention strategies. The components below are grouped by whether
-they existed on master before this branch or were added as part of the
-txtracker work.
-
-### Pre-existing components (master)
-
-**eth peer knownTxs** (`eth/protocols/eth/peer.go`) tracks which transaction
-hashes a peer already knows about, to avoid redundant sends. Each peer has a
-`knownCache` (`mapset.Set[common.Hash]`, capacity **32,768**). Hashes are
-marked known when sending full txs, announcing hashes, replying to
-`GetPooledTransactions`, or receiving announcements/broadcasts. Used by
-`BroadcastTransactions()` to skip peers that already have a tx. Eviction is
-random (`Pop()`) when over capacity — not LRU. Garbage collected with the
-peer struct on disconnect.
-
-**tx_fetcher** (`eth/fetcher/tx_fetcher.go`) tracks transactions through a
-three-stage fetch pipeline (wait → announce → fetch). Per-transaction state
-is ephemeral — cleaned up on delivery, timeout, or peer disconnect. Two LRU
-caches provide longer-term memory:
-
-| Cache | Capacity | TTL | Purpose |
-|-------|----------|-----|---------|
-| `underpriced` | 32,768 entries | 5 min | Avoid re-requesting recently rejected underpriced txs |
-| `txOnChainCache` | 32,768 entries | none (purged on reorg) | Avoid re-fetching recently mined txs |
-
-Fetch pipeline timers: `txArriveTimeout` = 500ms (wait before requesting),
-`txFetchTimeout` = 5s (max time to wait for a response).
-
-**legacypool** (`core/txpool/legacypool/`) has time-based and capacity-based
-eviction:
-
-- *Queued (non-executable) txs*: evicted after `Lifetime` (default **3 hours**),
-  checked every minute. The heartbeat resets when new txs arrive for the account.
-- *Capacity limits*: `GlobalSlots` = 5,120 executable, `GlobalQueue` = 1,024
-  non-executable. When exceeded, lowest-priced txs are evicted.
-- *Per-account limits*: `AccountSlots` = 16 executable, `AccountQueue` = 64
-  non-executable.
-
-**blobpool** (`core/txpool/blobpool/`) has price-based eviction via an eviction
-heap, plus special handling for nonce-gapped transactions:
-
-- *Gapped txs*: kept for `gappedLifetime` = 1 min, max 128 globally. This
-  handles brief reordering; after that they're dropped to prevent DoS.
-- *Oversaturated pool*: evicts cheapest transactions based on dynamic fee
-  calculation (considers both base fee and blob fee).
-
-### Added by txtracker branch
-
-**txtracker** (`eth/txtracker/tracker.go`) uses LRU eviction with no
-time-based expiry:
-
-- Bounded to `maxEntries` (default **65,536**). Each status transition moves
-  the entry to the LRU front. Finalized and rejected txs age out naturally
-  since they receive no further updates.
-- No time-based expiry — a transaction stays tracked as long as it keeps
-  receiving status updates or hasn't been pushed out by newer entries.
-
-Per-peer statistics (`peerStats`) are created lazily on first announcement
-and **deleted entirely on peer disconnect** (`NotifyPeerDrop`). Fields
-tracked per peer: `announced`, `delivered`, `usefulDelivery`,
-`firstAnnouncer`. These are transient — no persistence across reconnects.
-
-Per-transaction peer attribution survives peer disconnect (stored on the tx
-record, not the peer record): `announcers []string`, `requestedFrom string`,
-`deliverer string`. These are evicted with the tx via LRU.
-
-**txview browser** (`cmd/txview/internal/ui/app.js`) has **no eviction**:
-
-- The `txs` Map grows unbounded as subscription events arrive.
-- `topCache` entries go stale after 5s and are refetched, but the main event
-  map never shrinks.
-- Page refresh is the only cleanup — clears all state and starts fresh.
-- Long sessions will consume increasing browser memory.
-
-### Summary
-
-| Component | Strategy | Capacity | Time limit | Peer disconnect |
-|-----------|----------|----------|------------|-----------------|
-| eth peer knownTxs | random eviction | 32,768 per peer | none | GC with peer |
-| tx_fetcher (underpriced) | LRU + TTL | 32,768 | 5 min | n/a |
-| tx_fetcher (on-chain) | LRU | 32,768 | purge on reorg | n/a |
-| tx_fetcher (pipeline) | explicit cleanup | unbounded | 500ms / 5s timeouts | full cleanup |
-| legacypool (queued) | time-based | 1,024 global | 3 hours | n/a |
-| legacypool (pending) | price-based | 5,120 global | none | n/a |
-| blobpool (gapped) | time-based | 128 global | 1 min | n/a |
-| blobpool (main) | price-based | blob space limits | none | n/a |
-| **txtracker** | **LRU** | **65,536** | **none** | **stats deleted, tx records kept** |
-| **txview browser** | **none** | **unbounded** | **page refresh** | **n/a** |
 
 ## Future Work
 
