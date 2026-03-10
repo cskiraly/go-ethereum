@@ -25,6 +25,7 @@
     <nav class="tab-bar">
         <button class="tab active" data-tab="feed">Feed</button>
         <button class="tab" data-tab="top">Top</button>
+        <button class="tab" data-tab="stats">Stats</button>
     </nav>
 
     <!-- Feed view (existing) -->
@@ -103,6 +104,13 @@
                 <div class="detail-header"><h2>Transaction Details</h2><span class="detail-close">&times;</span></div>
                 <div id="top-detail-content"></div>
             </div>
+        </div>
+    </div>
+
+    <!-- Stats view -->
+    <div id="view-stats" class="view">
+        <div class="stats-area">
+            <svg id="sankey-svg"></svg>
         </div>
     </div>
 

@@ -32,6 +32,9 @@
     let topSortKey = 'age';
     let topSortAsc = false;          // descending = oldest first for age
 
+    // --- Stats view state ---
+    let statsViewDirty = true;
+
     // --- DOM refs: shared ---
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
@@ -56,6 +59,11 @@
     const detailContent = document.getElementById('detail-content');
     const filterInput = document.getElementById('filter-input');
     const filterStatus = document.getElementById('filter-status');
+
+    // --- DOM refs: stats view ---
+    const statsView = document.getElementById('view-stats');
+    const sankeySvg = document.getElementById('sankey-svg');
+    const SVG_NS = 'http://www.w3.org/2000/svg';
 
     // --- DOM refs: top view ---
     const topView = document.getElementById('view-top');
@@ -117,7 +125,9 @@
             }
             feedView.classList.toggle('active', tab === 'feed');
             topView.classList.toggle('active', tab === 'top');
+            statsView.classList.toggle('active', tab === 'stats');
             if (tab === 'top') topViewDirty = true;
+            if (tab === 'stats') statsViewDirty = true;
             scheduleRender();
         });
     }
@@ -372,6 +382,7 @@
 
         feedViewDirty = true;
         topViewDirty = true;
+        statsViewDirty = true;
         scheduleRender();
     }
 
@@ -401,8 +412,10 @@
         renderScheduled = false;
         if (activeTab === 'feed') {
             renderFeedViewport();
-        } else {
+        } else if (activeTab === 'top') {
             renderTopViewport();
+        } else if (activeTab === 'stats') {
+            renderStats();
         }
     }
 
@@ -840,6 +853,205 @@
         if (deltaSec < 3600) return Math.floor(deltaSec / 60) + 'm' + Math.floor(deltaSec % 60) + 's';
         return Math.floor(deltaSec / 3600) + 'h' + Math.floor((deltaSec % 3600) / 60) + 'm';
     }
+
+    // ========================================================================
+    // Stats view — Sankey diagram
+    // ========================================================================
+    var SANKEY_STAGES = ['announced', 'requested', 'received', 'pooled', 'included', 'finalized'];
+    var SANKEY_LABELS = {
+        announced: 'Announced', requested: 'Requested', received: 'Received',
+        pooled: 'Pooled', included: 'Included', finalized: 'Finalized', rejected: 'Rejected'
+    };
+    var SANKEY_COLORS = {
+        announced: '#666', requested: '#00838f', received: '#1565c0',
+        pooled: '#f57f17', included: '#2e7d32', finalized: '#6a1b9a', rejected: '#c62828'
+    };
+
+    function svgEl(tag, attrs) {
+        var el = document.createElementNS(SVG_NS, tag);
+        if (attrs) {
+            for (var k in attrs) {
+                if (attrs.hasOwnProperty(k)) el.setAttribute(k, attrs[k]);
+            }
+        }
+        return el;
+    }
+
+    // Create a filled curved band from (x1, y1a..y1b) to (x2, y2a..y2b).
+    function sankeyPath(x1, y1a, y1b, x2, y2a, y2b) {
+        var mx = (x1 + x2) / 2;
+        return 'M' + x1 + ',' + y1a +
+               ' C' + mx + ',' + y1a + ' ' + mx + ',' + y2a + ' ' + x2 + ',' + y2a +
+               ' L' + x2 + ',' + y2b +
+               ' C' + mx + ',' + y2b + ' ' + mx + ',' + y1b + ' ' + x1 + ',' + y1b +
+               ' Z';
+    }
+
+    function renderStats() {
+        if (!statsViewDirty) return;
+        statsViewDirty = false;
+
+        var svg = sankeySvg;
+        var container = svg.parentElement;
+        var W = container.clientWidth || 800;
+        var H = container.clientHeight || 400;
+        if (W < 10 || H < 10) return;
+
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+        svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+
+        // Count transactions at each status.
+        var counts = {};
+        for (var s = 0; s < SANKEY_STAGES.length; s++) counts[SANKEY_STAGES[s]] = 0;
+        counts.rejected = 0;
+        txs.forEach(function(ev) {
+            if (counts.hasOwnProperty(ev.newStatus)) counts[ev.newStatus]++;
+        });
+        var total = txs.size;
+
+        if (total === 0) {
+            var t = svgEl('text', {
+                x: W / 2, y: H / 2, 'text-anchor': 'middle',
+                fill: '#888', 'font-size': '14', 'font-family': 'inherit'
+            });
+            t.textContent = 'Waiting for transactions\u2026';
+            svg.appendChild(t);
+            return;
+        }
+
+        // Title.
+        var title = svgEl('text', {
+            x: W / 2, y: 22, 'text-anchor': 'middle',
+            fill: '#888', 'font-size': '13', 'font-family': 'inherit'
+        });
+        title.textContent = 'Transaction Flow \u2014 ' + total.toLocaleString() + ' total';
+        svg.appendChild(title);
+
+        // Compute cumulative flow through each stage.
+        // Each tx at status S implies it passed through all prior stages.
+        // Rejected txs branch off from "received" (pool validation rejection).
+        var nodeValues = [];  // total flow through each stage
+        var linkValues = [];  // flow from stage[i] to stage[i+1]
+        var remaining = total;
+        for (var i = 0; i < SANKEY_STAGES.length; i++) {
+            nodeValues.push(remaining);
+            if (i === 2) remaining -= counts.rejected;  // branch to rejected
+            remaining -= counts[SANKEY_STAGES[i]];
+            if (i < SANKEY_STAGES.length - 1) {
+                linkValues.push(Math.max(0, remaining));
+            }
+        }
+
+        // Layout.
+        var PAD = { top: 50, bottom: 50, left: 90, right: 70 };
+        var NODE_W = 16;
+        var mainH = H - PAD.bottom;  // reserve bottom for rejected
+        var availW = W - PAD.left - PAD.right - NODE_W;
+        var availH = mainH - PAD.top - 40; // extra room for labels
+        var colGap = availW / (SANKEY_STAGES.length - 1);
+        var scale = availH / Math.max(1, total);
+
+        // Position main nodes (centered vertically in the available area).
+        var nodes = [];
+        for (var i = 0; i < SANKEY_STAGES.length; i++) {
+            var h = Math.max(2, nodeValues[i] * scale);
+            nodes.push({
+                x: PAD.left + i * colGap,
+                y: PAD.top + (availH - h) / 2,
+                w: NODE_W,
+                h: h,
+                key: SANKEY_STAGES[i]
+            });
+        }
+
+        // Draw links between consecutive main stages.
+        for (var i = 0; i < linkValues.length; i++) {
+            if (linkValues[i] <= 0) continue;
+            var n0 = nodes[i], n1 = nodes[i + 1];
+            var path = svgEl('path', {
+                d: sankeyPath(n0.x + NODE_W, n0.y, n0.y + n1.h, n1.x, n1.y, n1.y + n1.h),
+                fill: SANKEY_COLORS[SANKEY_STAGES[i]], opacity: '0.25'
+            });
+            svg.appendChild(path);
+        }
+
+        // Draw rejected branch (from received node).
+        if (counts.rejected > 0) {
+            var srcNode = nodes[2]; // received
+            var rejH = Math.max(2, counts.rejected * scale);
+            var linkSrcY = srcNode.y + linkValues[2] * scale; // below the pooled-flow portion
+
+            // Position rejected node below the main flow, between received and pooled.
+            var rejX = PAD.left + 2.5 * colGap;
+            var rejY = srcNode.y + srcNode.h + 40;
+            if (rejY + rejH > H - 20) rejY = H - 20 - rejH; // clamp to viewport
+
+            // Link.
+            var path = svgEl('path', {
+                d: sankeyPath(srcNode.x + NODE_W, linkSrcY, linkSrcY + rejH, rejX, rejY, rejY + rejH),
+                fill: SANKEY_COLORS.rejected, opacity: '0.25'
+            });
+            svg.appendChild(path);
+
+            // Node.
+            svg.appendChild(svgEl('rect', {
+                x: rejX, y: rejY, width: NODE_W, height: rejH,
+                fill: SANKEY_COLORS.rejected, rx: '2'
+            }));
+
+            // Label.
+            var rl = svgEl('text', {
+                x: rejX + NODE_W + 6, y: rejY + rejH / 2,
+                'dominant-baseline': 'central', fill: '#e0e0e0',
+                'font-size': '11', 'font-family': 'inherit'
+            });
+            rl.textContent = 'Rejected';
+            svg.appendChild(rl);
+
+            // Count.
+            var rc = svgEl('text', {
+                x: rejX + NODE_W + 6, y: rejY + rejH / 2 + 14,
+                'dominant-baseline': 'central', fill: '#888',
+                'font-size': '10', 'font-family': 'inherit'
+            });
+            rc.textContent = counts.rejected.toLocaleString();
+            svg.appendChild(rc);
+        }
+
+        // Draw main nodes and labels.
+        for (var i = 0; i < nodes.length; i++) {
+            var n = nodes[i];
+
+            // Node rectangle.
+            svg.appendChild(svgEl('rect', {
+                x: n.x, y: n.y, width: n.w, height: Math.max(2, n.h),
+                fill: SANKEY_COLORS[n.key], rx: '2'
+            }));
+
+            // Stage label above.
+            var label = svgEl('text', {
+                x: n.x + n.w / 2, y: n.y - 10,
+                'text-anchor': 'middle', fill: '#e0e0e0',
+                'font-size': '11', 'font-family': 'inherit'
+            });
+            label.textContent = SANKEY_LABELS[n.key];
+            svg.appendChild(label);
+
+            // Count at this stage below.
+            var countLabel = svgEl('text', {
+                x: n.x + n.w / 2, y: n.y + n.h + 16,
+                'text-anchor': 'middle', fill: '#888',
+                'font-size': '10', 'font-family': 'inherit'
+            });
+            countLabel.textContent = counts[n.key].toLocaleString();
+            svg.appendChild(countLabel);
+        }
+    }
+
+    // Re-render stats on window resize.
+    window.addEventListener('resize', function() {
+        if (activeTab === 'stats') { statsViewDirty = true; scheduleRender(); }
+    });
 
     // ========================================================================
     // Helpers

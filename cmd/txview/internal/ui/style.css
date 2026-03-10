@@ -280,6 +280,18 @@ header h1 {
 /* Loading indicator for top rows awaiting fetch */
 .top-loading { color: #555; font-style: italic; }
 
+/* --- Stats view --- */
+.stats-area {
+    flex: 1;
+    padding: 20px;
+    min-height: 0;
+}
+
+#sankey-svg {
+    width: 100%;
+    height: calc(100vh - 160px);
+}
+
 /* --- Detail panel --- */
 
 .detail-panel {
