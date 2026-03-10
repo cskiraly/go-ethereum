@@ -446,7 +446,8 @@ branching off from Pooled (similar to Rejected branching off Received).
 ### Transaction Type Filter
 
 `TxType uint8` was added to `TxTrackerEvent` so the browser receives the
-Ethereum transaction type (legacy=0, access list=1, dynamic fee=2, blob=3)
+Ethereum transaction type (legacy=0, access list=1, dynamic fee=2, blob=3,
+set-code=4)
 with every subscription event, without needing an RPC fetch.
 
 The browser stores `_txType` on each event (preserving the type from earlier

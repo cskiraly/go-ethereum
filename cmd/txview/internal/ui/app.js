@@ -36,8 +36,8 @@
     let statsViewDirty = true;
 
     // --- Type filter state ---
-    let feedTypeFilter = new Set([0, 1, 2, 3]);
-    let topTypeFilter = new Set([0, 1, 2, 3]);
+    let feedTypeFilter = new Set([0, 1, 2, 3, 4]);
+    let topTypeFilter = new Set([0, 1, 2, 3, 4]);
 
     // --- DOM refs: shared ---
     const statusDot = document.getElementById('status-dot');
