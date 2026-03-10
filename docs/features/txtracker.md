@@ -86,6 +86,7 @@ Real-time event feed for state transitions:
 
 - `txtracker_getTx(hash)` — full lifecycle info
 - `txtracker_getPeerStats(peer)` — peer contribution stats
+- `txtracker_getAllPeerStats()` — contribution stats for all connected peers
 - `txtracker_subscribe("events")` — WebSocket subscription for live events,
   follows the `NewHeads` pattern from `eth/filters/api.go`
 
@@ -202,6 +203,7 @@ methods expose this:
   fee caps, Value, type, size, all timestamps, Deliverer, Announcers,
   block info, and rejection error.
 - `txtracker_getPeerStats(peer)` — per-peer contribution statistics.
+- `txtracker_getAllPeerStats()` — bulk per-peer stats for the Peers pane.
 
 **txview binary** (`cmd/txview/main.go`) is a stateless bridge. It does no
 data processing or caching — it exists solely to let a browser talk to geth
@@ -227,7 +229,9 @@ scratch on each page load:
 | `topInflight` (Set) | Hashes currently being fetched to deduplicate RPC calls |
 | `visibleHashes` / `topVisibleHashes` | Filtered+sorted hash arrays rebuilt on dirty render |
 | `selectedHash` | Currently selected tx for the detail panel |
-| `colWidths`, `feedColOrder`, `topColOrder` | Column resize widths and drag-reorder state |
+| `peersData` (Object: peer → PeerStats) | Cached `txtracker_getAllPeerStats` result, refetched every 3s when active |
+| `peersSorted` (Array) | Sorted peer entries for virtual scroll rendering |
+| `colWidths`, `feedColOrder`, `topColOrder`, `peersColOrder` | Column resize widths and drag-reorder state |
 | Status counters | Incremented/decremented per event for the header badges |
 
 The browser has no persistent storage. Refreshing the page resets all
@@ -252,6 +256,8 @@ state — only events arriving after the WebSocket connects are visible.
 - **Top view**: sortable table of all tracked txs with on-demand RPC fetch
 - **Stats view**: Sankey diagram showing transaction flow through lifecycle stages,
   with now/total labels per node and backward links for reorgs
+- **Peers view**: sortable table of per-peer contribution statistics (announced,
+  delivered, useful delivery, first announcer) with derived percentage columns
 - Filter by hash/peer/status/transaction type, resizable and reorderable columns
 - Resizable detail panel with drag handle (200–800px)
 - Detachable detail panel: pop out to `/tx/0x...` for side-by-side workflows
@@ -271,6 +277,16 @@ Terminal states (Rejected, Dropped) branch downward from their source.
 dashed amber arcs below the main flow, labeled with the reorg count. The
 `_reorgCount` field on each tx event tracks how many times that transaction
 was reverted from included back to the pool.
+
+#### Peers Pane
+
+Sortable table showing per-peer transaction contribution statistics. Fetches
+data via `txtracker_getAllPeerStats` (single RPC call returning all peers).
+Columns: Peer ID, Announced, Delivered, Useful (deliveries accepted into pool),
+1st Announce (times peer was first to announce), Useful % (UsefulDelivery /
+Delivered), 1st % (FirstAnnouncer / Announced). Auto-refreshes every 3 seconds
+when the tab is active. Uses the same virtual scroll infrastructure as Feed
+and Top panes.
 
 ### Usage
 

@@ -38,6 +38,14 @@
     let cumDropped = 0;          // monotonic: total txs that ever entered dropped
     let cumFinalized = 0;        // monotonic: total txs that ever entered finalized
 
+    // --- Peers view state ---
+    let peersData = {};           // peer -> PeerStats from RPC
+    let peersSorted = [];         // sorted [{peer, stats}] for rendering
+    let peersViewDirty = true;
+    let peersSortKey = 'announced';
+    let peersSortAsc = false;
+    let peersLastFetch = 0;
+
     // --- Type filter state (shared across all panes) ---
     let typeFilter = new Set([0, 1, 2, 3, 4]);
     let showPrivate = true;        // show txs first seen in a block
@@ -87,6 +95,13 @@
     const topFilterStatus = document.getElementById('top-filter-status');
     const topTableHeader = document.getElementById('top-table-header');
 
+    // --- DOM refs: peers view ---
+    const peersView = document.getElementById('view-peers');
+    const peersViewport = document.getElementById('peers-viewport');
+    const peersScrollSpacer = document.getElementById('peers-scroll-spacer');
+    const peersRowContainer = document.getElementById('peers-row-container');
+    const peersTableHeader = document.getElementById('peers-table-header');
+
     // --- Init ---
     fetch('/config')
         .then(function(r) { return r.json(); })
@@ -102,6 +117,9 @@
     topFilterInput.addEventListener('input', function() { topViewDirty = true; scheduleRender(); });
     topFilterStatus.addEventListener('change', function() { topViewDirty = true; scheduleRender(); });
     topViewport.addEventListener('scroll', scheduleRender);
+
+    // Peers view events.
+    peersViewport.addEventListener('scroll', scheduleRender);
 
     // Type filter helpers and events.
     function getCheckedTypes(containerId) {
@@ -170,6 +188,26 @@
         scheduleRender();
     });
 
+    // Sortable column headers in peers view.
+    peersTableHeader.addEventListener('click', function(e) {
+        var span = e.target.closest('.sortable');
+        if (!span) return;
+        var key = span.dataset.sort;
+        if (peersSortKey === key) {
+            peersSortAsc = !peersSortAsc;
+        } else {
+            peersSortKey = key;
+            peersSortAsc = false;
+        }
+        var sortables = peersTableHeader.querySelectorAll('.sortable');
+        for (var i = 0; i < sortables.length; i++) {
+            sortables[i].classList.remove('active-sort', 'sort-asc', 'sort-desc');
+        }
+        span.classList.add('active-sort', peersSortAsc ? 'sort-asc' : 'sort-desc');
+        peersViewDirty = true;
+        scheduleRender();
+    });
+
     // Tab switching.
     var tabs = document.querySelectorAll('.tab');
     for (var i = 0; i < tabs.length; i++) {
@@ -183,8 +221,10 @@
             feedView.classList.toggle('active', tab === 'feed');
             topView.classList.toggle('active', tab === 'top');
             statsView.classList.toggle('active', tab === 'stats');
+            peersView.classList.toggle('active', tab === 'peers');
             if (tab === 'top') topViewDirty = true;
             if (tab === 'stats') { statsViewDirty = true; fetchEvictionStats(); }
+            if (tab === 'peers') { peersViewDirty = true; fetchPeersData(); }
             scheduleRender();
         });
     }
@@ -204,11 +244,12 @@
     // Column order arrays — index = CSS order value.
     var feedColOrder = ['col-hash', 'col-status', 'col-peer', 'col-block', 'col-age', 'col-error', 'col-progress'];
     var topColOrder = ['top-col-hash', 'top-col-status', 'top-col-from', 'top-col-nonce', 'top-col-value', 'top-col-feecap', 'top-col-tipcap', 'top-col-gas', 'top-col-age', 'top-col-progress'];
+    var peersColOrder = ['peers-col-id', 'peers-col-announced', 'peers-col-delivered', 'peers-col-useful', 'peers-col-first', 'peers-col-useful-pct', 'peers-col-first-pct'];
 
     // Extract the column class (col-* or top-col-*) from an element.
     function getColClass(el) {
         return el.className.split(/\s+/).find(function(c) {
-            return (c.startsWith('col-') || c.startsWith('top-col-')) && c !== 'col-resize';
+            return (c.startsWith('col-') || c.startsWith('top-col-') || c.startsWith('peers-col-')) && c !== 'col-resize';
         });
     }
 
@@ -218,7 +259,7 @@
             rules.push('.' + cls + ' { width: ' + colWidths[cls] + 'px !important; flex: none !important; }');
         }
         // Emit order rules for both views.
-        var orders = [feedColOrder, topColOrder];
+        var orders = [feedColOrder, topColOrder, peersColOrder];
         for (var v = 0; v < orders.length; v++) {
             for (var i = 0; i < orders[v].length; i++) {
                 rules.push('.' + orders[v][i] + ' { order: ' + i + '; }');
@@ -243,6 +284,7 @@
     var feedHeader = document.querySelector('#view-feed .table-header');
     setupResizeHandles(feedHeader);
     setupResizeHandles(topTableHeader);
+    setupResizeHandles(peersTableHeader);
 
     // --- Column resize (drag on handle) ---
     var resizeCol = null;
@@ -353,6 +395,7 @@
 
     setupColumnDrag(feedHeader, feedColOrder);
     setupColumnDrag(topTableHeader, topColOrder);
+    setupColumnDrag(peersTableHeader, peersColOrder);
 
     // ========================================================================
     // Resizable detail panel
@@ -540,6 +583,8 @@
             renderTopViewport();
         } else if (activeTab === 'stats') {
             renderStats();
+        } else if (activeTab === 'peers') {
+            renderPeersViewport();
         }
     }
 
@@ -989,6 +1034,112 @@
         if (deltaSec < 60) return Math.floor(deltaSec) + 's';
         if (deltaSec < 3600) return Math.floor(deltaSec / 60) + 'm' + Math.floor(deltaSec % 60) + 's';
         return Math.floor(deltaSec / 3600) + 'h' + Math.floor((deltaSec % 3600) / 60) + 'm';
+    }
+
+    // ========================================================================
+    // Peers view
+    // ========================================================================
+    function fetchPeersData() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        rpcCall('txtracker_getAllPeerStats', [], function(result, err) {
+            if (err || !result) return;
+            peersData = result;
+            peersLastFetch = Date.now();
+            peersViewDirty = true;
+            scheduleRender();
+        });
+    }
+
+    function rebuildPeersSorted() {
+        var arr = [];
+        for (var peer in peersData) {
+            if (peersData.hasOwnProperty(peer)) {
+                arr.push({peer: peer, stats: peersData[peer]});
+            }
+        }
+        arr.sort(function(a, b) {
+            var sa = a.stats, sb = b.stats;
+            var cmp = 0;
+            switch (peersSortKey) {
+                case 'announced':
+                    cmp = (sa.Announced || 0) - (sb.Announced || 0);
+                    break;
+                case 'delivered':
+                    cmp = (sa.Delivered || 0) - (sb.Delivered || 0);
+                    break;
+                case 'useful':
+                    cmp = (sa.UsefulDelivery || 0) - (sb.UsefulDelivery || 0);
+                    break;
+                case 'first':
+                    cmp = (sa.FirstAnnouncer || 0) - (sb.FirstAnnouncer || 0);
+                    break;
+                case 'useful-pct':
+                    var ua = sa.Delivered ? (sa.UsefulDelivery || 0) / sa.Delivered : 0;
+                    var ub = sb.Delivered ? (sb.UsefulDelivery || 0) / sb.Delivered : 0;
+                    cmp = ua - ub;
+                    break;
+                case 'first-pct':
+                    var fa = sa.Announced ? (sa.FirstAnnouncer || 0) / sa.Announced : 0;
+                    var fb = sb.Announced ? (sb.FirstAnnouncer || 0) / sb.Announced : 0;
+                    cmp = fa - fb;
+                    break;
+            }
+            return peersSortAsc ? cmp : -cmp;
+        });
+        peersSorted = arr;
+        peersViewDirty = false;
+    }
+
+    function renderPeersViewport() {
+        if (peersViewDirty) rebuildPeersSorted();
+
+        var totalRows = peersSorted.length;
+        peersScrollSpacer.style.height = (totalRows * ROW_HEIGHT) + 'px';
+
+        var scrollTop = peersViewport.scrollTop;
+        var viewHeight = peersViewport.clientHeight;
+        var firstVisible = Math.floor(scrollTop / ROW_HEIGHT);
+        var lastVisible = Math.ceil((scrollTop + viewHeight) / ROW_HEIGHT);
+        var startIdx = Math.max(0, firstVisible - OVERSCAN);
+        var endIdx = Math.min(totalRows, lastVisible + OVERSCAN);
+
+        peersRowContainer.style.transform = 'translateY(' + (startIdx * ROW_HEIGHT) + 'px)';
+
+        var count = endIdx - startIdx;
+
+        while (peersRowContainer.children.length > count) {
+            peersRowContainer.removeChild(peersRowContainer.lastChild);
+        }
+        while (peersRowContainer.children.length < count) {
+            var row = document.createElement('div');
+            row.className = 'vrow';
+            row.innerHTML =
+                '<span class="peers-col-id"></span>' +
+                '<span class="peers-col-announced"></span>' +
+                '<span class="peers-col-delivered"></span>' +
+                '<span class="peers-col-useful"></span>' +
+                '<span class="peers-col-first"></span>' +
+                '<span class="peers-col-useful-pct"></span>' +
+                '<span class="peers-col-first-pct"></span>';
+            peersRowContainer.appendChild(row);
+        }
+
+        for (var i = 0; i < count; i++) {
+            var idx = startIdx + i;
+            var entry = peersSorted[idx];
+            var r = peersRowContainer.children[i];
+            var s = entry.stats;
+
+            var cols = r.children;
+            cols[0].textContent = entry.peer;
+            cols[0].title = entry.peer;
+            cols[1].textContent = formatNumber(s.Announced || 0);
+            cols[2].textContent = formatNumber(s.Delivered || 0);
+            cols[3].textContent = formatNumber(s.UsefulDelivery || 0);
+            cols[4].textContent = formatNumber(s.FirstAnnouncer || 0);
+            cols[5].textContent = s.Delivered ? ((s.UsefulDelivery || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
+            cols[6].textContent = s.Announced ? ((s.FirstAnnouncer || 0) / s.Announced * 100).toFixed(1) + '%' : '-';
+        }
     }
 
     // ========================================================================
@@ -1493,6 +1644,7 @@
     // Poll eviction stats every 5 seconds when on the stats tab.
     setInterval(function() {
         if (activeTab === 'stats') fetchEvictionStats();
+        if (activeTab === 'peers' && Date.now() - peersLastFetch >= 3000) fetchPeersData();
     }, 5000);
 
     // Re-render stats on window resize.

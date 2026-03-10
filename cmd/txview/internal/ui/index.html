@@ -27,6 +27,7 @@
         <button class="tab active" data-tab="feed">Feed</button>
         <button class="tab" data-tab="top">Top</button>
         <button class="tab" data-tab="stats">Stats</button>
+        <button class="tab" data-tab="peers">Peers</button>
     </nav>
 
     <!-- Feed view (existing) -->
@@ -152,6 +153,27 @@
                 <span class="eviction-summary" id="eviction-summary"></span>
             </div>
             <div class="eviction-bars" id="eviction-bars"></div>
+        </div>
+    </div>
+
+    <!-- Peers view -->
+    <div id="view-peers" class="view">
+        <div class="main-area">
+            <div class="table-area">
+                <div class="table-header" id="peers-table-header">
+                    <span class="peers-col-id">Peer</span>
+                    <span class="peers-col-announced sortable active-sort sort-desc" data-sort="announced">Announced</span>
+                    <span class="peers-col-delivered sortable" data-sort="delivered">Delivered</span>
+                    <span class="peers-col-useful sortable" data-sort="useful">Useful</span>
+                    <span class="peers-col-first sortable" data-sort="first">1st Announce</span>
+                    <span class="peers-col-useful-pct sortable" data-sort="useful-pct">Useful %</span>
+                    <span class="peers-col-first-pct sortable" data-sort="first-pct">1st %</span>
+                </div>
+                <div class="viewport" id="peers-viewport">
+                    <div id="peers-scroll-spacer"></div>
+                    <div id="peers-row-container"></div>
+                </div>
+            </div>
         </div>
     </div>
 

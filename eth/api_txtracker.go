@@ -49,6 +49,11 @@ func (api *TxTrackerAPI) GetStats() txtracker.TrackerStats {
 	return api.tracker.GetStats()
 }
 
+// GetAllPeerStats returns contribution statistics for all connected peers.
+func (api *TxTrackerAPI) GetAllPeerStats() map[string]txtracker.PeerStats {
+	return api.tracker.GetAllPeerStats()
+}
+
 // Events creates a subscription for live state transition events.
 func (api *TxTrackerAPI) Events(ctx context.Context) (*rpc.Subscription, error) {
 	notifier, supported := rpc.NotifierFromContext(ctx)

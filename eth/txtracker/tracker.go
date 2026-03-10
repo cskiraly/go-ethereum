@@ -307,7 +307,8 @@ type Tracker struct {
 	queryCh      chan *txQuery
 	statusCh     chan *statusQuery
 	peerStatsCh  chan *peerStatsQuery
-	trackerStatsCh chan chan TrackerStats
+	trackerStatsCh    chan chan TrackerStats
+	allPeerStatsCh chan chan map[string]PeerStats
 
 	// Event feed for state transition notifications.
 	eventFeed event.Feed
@@ -345,7 +346,8 @@ func New(config Config) *Tracker {
 		queryCh:        make(chan *txQuery, queryChanSize),
 		statusCh:       make(chan *statusQuery, queryChanSize),
 		peerStatsCh:    make(chan *peerStatsQuery, queryChanSize),
-		trackerStatsCh: make(chan chan TrackerStats, queryChanSize),
+		trackerStatsCh:    make(chan chan TrackerStats, queryChanSize),
+		allPeerStatsCh: make(chan chan map[string]PeerStats, queryChanSize),
 		emitCh: make(chan TxTrackerEvent, emitChanSize),
 		quit:   make(chan struct{}),
 		step:  make(chan struct{}, 1),
@@ -476,6 +478,22 @@ func (t *Tracker) GetStats() TrackerStats {
 		}
 	case <-t.quit:
 		return TrackerStats{}
+	}
+}
+
+// GetAllPeerStats returns transaction contribution statistics for all peers.
+func (t *Tracker) GetAllPeerStats() map[string]PeerStats {
+	resp := make(chan map[string]PeerStats, 1)
+	select {
+	case t.allPeerStatsCh <- resp:
+		select {
+		case ps := <-resp:
+			return ps
+		case <-t.quit:
+			return nil
+		}
+	case <-t.quit:
+		return nil
 	}
 }
 
@@ -625,6 +643,18 @@ func (t *Tracker) loop() {
 				Capacity: t.maxEntries,
 				Evicted:  t.evicted,
 			}
+
+		case resp := <-t.allPeerStatsCh:
+			result := make(map[string]PeerStats, len(t.peers))
+			for peer, ps := range t.peers {
+				result[peer] = PeerStats{
+					Announced:      ps.announced,
+					Delivered:      ps.delivered,
+					UsefulDelivery: ps.usefulDelivery,
+					FirstAnnouncer: ps.firstAnnouncer,
+				}
+			}
+			resp <- result
 
 		case <-finalizeTickerCh:
 			t.checkFinalization()
