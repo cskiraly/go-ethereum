@@ -1185,7 +1185,11 @@
             drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 - 6,
                       'Rejected', 'start', '#e0e0e0');
             drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 8,
-                      counts.rejected.toLocaleString(), 'start', '#888', '10');
+                      counts.rejected.toLocaleString() + ' now', 'start', '#888', '10');
+            if (nRejected !== counts.rejected) {
+                drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 20,
+                          nRejected.toLocaleString() + ' total', 'start', '#555', '9');
+            }
         }
 
         // 8. Pooled → Dropped (branch down).
@@ -1205,6 +1209,10 @@
                       'Dropped', 'start', '#e0e0e0');
             drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 8,
                       counts.dropped.toLocaleString() + ' now', 'start', '#888', '10');
+            if (nDropped !== counts.dropped) {
+                drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 20,
+                          nDropped.toLocaleString() + ' total', 'start', '#555', '9');
+            }
         }
 
         // 9. Private → Included (from below-left, feeding into included node).
@@ -1236,12 +1244,12 @@
         var cumPooled     = toPooled;  // all that entered pooled
         var cumIncluded   = includedTotal;
         var mainNodes = [
-            { n: annNode,  key: 'announced',  label: 'Announced',  now: nAnnounced,  cum: cumAnnounced },
-            { n: reqNode,  key: 'requested',  label: 'Requested',  now: nRequested,   cum: cumRequested },
-            { n: rcvNode,  key: 'received',   label: 'Received',   now: atReceived,   cum: cumReceived },
-            { n: poolNode, key: 'pooled',     label: 'Pooled',     now: atPooled,     cum: cumPooled },
-            { n: inclNode, key: 'included',   label: 'Included',   now: atIncluded,   cum: cumIncluded },
-            { n: finNode,  key: 'finalized',  label: 'Finalized',  now: counts.finalized, terminal: true },
+            { n: annNode,  key: 'announced',  label: 'Announced',  now: nAnnounced,       cum: cumAnnounced },
+            { n: reqNode,  key: 'requested',  label: 'Requested',  now: nRequested,        cum: cumRequested },
+            { n: rcvNode,  key: 'received',   label: 'Received',   now: atReceived,        cum: cumReceived },
+            { n: poolNode, key: 'pooled',     label: 'Pooled',     now: atPooled,          cum: cumPooled },
+            { n: inclNode, key: 'included',   label: 'Included',   now: atIncluded,        cum: cumIncluded },
+            { n: finNode,  key: 'finalized',  label: 'Finalized',  now: counts.finalized,  cum: toFinalized },
         ];
 
         for (var i = 0; i < mainNodes.length; i++) {
@@ -1249,18 +1257,11 @@
             if (m.n.h <= 0) continue;
             drawNode(svg, m.n.x, m.n.y, NODE_W, m.n.h, SANKEY_COLORS[m.key]);
             drawLabel(svg, m.n.x + NODE_W / 2, m.n.y - 12, m.label, 'middle', '#e0e0e0');
-            if (m.terminal) {
-                // Terminal states: txs don't leave, so just show the count.
-                drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
-                          m.now.toLocaleString(), 'middle', '#888', '10');
-            } else {
-                // Transient states: "now" count and cumulative total.
-                drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
-                          m.now.toLocaleString() + ' now', 'middle', '#888', '10');
-                if (m.cum !== m.now) {
-                    drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
-                              m.cum.toLocaleString() + ' total', 'middle', '#555', '9');
-                }
+            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
+                      m.now.toLocaleString() + ' now', 'middle', '#888', '10');
+            if (m.cum !== m.now) {
+                drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
+                          m.cum.toLocaleString() + ' total', 'middle', '#555', '9');
             }
         }
 
