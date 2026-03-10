@@ -423,10 +423,16 @@
             ev._receivedAt = old._receivedAt;
             ev._firstStatus = old._firstStatus;
             ev._wasRequested = old._wasRequested || ev.newStatus === 'requested';
+            ev._reorgCount = old._reorgCount || 0;
+            // Track backward transition: included → pooled (reorg).
+            if (old.newStatus === 'included' && ev.newStatus === 'pooled') {
+                ev._reorgCount++;
+            }
         } else {
             ev._receivedAt = Date.now();
             ev._firstStatus = ev.newStatus;
             ev._wasRequested = ev.newStatus === 'requested';
+            ev._reorgCount = 0;
         }
         txs.set(hash, ev);
         incrementCounter(ev.newStatus);
@@ -968,6 +974,36 @@
         }));
     }
 
+    // Draw a backward (right-to-left) link that arcs below the nodes.
+    // srcNode/tgtNode: {x, y, h} — source is to the RIGHT, target to the LEFT.
+    // bandH: visual thickness of the band.
+    // dropY: how far below the nodes the arc should dip.
+    function drawBackLink(svg, srcNode, tgtNode, nodeW, bandH, dropY, color) {
+        if (bandH <= 0) return;
+        var bh = Math.max(1.5, bandH);
+        // Source exits from bottom-right of srcNode, target enters bottom-left of tgtNode.
+        var x1 = srcNode.x;                    // left edge of source (link exits leftward)
+        var x2 = tgtNode.x + nodeW;            // right edge of target (link enters from right)
+        var y1 = srcNode.y + srcNode.h;         // bottom of source node
+        var y2 = tgtNode.y + tgtNode.h;         // bottom of target node
+
+        // Arc control points dip below.
+        var cy = dropY;
+        var mx = (x1 + x2) / 2;
+
+        // Top edge of band (outer arc).
+        var d = 'M' + x1 + ',' + y1 +
+                ' C' + x1 + ',' + cy + ' ' + x2 + ',' + cy + ' ' + x2 + ',' + y2 +
+                ' L' + x2 + ',' + (y2 + bh) +
+                ' C' + x2 + ',' + (cy + bh) + ' ' + x1 + ',' + (cy + bh) + ' ' + x1 + ',' + (y1 + bh) +
+                ' Z';
+        svg.appendChild(svgEl('path', {
+            d: d, fill: color, opacity: '0.3',
+            'stroke': color, 'stroke-width': '1', 'stroke-dasharray': '4,3',
+            'stroke-opacity': '0.6'
+        }));
+    }
+
     function renderStats() {
         if (!statsViewDirty) return;
         statsViewDirty = false;
@@ -1001,10 +1037,12 @@
         var reqPath  = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
         var unsolPath = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
         var privatePath = { included: 0, finalized: 0 };
+        var nReorged = 0;  // total reorg events (included → pooled)
 
         txs.forEach(function(ev) {
             var s = ev.newStatus;
             if (counts.hasOwnProperty(s)) counts[s]++;
+            nReorged += ev._reorgCount || 0;
 
             // Private: first seen already included in chain.
             if (ev._firstStatus === 'included' || ev._firstStatus === 'finalized') {
@@ -1220,6 +1258,27 @@
                 drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
                           m.cum.toLocaleString() + ' total', 'middle', '#555', '9');
             }
+        }
+
+        // -----------------------------------------------------------
+        // Backward link: Included → Pooled (reorgs).
+        // -----------------------------------------------------------
+        if (nReorged > 0) {
+            var reorgBandH = sh(nReorged);
+            // Arc dips below the lowest element.
+            var maxBottom = Math.max(
+                poolNode.y + poolNode.h,
+                inclNode.y + inclNode.h
+            );
+            var reorgDropY = maxBottom + 40;
+            // Clamp so it doesn't go past canvas.
+            if (reorgDropY + reorgBandH + 20 > H) reorgDropY = H - reorgBandH - 20;
+            drawBackLink(svg, inclNode, poolNode, NODE_W, reorgBandH, reorgDropY, '#ff6f00');
+            // Label at the midpoint of the arc.
+            var reorgMidX = (inclNode.x + poolNode.x + NODE_W) / 2;
+            var reorgLabelY = reorgDropY + reorgBandH / 2 + 8;
+            drawLabel(svg, reorgMidX, reorgLabelY,
+                      nReorged.toLocaleString() + ' reorged', 'middle', '#ff6f00', '10');
         }
 
         // -----------------------------------------------------------
