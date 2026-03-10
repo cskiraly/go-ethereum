@@ -87,6 +87,21 @@ func waitStep(t *testing.T, tr *Tracker) {
 	<-tr.step
 }
 
+// drainEvents collects events from the channel until no event arrives for
+// a short timeout. This accounts for the async emitLoop goroutine that
+// forwards events from the event loop to the event.Feed.
+func drainEvents(ch <-chan TxTrackerEvent) []TxTrackerEvent {
+	var events []TxTrackerEvent
+	for {
+		select {
+		case ev := <-ch:
+			events = append(events, ev)
+		case <-time.After(50 * time.Millisecond):
+			return events
+		}
+	}
+}
+
 func makeHash(i byte) common.Hash {
 	return common.Hash{i}
 }
@@ -823,17 +838,8 @@ func TestEventFeed(t *testing.T) {
 	chain.sendChainEvent(core.ChainEvent{Header: header2})
 	waitStep(t, tr)
 
-	// Collect all events.
-	var events []TxTrackerEvent
-	for {
-		select {
-		case ev := <-eventCh:
-			events = append(events, ev)
-		default:
-			goto done
-		}
-	}
-done:
+	// Collect all events (with timeout for async emit delivery).
+	events := drainEvents(eventCh)
 
 	// Expect: Announced, Received, Pooled, Included, Finalized
 	expected := []struct {
@@ -892,17 +898,8 @@ func TestEventFeedReorg(t *testing.T) {
 	chain.sendChainEvent(core.ChainEvent{Header: reorgHeader})
 	waitStep(t, tr)
 
-	// Drain events.
-	var events []TxTrackerEvent
-	for {
-		select {
-		case ev := <-eventCh:
-			events = append(events, ev)
-		default:
-			goto done
-		}
-	}
-done:
+	// Drain events (with timeout for async emit delivery).
+	events := drainEvents(eventCh)
 
 	// Find the reorg event (TxIncluded → TxPooled).
 	found := false

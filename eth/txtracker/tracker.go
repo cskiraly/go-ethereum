@@ -101,6 +101,7 @@ const (
 	chainEventSize       = 10
 	newTxsEventSize      = 128
 	finalizeCheckInterval = 5 * time.Second
+	emitChanSize         = 4096 // buffered to avoid blocking the event loop
 )
 
 // txRecord is the internal per-transaction lifecycle record.
@@ -277,6 +278,7 @@ type Tracker struct {
 
 	// Event feed for state transition notifications.
 	eventFeed event.Feed
+	emitCh    chan TxTrackerEvent // buffered; drained by emitLoop
 
 	quit  chan struct{}
 	step  chan struct{} // Test synchronization: sent after each event is processed
@@ -310,7 +312,8 @@ func New(config Config) *Tracker {
 		queryCh:     make(chan *txQuery, queryChanSize),
 		statusCh:    make(chan *statusQuery, queryChanSize),
 		peerStatsCh: make(chan *peerStatsQuery, queryChanSize),
-		quit:  make(chan struct{}),
+		emitCh: make(chan TxTrackerEvent, emitChanSize),
+		quit:   make(chan struct{}),
 		step:  make(chan struct{}, 1),
 		ready: make(chan struct{}),
 	}
@@ -318,6 +321,7 @@ func New(config Config) *Tracker {
 
 // Start begins the tracker's event loop goroutine.
 func (t *Tracker) Start() {
+	go t.emitLoop()
 	go t.loop()
 }
 
@@ -430,9 +434,11 @@ func (t *Tracker) SubscribeEvents(ch chan<- TxTrackerEvent) event.Subscription {
 	return t.eventFeed.Subscribe(ch)
 }
 
-// emitEvent sends a state transition event to all subscribers.
+// emitEvent queues a state transition event for delivery to subscribers.
+// The send is non-blocking: if the emit buffer is full, the event is dropped
+// to prevent slow subscribers from stalling the event loop.
 func (t *Tracker) emitEvent(hash common.Hash, oldStatus, newStatus TxStatus, rec *txRecord, peer string) {
-	t.eventFeed.Send(TxTrackerEvent{
+	ev := TxTrackerEvent{
 		TxHash:    hash,
 		OldStatus: oldStatus,
 		NewStatus: newStatus,
@@ -442,7 +448,26 @@ func (t *Tracker) emitEvent(hash common.Hash, oldStatus, newStatus TxStatus, rec
 		BlockHash: rec.blockHash,
 		RejectErr: rec.rejectErr,
 		Local:     rec.local,
-	})
+	}
+	select {
+	case t.emitCh <- ev:
+	default:
+		txEmitDroppedMeter.Mark(1)
+	}
+}
+
+// emitLoop drains the emit channel and forwards events to the event.Feed.
+// This runs in a separate goroutine so that event.Feed.Send (which blocks
+// until all subscribers consume the value) cannot stall the main event loop.
+func (t *Tracker) emitLoop() {
+	for {
+		select {
+		case ev := <-t.emitCh:
+			t.eventFeed.Send(ev)
+		case <-t.quit:
+			return
+		}
+	}
 }
 
 // loop is the main event loop, processing all events sequentially to avoid locks.
