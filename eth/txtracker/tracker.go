@@ -91,7 +91,7 @@ type TxTrackerEvent struct {
 
 const (
 	// defaultMaxEntries is the default maximum number of tracked transactions.
-	defaultMaxEntries = 65536
+	defaultMaxEntries = 262144
 
 	// Channel sizes for the event loop.
 	announceChanSize      = 1024

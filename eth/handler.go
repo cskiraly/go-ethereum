@@ -215,7 +215,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	}
 	h.txFetcher = fetcher.NewTxFetcher(h.chain, validateMeta, addTxs, fetchTx, h.removePeer)
 	h.txTracker = txtracker.New(txtracker.Config{
-		MaxEntries: 65536,
+		MaxEntries: 262144,
 		Clock:      mclock.System{},
 		Chain:      config.Chain,
 		TxPool:     h.txpool,
