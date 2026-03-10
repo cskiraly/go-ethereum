@@ -48,6 +48,7 @@
         included: document.getElementById('cnt-included'),
         finalized: document.getElementById('cnt-finalized'),
         rejected: document.getElementById('cnt-rejected'),
+        dropped: document.getElementById('cnt-dropped'),
     };
 
     // --- DOM refs: feed view ---
@@ -846,6 +847,7 @@
             ['Pooled', formatTS(info.Pooled, base)],
             ['Included', formatTS(info.Included, base)],
             ['Finalized', formatTS(info.Finalized, base)],
+            ['Dropped', formatTS(info.Dropped, base)],
             ['Deliverer', info.Deliverer || '-'],
             ['Announcers', (info.Announcers || []).join(', ') || '-'],
             ['Block #', info.BlockNum || '-'],
@@ -886,6 +888,9 @@
         if (parseTS(info.Finalized)) {
             steps.push('<span class="step step-finalized">+' + msDelta(parseTS(info.Finalized), base) + ' final</span>');
         }
+        if (parseTS(info.Dropped)) {
+            steps.push('<span class="step step-dropped">+' + msDelta(parseTS(info.Dropped), base) + ' drop</span>');
+        }
         if (info.RejectErr) {
             steps.push('<span class="step step-rejected">rej</span>');
         }
@@ -911,7 +916,8 @@
     var SANKEY_COLORS = {
         announced: '#666', requested: '#00838f', received: '#1565c0',
         pooled: '#f57f17', included: '#2e7d32', finalized: '#6a1b9a',
-        rejected: '#c62828', private: '#9c27b0', unsolicited: '#78909c'
+        rejected: '#c62828', dropped: '#e65100', private: '#9c27b0',
+        unsolicited: '#78909c'
     };
 
     function svgEl(tag, attrs) {
@@ -988,9 +994,9 @@
         //   pending:     still at 'announced', path not yet determined
         //
         // For each path, count txs at each current status.
-        var counts = { announced: 0, requested: 0, received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0 };
-        var reqPath  = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0 };
-        var unsolPath = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0 };
+        var counts = { announced: 0, requested: 0, received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
+        var reqPath  = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
+        var unsolPath = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
         var privatePath = { included: 0, finalized: 0 };
 
         txs.forEach(function(ev) {
@@ -1030,10 +1036,12 @@
         // Flows from received onward (merge both paths).
         var atReceived = reqPath.received + unsolPath.received;
         var nRejected = reqPath.rejected + unsolPath.rejected;
+        var nDropped = reqPath.dropped + unsolPath.dropped;
         var receivedTotal = reqTotal - nRequested + unsolTotal;  // all that reached received
         var toPooled = receivedTotal - atReceived - nRejected;
         var atPooled = reqPath.pooled + unsolPath.pooled;
-        var toIncluded = toPooled - atPooled;
+        var toIncluded = toPooled - atPooled - nDropped;
+        if (toIncluded < 0) toIncluded = 0;
         var includedTotal = toIncluded + nPrivate;
         var atIncluded = reqPath.included + unsolPath.included + privatePath.included;
         var toFinalized = includedTotal - atIncluded;
@@ -1139,10 +1147,29 @@
                       nRejected.toLocaleString(), 'start', '#888', '10');
         }
 
-        // 8. Private → Included (from below).
+        // 8. Pooled → Dropped (branch down).
+        if (nDropped > 0) {
+            var dropSrcY = yTop + sh(toIncluded);
+            var dropBarH = sh(nDropped);
+            var dropX = colX(3.5);
+            var dropY = Math.max(poolNode.y + poolNode.h + 30, yTop + availH * 0.55);
+            if (dropY + dropBarH > H - 30) dropY = H - 30 - dropBarH;
+
+            drawLink(svg, poolNode.x + NODE_W, dropSrcY, dropBarH,
+                     dropX, dropY, dropBarH,
+                     SANKEY_COLORS.dropped);
+            // Dropped node.
+            drawNode(svg, dropX, dropY, NODE_W, dropBarH, SANKEY_COLORS.dropped);
+            drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 - 6,
+                      'Dropped', 'start', '#e0e0e0');
+            drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 8,
+                      nDropped.toLocaleString(), 'start', '#888', '10');
+        }
+
+        // 9. Private → Included (from below).
         if (nPrivate > 0) {
             var privBarH = sh(nPrivate);
-            var privX = colX(3.5);
+            var privX = colX(4.3);
             var privY = Math.max(inclNode.y + inclNode.h + 30, yTop + availH * 0.7);
             if (privY + privBarH > H - 30) privY = H - 30 - privBarH;
 
@@ -1272,7 +1299,7 @@
         return String(n);
     }
 
-    var STATUS_ORD = {announced:1, requested:2, received:3, pooled:4, included:5, finalized:6, rejected:7};
+    var STATUS_ORD = {announced:1, requested:2, received:3, pooled:4, included:5, finalized:6, rejected:7, dropped:8};
     function statusOrd(s) { return STATUS_ORD[s] || 0; }
 
     function compareBigInt(a, b) {

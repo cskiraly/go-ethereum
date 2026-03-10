@@ -251,6 +251,7 @@ header h1 {
 .badge-included   { background: #2e7d32; color: #c8e6c9; }
 .badge-finalized  { background: #6a1b9a; color: #e1bee7; }
 .badge-rejected   { background: #c62828; color: #ffcdd2; }
+.badge-dropped    { background: #e65100; color: #ffe0b2; }
 
 /* --- Progress pipeline --- */
 .progress {
@@ -276,6 +277,7 @@ header h1 {
 .step-included   { color: #c8e6c9; }
 .step-finalized  { color: #e1bee7; }
 .step-rejected   { color: #ffcdd2; }
+.step-dropped    { color: #ffe0b2; }
 
 /* Loading indicator for top rows awaiting fetch */
 .top-loading { color: #555; font-style: italic; }
