@@ -346,6 +346,27 @@ finalization indefinitely.
 independently of chain events. Added `lastFinalNum` cache to skip redundant
 full map scans when the finalized block hasn't advanced.
 
+### Event Loop Stall Fix (event.Feed.Send blocking)
+
+`event.Feed.Send` blocks until ALL subscribers consume the value. The RPC
+subscription (`Events` in `api_txtracker.go`) creates a channel with buffer
+128. Under heavy transaction load (~58K txs), events are emitted faster than
+the WebSocket can push them to the browser. Once the subscriber's channel
+fills, `Send` blocks, which blocks the entire tracker event loop — preventing
+the finalize ticker, chain events, and all other processing from running.
+
+This explains why finalization showed 0 despite valid `ForkchoiceUpdated`
+calls: the event loop was stuck inside `emitEvent` → `event.Feed.Send`,
+waiting for a slow WebSocket subscriber to drain its buffer.
+
+**Fix**: Decoupled event emission from the event loop:
+- `emitEvent` now sends to a buffered channel (`emitCh`, capacity 4096) using
+  a non-blocking select. If the buffer is full, the event is dropped and
+  `txEmitDroppedMeter` is incremented.
+- A separate `emitLoop` goroutine drains `emitCh` and calls
+  `event.Feed.Send`. If `Send` blocks on a slow subscriber, only the emit
+  goroutine stalls — the main event loop continues processing.
+
 ### Top View Sort Fix
 
 The Top view's sort depended entirely on `topCache` (RPC-fetched `TxInfo`),
