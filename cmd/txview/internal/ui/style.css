@@ -291,7 +291,54 @@ header h1 {
 
 #sankey-svg {
     width: 100%;
-    height: calc(100vh - 160px);
+    height: calc(100vh - 260px);
+}
+
+/* --- Eviction panel --- */
+
+.eviction-panel {
+    padding: 12px 20px;
+    border-top: 1px solid #0f3460;
+    font-size: 12px;
+}
+
+.eviction-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.eviction-summary {
+    color: #888;
+}
+
+.eviction-bars {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.eviction-bar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.eviction-bar .bar-fill {
+    height: 10px;
+    border-radius: 2px;
+    min-width: 2px;
+}
+
+.eviction-bar .bar-label {
+    color: #aaa;
+    white-space: nowrap;
+}
+
+.eviction-bar .bar-count {
+    color: #e0e0e0;
+    font-weight: bold;
 }
 
 /* --- Detail panel --- */

@@ -65,6 +65,9 @@
     const statsView = document.getElementById('view-stats');
     const sankeySvg = document.getElementById('sankey-svg');
     const SVG_NS = 'http://www.w3.org/2000/svg';
+    const evictionPanel = document.getElementById('eviction-panel');
+    const evictionSummary = document.getElementById('eviction-summary');
+    const evictionBars = document.getElementById('eviction-bars');
 
     // --- DOM refs: top view ---
     const topView = document.getElementById('view-top');
@@ -128,7 +131,7 @@
             topView.classList.toggle('active', tab === 'top');
             statsView.classList.toggle('active', tab === 'stats');
             if (tab === 'top') topViewDirty = true;
-            if (tab === 'stats') statsViewDirty = true;
+            if (tab === 'stats') { statsViewDirty = true; fetchEvictionStats(); }
             scheduleRender();
         });
     }
@@ -1224,6 +1227,78 @@
                   'Transaction Flow \u2014 ' + total.toLocaleString() + ' total',
                   'middle', '#888', '13');
     }
+
+    // Eviction stats — fetched periodically from the tracker.
+    var lastEvictionStats = null;
+
+    function fetchEvictionStats() {
+        if (!ws || ws.readyState !== 1) return;
+        rpcCall('txtracker_getStats', [], function(result, err) {
+            if (err || !result) return;
+            lastEvictionStats = result;
+            renderEvictionPanel();
+        });
+    }
+
+    function renderEvictionPanel() {
+        var stats = lastEvictionStats;
+        if (!stats || !stats.evicted) {
+            evictionPanel.style.display = 'none';
+            return;
+        }
+        var ev = stats.evicted;
+        if (ev.total === 0) {
+            evictionPanel.style.display = 'none';
+            return;
+        }
+        evictionPanel.style.display = '';
+        evictionSummary.textContent = ev.total.toLocaleString() + ' evicted (' +
+            stats.total.toLocaleString() + ' / ' + stats.capacity.toLocaleString() + ' capacity)';
+
+        var states = [
+            { key: 'announced', label: 'Announced', color: SANKEY_COLORS.announced },
+            { key: 'requested', label: 'Requested', color: SANKEY_COLORS.requested },
+            { key: 'received',  label: 'Received',  color: SANKEY_COLORS.received },
+            { key: 'pooled',    label: 'Pooled',    color: SANKEY_COLORS.pooled },
+            { key: 'included',  label: 'Included',  color: SANKEY_COLORS.included },
+            { key: 'finalized', label: 'Finalized', color: SANKEY_COLORS.finalized },
+            { key: 'rejected',  label: 'Rejected',  color: SANKEY_COLORS.rejected },
+            { key: 'dropped',   label: 'Dropped',   color: SANKEY_COLORS.dropped }
+        ];
+        evictionBars.innerHTML = '';
+        for (var i = 0; i < states.length; i++) {
+            var s = states[i];
+            var count = ev[s.key] || 0;
+            if (count === 0) continue;
+            var pct = (count / ev.total) * 100;
+
+            var bar = document.createElement('div');
+            bar.className = 'eviction-bar';
+
+            var fill = document.createElement('span');
+            fill.className = 'bar-fill';
+            fill.style.background = s.color;
+            fill.style.width = Math.max(2, pct * 1.5) + 'px';
+            bar.appendChild(fill);
+
+            var label = document.createElement('span');
+            label.className = 'bar-label';
+            label.textContent = s.label + ':';
+            bar.appendChild(label);
+
+            var val = document.createElement('span');
+            val.className = 'bar-count';
+            val.textContent = count.toLocaleString();
+            bar.appendChild(val);
+
+            evictionBars.appendChild(bar);
+        }
+    }
+
+    // Poll eviction stats every 5 seconds when on the stats tab.
+    setInterval(function() {
+        if (activeTab === 'stats') fetchEvictionStats();
+    }, 5000);
 
     // Re-render stats on window resize.
     window.addEventListener('resize', function() {
