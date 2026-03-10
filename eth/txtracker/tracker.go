@@ -186,6 +186,26 @@ type PeerStats struct {
 	FirstAnnouncer int64
 }
 
+// TrackerStats is the public snapshot of tracker-wide statistics.
+type TrackerStats struct {
+	Total    int            `json:"total"`    // Current number of tracked transactions
+	Capacity int            `json:"capacity"` // Maximum tracker capacity
+	Evicted  EvictionStats  `json:"evicted"`  // Cumulative per-state eviction counts
+}
+
+// EvictionStats counts how many records were LRU-evicted from each state.
+type EvictionStats struct {
+	Announced int64 `json:"announced"`
+	Requested int64 `json:"requested"`
+	Received  int64 `json:"received"`
+	Pooled    int64 `json:"pooled"`
+	Included  int64 `json:"included"`
+	Finalized int64 `json:"finalized"`
+	Rejected  int64 `json:"rejected"`
+	Dropped   int64 `json:"dropped"`
+	Total     int64 `json:"total"`
+}
+
 // BlockchainReader abstracts the blockchain for chain event subscription and
 // finalization queries.
 type BlockchainReader interface {
@@ -262,6 +282,7 @@ type Tracker struct {
 
 	maxEntries int
 	evictList  *list.List // LRU ordered by last update (front = most recent)
+	evicted    EvictionStats // Cumulative per-state eviction counts
 
 	// Last known chain head for reorg detection.
 	lastHeadHash common.Hash
@@ -279,9 +300,10 @@ type Tracker struct {
 	peerDropCh  chan string
 
 	// Query channels (blocking request/response).
-	queryCh     chan *txQuery
-	statusCh    chan *statusQuery
-	peerStatsCh chan *peerStatsQuery
+	queryCh      chan *txQuery
+	statusCh     chan *statusQuery
+	peerStatsCh  chan *peerStatsQuery
+	trackerStatsCh chan chan TrackerStats
 
 	// Event feed for state transition notifications.
 	eventFeed event.Feed
@@ -316,9 +338,10 @@ func New(config Config) *Tracker {
 		pooledCh:    make(chan *pooledEvent, pooledChanSize),
 		rejectedCh:  make(chan *rejectedEvent, rejectedChanSize),
 		peerDropCh:  make(chan string, peerDropChanSize),
-		queryCh:     make(chan *txQuery, queryChanSize),
-		statusCh:    make(chan *statusQuery, queryChanSize),
-		peerStatsCh: make(chan *peerStatsQuery, queryChanSize),
+		queryCh:        make(chan *txQuery, queryChanSize),
+		statusCh:       make(chan *statusQuery, queryChanSize),
+		peerStatsCh:    make(chan *peerStatsQuery, queryChanSize),
+		trackerStatsCh: make(chan chan TrackerStats, queryChanSize),
 		emitCh: make(chan TxTrackerEvent, emitChanSize),
 		quit:   make(chan struct{}),
 		step:  make(chan struct{}, 1),
@@ -433,6 +456,22 @@ func (t *Tracker) GetPeerStats(peer string) PeerStats {
 		}
 	case <-t.quit:
 		return PeerStats{}
+	}
+}
+
+// GetStats returns tracker-wide statistics including eviction counters.
+func (t *Tracker) GetStats() TrackerStats {
+	resp := make(chan TrackerStats, 1)
+	select {
+	case t.trackerStatsCh <- resp:
+		select {
+		case s := <-resp:
+			return s
+		case <-t.quit:
+			return TrackerStats{}
+		}
+	case <-t.quit:
+		return TrackerStats{}
 	}
 }
 
@@ -572,6 +611,13 @@ func (t *Tracker) loop() {
 				}
 			} else {
 				q.resp <- PeerStats{}
+			}
+
+		case resp := <-t.trackerStatsCh:
+			resp <- TrackerStats{
+				Total:    len(t.txs),
+				Capacity: t.maxEntries,
+				Evicted:  t.evicted,
 			}
 
 		case <-finalizeTickerCh:
@@ -1011,24 +1057,33 @@ func (t *Tracker) evictOldest() {
 	delete(t.txs, hash)
 
 	txEvictedMeter.Mark(1)
+	t.evicted.Total++
 	if rec != nil {
 		switch rec.status {
 		case TxAnnounced:
 			txEvictedAnnouncedMeter.Mark(1)
+			t.evicted.Announced++
 		case TxRequested:
 			txEvictedRequestedMeter.Mark(1)
+			t.evicted.Requested++
 		case TxReceived:
 			txEvictedReceivedMeter.Mark(1)
+			t.evicted.Received++
 		case TxPooled:
 			txEvictedPooledMeter.Mark(1)
+			t.evicted.Pooled++
 		case TxIncluded:
 			txEvictedIncludedMeter.Mark(1)
+			t.evicted.Included++
 		case TxFinalized:
 			txEvictedFinalizedMeter.Mark(1)
+			t.evicted.Finalized++
 		case TxRejected:
 			txEvictedRejectedMeter.Mark(1)
+			t.evicted.Rejected++
 		case TxDropped:
 			txEvictedDroppedMeter.Mark(1)
+			t.evicted.Dropped++
 		}
 	}
 	txTrackerSize.Update(int64(len(t.txs)))

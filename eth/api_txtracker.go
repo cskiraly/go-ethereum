@@ -44,6 +44,11 @@ func (api *TxTrackerAPI) GetPeerStats(peer string) txtracker.PeerStats {
 	return api.tracker.GetPeerStats(peer)
 }
 
+// GetStats returns tracker-wide statistics including eviction counters.
+func (api *TxTrackerAPI) GetStats() txtracker.TrackerStats {
+	return api.tracker.GetStats()
+}
+
 // Events creates a subscription for live state transition events.
 func (api *TxTrackerAPI) Events(ctx context.Context) (*rpc.Subscription, error) {
 	notifier, supported := rpc.NotifierFromContext(ctx)
