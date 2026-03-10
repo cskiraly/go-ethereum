@@ -69,6 +69,10 @@ func (m *mockTxPool) sendRemoved(hashes ...common.Hash) {
 	m.removedFeed.Send(core.RemovedTxsEvent{Hashes: hashes})
 }
 
+func (m *mockTxPool) sendRemovedWithReasons(hashes []common.Hash, reasons []string) {
+	m.removedFeed.Send(core.RemovedTxsEvent{Hashes: hashes, Reasons: reasons})
+}
+
 // testTracker creates a tracker with a simulated clock and mock dependencies,
 // starts it, and returns all components. The caller must call tracker.Stop().
 func testTracker(maxEntries int) (*Tracker, *mclock.Simulated, *mockChain, *mockTxPool) {

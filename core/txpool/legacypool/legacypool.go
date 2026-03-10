@@ -232,8 +232,9 @@ type LegacyPool struct {
 	chain       BlockChain
 	gasTip      atomic.Pointer[uint256.Int]
 	txFeed      event.Feed
-	removedFeed event.Feed    // Event feed for evicted transactions
-	removed     []common.Hash // Accumulator for batch removal notifications
+	removedFeed    event.Feed    // Event feed for evicted transactions
+	removed        []common.Hash // Accumulator for batch removal notifications
+	removedReasons []string      // Parallel reasons for batch removal notifications
 	signer      types.Signer
 	mu          sync.RWMutex
 
@@ -378,7 +379,7 @@ func (pool *LegacyPool) loop() {
 		case <-evict.C:
 			pool.mu.Lock()
 			for _, hash := range pool.queue.evictList() {
-				pool.removeTx(hash, true, true)
+				pool.removeTx(hash, true, true, "expired")
 			}
 			pool.mu.Unlock()
 			pool.flushRemoved()
@@ -418,10 +419,11 @@ func (pool *LegacyPool) SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEv
 	return pool.removedFeed.Subscribe(ch)
 }
 
-// trackRemoved records a transaction hash for batch removal notification.
+// trackRemoved records a transaction hash and reason for batch removal notification.
 // Must be called with pool.mu held.
-func (pool *LegacyPool) trackRemoved(hash common.Hash) {
+func (pool *LegacyPool) trackRemoved(hash common.Hash, reason string) {
 	pool.removed = append(pool.removed, hash)
+	pool.removedReasons = append(pool.removedReasons, reason)
 }
 
 // flushRemoved sends a RemovedTxsEvent for all accumulated removals and
@@ -430,8 +432,10 @@ func (pool *LegacyPool) trackRemoved(hash common.Hash) {
 func (pool *LegacyPool) flushRemoved() {
 	if len(pool.removed) > 0 {
 		hashes := pool.removed
+		reasons := pool.removedReasons
 		pool.removed = nil
-		pool.removedFeed.Send(core.RemovedTxsEvent{Hashes: hashes})
+		pool.removedReasons = nil
+		pool.removedFeed.Send(core.RemovedTxsEvent{Hashes: hashes, Reasons: reasons})
 	}
 }
 
@@ -450,7 +454,7 @@ func (pool *LegacyPool) SetGasTip(tip *big.Int) {
 		// pool.priced is sorted by GasFeeCap, so we have to iterate through pool.all instead
 		drop := pool.all.TxsBelowTip(tip)
 		for _, tx := range drop {
-			pool.removeTx(tx.Hash(), false, true)
+			pool.removeTx(tx.Hash(), false, true, "underpriced")
 		}
 		pool.priced.Removed(len(drop))
 	}
@@ -780,7 +784,7 @@ func (pool *LegacyPool) add(tx *types.Transaction) (replaced bool, err error) {
 			underpricedTxMeter.Mark(1)
 
 			sender, _ := types.Sender(pool.signer, tx)
-			dropped := pool.removeTx(tx.Hash(), false, sender != from) // Don't unreserve the sender of the tx being added if last from the acc
+			dropped := pool.removeTx(tx.Hash(), false, sender != from, "underpriced") // Don't unreserve the sender of the tx being added if last from the acc
 
 			pool.changesSinceReorg += dropped
 		}
@@ -797,7 +801,7 @@ func (pool *LegacyPool) add(tx *types.Transaction) (replaced bool, err error) {
 		// New transaction is better, replace old one
 		if old != nil {
 			pool.all.Remove(old.Hash())
-			pool.trackRemoved(old.Hash())
+			pool.trackRemoved(old.Hash(), "replaced")
 			pool.priced.Removed(1)
 			pendingReplaceMeter.Mark(1)
 		}
@@ -853,7 +857,7 @@ func (pool *LegacyPool) enqueueTx(hash common.Hash, tx *types.Transaction, addAl
 		return false, err
 	}
 	if replaced != nil {
-		pool.removeTx(*replaced, true, true)
+		pool.removeTx(*replaced, true, true, "replaced")
 	}
 	// If the transaction isn't in lookup set but it's expected to be there,
 	// show the error log.
@@ -883,7 +887,7 @@ func (pool *LegacyPool) promoteTx(addr common.Address, hash common.Hash, tx *typ
 	if !inserted {
 		// An older transaction was better, discard this
 		pool.all.Remove(hash)
-		pool.trackRemoved(hash)
+		pool.trackRemoved(hash, "underpriced")
 		pool.priced.Removed(1)
 		pendingDiscardMeter.Mark(1)
 		return false
@@ -891,7 +895,7 @@ func (pool *LegacyPool) promoteTx(addr common.Address, hash common.Hash, tx *typ
 	// Otherwise discard any previous transaction and mark this
 	if old != nil {
 		pool.all.Remove(old.Hash())
-		pool.trackRemoved(old.Hash())
+		pool.trackRemoved(old.Hash(), "replaced")
 		pool.priced.Removed(1)
 		pendingReplaceMeter.Mark(1)
 	} else {
@@ -1080,7 +1084,7 @@ func (pool *LegacyPool) Has(hash common.Hash) bool {
 // which could lead to a premature release of the lock.
 //
 // Returns the number of transactions removed from the pending queue.
-func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool, unreserve bool) int {
+func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool, unreserve bool, reason ...string) int {
 	// Fetch the transaction we wish to delete
 	tx := pool.all.Get(hash)
 	if tx == nil {
@@ -1104,7 +1108,11 @@ func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool, unreserve bo
 	}
 	// Remove it from the list of known transactions
 	pool.all.Remove(hash)
-	pool.trackRemoved(hash)
+	r := ""
+	if len(reason) > 0 {
+		r = reason[0]
+	}
+	pool.trackRemoved(hash, r)
 	if outofbound {
 		pool.priced.Removed(1)
 	}
@@ -1447,7 +1455,7 @@ func (pool *LegacyPool) promoteExecutables(accounts []common.Address) []*types.T
 	// remove all removable transactions
 	for _, hash := range dropped {
 		pool.all.Remove(hash)
-		pool.trackRemoved(hash)
+		pool.trackRemoved(hash, "invalid")
 	}
 	pool.priced.Removed(len(dropped))
 
@@ -1504,7 +1512,7 @@ func (pool *LegacyPool) truncatePending() {
 						// Drop the transaction from the global pools too
 						hash := tx.Hash()
 						pool.all.Remove(hash)
-						pool.trackRemoved(hash)
+						pool.trackRemoved(hash, "rate limited")
 
 						// Update the account nonce to the dropped transaction
 						pool.pendingNonces.setIfLower(offenders[i], tx.Nonce())
@@ -1530,7 +1538,7 @@ func (pool *LegacyPool) truncatePending() {
 					// Drop the transaction from the global pools too
 					hash := tx.Hash()
 					pool.all.Remove(hash)
-					pool.trackRemoved(hash)
+					pool.trackRemoved(hash, "rate limited")
 
 					// Update the account nonce to the dropped transaction
 					pool.pendingNonces.setIfLower(addr, tx.Nonce())
@@ -1552,7 +1560,7 @@ func (pool *LegacyPool) truncateQueue() {
 	// Remove all removable transactions from the lookup and global price list
 	for _, hash := range removed {
 		pool.all.Remove(hash)
-		pool.trackRemoved(hash)
+		pool.trackRemoved(hash, "capacity")
 	}
 	pool.priced.Removed(len(removed))
 
@@ -1582,7 +1590,7 @@ func (pool *LegacyPool) demoteUnexecutables() {
 		for _, tx := range olds {
 			hash := tx.Hash()
 			pool.all.Remove(hash)
-			pool.trackRemoved(hash)
+			pool.trackRemoved(hash, "nonce expired")
 			log.Trace("Removed old pending transaction", "hash", hash)
 		}
 		// Drop all transactions that are too costly (low balance or out of gas), and queue any invalids back for later
@@ -1590,7 +1598,7 @@ func (pool *LegacyPool) demoteUnexecutables() {
 		for _, tx := range drops {
 			hash := tx.Hash()
 			pool.all.Remove(hash)
-			pool.trackRemoved(hash)
+			pool.trackRemoved(hash, "underfunded")
 			log.Trace("Removed unpayable pending transaction", "hash", hash)
 		}
 		pendingNofundsMeter.Mark(int64(len(drops)))

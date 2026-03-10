@@ -457,6 +457,7 @@
             ev._reorgCount = old._reorgCount || 0;
             ev._txType = ev.txType || old._txType || 0;
             ev.peer = ev.peer || old.peer;
+            ev._dropReason = ev.dropReason || old._dropReason;
             // Track backward transition: included → pooled (reorg).
             if (old.newStatus === 'included' && ev.newStatus === 'pooled') {
                 ev._reorgCount++;
@@ -467,6 +468,7 @@
             ev._wasRequested = ev.newStatus === 'requested';
             ev._reorgCount = 0;
             ev._txType = ev.txType || 0;
+            ev._dropReason = ev.dropReason || '';
         }
         txs.set(hash, ev);
         incrementCounter(ev.newStatus);
@@ -600,7 +602,7 @@
             cols[2].textContent = ev.peer || '-';
             cols[3].textContent = ev.blockNum || '-';
             cols[4].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
-            cols[5].textContent = ev.rejectErr || '';
+            cols[5].textContent = ev.rejectErr || ev._dropReason || '';
 
             var cached = topCache.get(hash);
             if (cached) {
@@ -893,6 +895,7 @@
             ['Included', formatTS(info.Included, base)],
             ['Finalized', formatTS(info.Finalized, base)],
             ['Dropped', formatTS(info.Dropped, base)],
+            ['Drop Reason', info.DropReason || '-'],
             ['Deliverer', info.Deliverer || '-'],
             ['Announcers', (info.Announcers || []).join(', ') || '-'],
             ['Block #', info.BlockNum || '-'],
@@ -1075,12 +1078,16 @@
         var unsolPath = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
         var privatePath = { included: 0, finalized: 0 };
         var nReorged = 0;  // total reorg events (included → pooled)
+        var dropReasons = {}; // reason string -> count
 
         txs.forEach(function(ev) {
             if (!typeFilter.has(ev._txType || 0)) return;
             var s = ev.newStatus;
             if (counts.hasOwnProperty(s)) counts[s]++;
             nReorged += ev._reorgCount || 0;
+            if (s === 'dropped' && ev._dropReason) {
+                dropReasons[ev._dropReason] = (dropReasons[ev._dropReason] || 0) + 1;
+            }
 
             // Private: first seen already included in chain.
             if (ev._firstStatus === 'included' || ev._firstStatus === 'finalized') {
@@ -1250,6 +1257,16 @@
             if (nDropped !== counts.dropped) {
                 drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 20,
                           nDropped.toLocaleString() + ' total', 'start', '#555', '9');
+            }
+            // Show drop reason breakdown.
+            var reasonKeys = Object.keys(dropReasons).sort(function(a, b) { return dropReasons[b] - dropReasons[a]; });
+            if (reasonKeys.length > 0) {
+                var parts = [];
+                for (var ri = 0; ri < reasonKeys.length; ri++) {
+                    parts.push(dropReasons[reasonKeys[ri]] + ' ' + reasonKeys[ri]);
+                }
+                var baseY = dropY + dropBarH / 2 + (nDropped !== counts.dropped ? 32 : 20);
+                drawLabel(svg, dropX + NODE_W + 6, baseY, parts.join(', '), 'start', '#777', '9');
             }
         }
 

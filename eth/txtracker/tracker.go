@@ -85,8 +85,9 @@ type TxTrackerEvent struct {
 	Peer      string         `json:"peer,omitempty"`
 	BlockNum  uint64         `json:"blockNum,omitempty"`
 	BlockHash common.Hash    `json:"blockHash,omitempty"`
-	RejectErr string         `json:"rejectErr,omitempty"`
-	Local     bool           `json:"local,omitempty"`
+	RejectErr  string         `json:"rejectErr,omitempty"`
+	DropReason string         `json:"dropReason,omitempty"`
+	Local      bool           `json:"local,omitempty"`
 	TxType    uint8          `json:"txType"`
 }
 
@@ -139,6 +140,7 @@ type txRecord struct {
 	blockNum   uint64      // Block number (when included)
 	blockHash  common.Hash // Block hash (when included)
 	rejectErr  string      // Rejection reason (when status == TxRejected)
+	dropReason string      // Drop reason (when status == TxDropped)
 
 	evictElem *list.Element // Position in eviction list
 }
@@ -177,6 +179,7 @@ type TxInfo struct {
 	BlockNum   uint64
 	BlockHash  common.Hash
 	RejectErr  string
+	DropReason string
 }
 
 // PeerStats is the public view of a peer's transaction contribution.
@@ -486,16 +489,17 @@ func (t *Tracker) SubscribeEvents(ch chan<- TxTrackerEvent) event.Subscription {
 // to prevent slow subscribers from stalling the event loop.
 func (t *Tracker) emitEvent(hash common.Hash, oldStatus, newStatus TxStatus, rec *txRecord, peer string) {
 	ev := TxTrackerEvent{
-		TxHash:    hash,
-		OldStatus: oldStatus,
-		NewStatus: newStatus,
-		Timestamp: t.clock.Now(),
-		Peer:      peer,
-		BlockNum:  rec.blockNum,
-		BlockHash: rec.blockHash,
-		RejectErr: rec.rejectErr,
-		Local:     rec.local,
-		TxType:    rec.txType,
+		TxHash:     hash,
+		OldStatus:  oldStatus,
+		NewStatus:  newStatus,
+		Timestamp:  t.clock.Now(),
+		Peer:       peer,
+		BlockNum:   rec.blockNum,
+		BlockHash:  rec.blockHash,
+		RejectErr:  rec.rejectErr,
+		DropReason: rec.dropReason,
+		Local:      rec.local,
+		TxType:     rec.txType,
 	}
 	select {
 	case t.emitCh <- ev:
@@ -951,13 +955,18 @@ func (t *Tracker) checkFinalization() {
 // since pool removal events also fire for transactions that get mined.
 func (t *Tracker) handleRemovedTxs(ev core.RemovedTxsEvent) {
 	now := time.Now()
-	for _, hash := range ev.Hashes {
+	for i, hash := range ev.Hashes {
 		rec := t.txs[hash]
 		if rec == nil || rec.status != TxPooled {
 			continue
 		}
+		var reason string
+		if i < len(ev.Reasons) {
+			reason = ev.Reasons[i]
+		}
 		rec.status = TxDropped
 		rec.dropped = now
+		rec.dropReason = reason
 		t.touchLRU(rec)
 		t.emitEvent(hash, TxPooled, TxDropped, rec, "")
 		txDroppedMeter.Mark(1)
@@ -1020,6 +1029,7 @@ func (t *Tracker) answerQuery(hash common.Hash) *TxInfo {
 		BlockNum:      rec.blockNum,
 		BlockHash:     rec.blockHash,
 		RejectErr:     rec.rejectErr,
+		DropReason:    rec.dropReason,
 	}
 	// Copy announcers to avoid data races.
 	if len(rec.announcers) > 0 {

@@ -27,7 +27,10 @@ import (
 type NewTxsEvent struct{ Txs []*types.Transaction }
 
 // RemovedTxsEvent is posted when transactions are evicted from the pool.
-type RemovedTxsEvent struct{ Hashes []common.Hash }
+type RemovedTxsEvent struct {
+	Hashes  []common.Hash
+	Reasons []string // parallel to Hashes; may be empty/shorter
+}
 
 // RemovedLogsEvent is posted when a reorg happens
 type RemovedLogsEvent struct{ Logs []*types.Log }

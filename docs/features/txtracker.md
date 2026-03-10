@@ -418,15 +418,33 @@ but has since been evicted.
 
 **Detection**: Reactive via `RemovedTxsEvent`. Both legacypool and blobpool
 now fire this event when transactions are removed. The implementation uses
-an accumulate-and-flush pattern: `trackRemoved(hash)` appends to a buffer
-during lock-held operations, and `flushRemoved()` sends a single batched
-event after the lock is released (same pattern as `NewTxsEvent`).
+an accumulate-and-flush pattern: `trackRemoved(hash, reason)` appends to a
+buffer during lock-held operations, and `flushRemoved()` sends a single
+batched event after the lock is released (same pattern as `NewTxsEvent`).
 
 The tracker subscribes to `RemovedTxsEvent` via `TxPoolReader.
 SubscribeRemovedTransactions` and transitions matching `TxPooled` records
 to `TxDropped` instantly. Removal events for transactions already at
 `TxIncluded` or `TxFinalized` are ignored (pool removal also fires when
 transactions are mined into blocks).
+
+**Drop reasons**: Each `trackRemoved` call site provides a human-readable
+reason string explaining why the transaction was removed. The reason is
+carried through `RemovedTxsEvent.Reasons` (parallel to `Hashes`), stored
+in `txRecord.dropReason`, surfaced in `TxInfo.DropReason` and
+`TxTrackerEvent.DropReason`, and displayed in the browser UI.
+
+Reason strings by pool:
+
+*legacypool*: `"expired"` (queue lifetime), `"underpriced"` (SetGasTip or
+add eviction), `"replaced"` (same-nonce higher-fee replacement),
+`"invalid"` (promoteExecutables validation), `"rate limited"` (pending
+truncation), `"capacity"` (queue truncation), `"nonce expired"` (demote
+low nonce), `"underfunded"` (demote insufficient balance).
+
+*blobpool*: `"included"` (gapped/filled reset), `"nonce expired"` (overlap
+below chain state), `"underpriced"` (SetGasTip cascade), `"replaced"`
+(same-nonce replacement), `"evicted"` (eviction heap drop).
 
 **Recovery paths from TxDropped**: A dropped transaction can re-enter the
 lifecycle:
@@ -442,6 +460,9 @@ and `handleRejected` all accept `TxDropped` as a valid source status.
 **UI**: Dropped counter in header badges, dropped filter option, dropped
 step in progress pipeline, and a Dropped node in the Sankey diagram
 branching off from Pooled (similar to Rejected branching off Received).
+The feed error column shows the drop reason alongside reject errors. The
+detail panel includes a "Drop Reason" row. The Sankey Dropped node shows
+a breakdown label (e.g. "3 replaced, 2 underpriced").
 
 ### Transaction Type Filter
 
