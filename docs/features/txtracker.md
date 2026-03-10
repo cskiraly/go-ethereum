@@ -318,6 +318,22 @@ since the browser connects directly to geth's WebSocket.
   local record with no deliverer.
 - **CLEANUP-1**: Removed dead `lastHeadNum` field.
 
+### Receive Event Ordering Fix
+
+`handleTransactions` calls `txpool.Add` which fires `NewTxsEvent`. The
+tracker's `handleNewTxs` processes this event and creates a record at
+`TxPooled` before `handleReceive` runs, because `NotifyReceived` was called
+after `handleTransactions` in `handler_eth.go`. This caused the receive
+event to be silently dropped (`rec.status >= TxReceived`), making the
+"received" counter always show zero.
+
+**Fix**: Call `NotifyReceived` before `handleTransactions` so the receive
+event is queued ahead of the pool event. Also backfill receive metadata
+(timestamp, deliverer, local flag) in `handleReceive` when the record has
+already advanced past `TxReceived` but has no receive data (using
+`rec.received.IsZero()` as the guard instead of the old `rec.local &&
+rec.deliverer == ""` check).
+
 ### Finalization Timing Fix
 
 `checkFinalization` only ran inside `handleChainEvent`, but `SetFinalized`
