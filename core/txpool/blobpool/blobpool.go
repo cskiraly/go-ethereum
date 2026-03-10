@@ -384,6 +384,8 @@ type BlobPool struct {
 
 	discoverFeed event.Feed // Event feed to send out new tx events on pool discovery (reorg excluded)
 	insertFeed   event.Feed // Event feed to send out new tx events on pool inclusion (reorg included)
+	removedFeed  event.Feed // Event feed for evicted transactions
+	removed      []common.Hash // Accumulator for batch removal notifications
 
 	lock sync.RWMutex // Mutex protecting the pool during reorg handling
 }
@@ -634,6 +636,7 @@ func (p *BlobPool) recheck(addr common.Address, inclusions map[common.Hash]uint6
 
 			p.stored -= uint64(txs[i].storageSize)
 			p.lookup.untrack(txs[i])
+			p.trackRemoved(txs[i].hash)
 
 			// Included transactions blobs need to be moved to the limbo
 			if filled && inclusions != nil {
@@ -675,6 +678,7 @@ func (p *BlobPool) recheck(addr common.Address, inclusions map[common.Hash]uint6
 			p.spent[addr] = new(uint256.Int).Sub(p.spent[addr], txs[0].costCap)
 			p.stored -= uint64(txs[0].storageSize)
 			p.lookup.untrack(txs[0])
+			p.trackRemoved(txs[0].hash)
 
 			// Included transactions blobs need to be moved to the limbo
 			if inclusions != nil {
@@ -885,7 +889,10 @@ func (p *BlobPool) Reset(oldHead, newHead *types.Header) {
 	waitStart := time.Now()
 	p.lock.Lock()
 	resetwaitHist.Update(time.Since(waitStart).Nanoseconds())
-	defer p.lock.Unlock()
+	defer func() {
+		p.lock.Unlock()
+		p.flushRemoved()
+	}()
 
 	defer func(start time.Time) {
 		resettimeHist.Update(time.Since(start).Nanoseconds())
@@ -1166,7 +1173,10 @@ func (p *BlobPool) reinject(addr common.Address, txhash common.Hash) error {
 // to be kept in sync with the main transaction pool's gas requirements.
 func (p *BlobPool) SetGasTip(tip *big.Int) {
 	p.lock.Lock()
-	defer p.lock.Unlock()
+	defer func() {
+		p.lock.Unlock()
+		p.flushRemoved()
+	}()
 
 	// Store the new minimum gas tip
 	old := p.gasTip.Load()
@@ -1186,6 +1196,7 @@ func (p *BlobPool) SetGasTip(tip *big.Int) {
 					p.spent[addr] = new(uint256.Int).Sub(p.spent[addr], txs[i].costCap)
 					p.stored -= uint64(tx.storageSize)
 					p.lookup.untrack(tx)
+					p.trackRemoved(tx.hash)
 					txs[i] = nil
 
 					// Drop everything afterwards, no gaps allowed
@@ -1196,6 +1207,7 @@ func (p *BlobPool) SetGasTip(tip *big.Int) {
 						p.spent[addr] = new(uint256.Int).Sub(p.spent[addr], tx.costCap)
 						p.stored -= uint64(tx.storageSize)
 						p.lookup.untrack(tx)
+						p.trackRemoved(tx.hash)
 						txs[i+1+j] = nil
 					}
 					// Clear out the dropped transactions from the index
@@ -1568,7 +1580,10 @@ func (p *BlobPool) add(tx *types.Transaction) (err error) {
 	waitStart := time.Now()
 	p.lock.Lock()
 	addwaitHist.Update(time.Since(waitStart).Nanoseconds())
-	defer p.lock.Unlock()
+	defer func() {
+		p.lock.Unlock()
+		p.flushRemoved()
+	}()
 
 	defer func(start time.Time) {
 		addtimeHist.Update(time.Since(start).Nanoseconds())
@@ -1677,6 +1692,7 @@ func (p *BlobPool) addLocked(tx *types.Transaction, checkGapped bool) (err error
 		p.spent[from] = new(uint256.Int).Add(p.spent[from], meta.costCap)
 
 		p.lookup.untrack(prev)
+		p.trackRemoved(prev.hash)
 		p.lookup.track(meta)
 		p.stored += uint64(meta.storageSize) - uint64(prev.storageSize)
 	} else {
@@ -1835,6 +1851,7 @@ func (p *BlobPool) drop() {
 	}
 	p.stored -= uint64(drop.storageSize)
 	p.lookup.untrack(drop)
+	p.trackRemoved(drop.hash)
 
 	// Remove the transaction from the pool's eviction heap:
 	//   - If the entire account was dropped, pop off the address
@@ -2018,6 +2035,27 @@ func (p *BlobPool) SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool
 		return p.insertFeed.Subscribe(ch)
 	} else {
 		return p.discoverFeed.Subscribe(ch)
+	}
+}
+
+// SubscribeRemovedTransactions registers a subscription for removal events.
+func (p *BlobPool) SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription {
+	return p.removedFeed.Subscribe(ch)
+}
+
+// trackRemoved records a transaction hash for batch removal notification.
+// Must be called with p.lock held.
+func (p *BlobPool) trackRemoved(hash common.Hash) {
+	p.removed = append(p.removed, hash)
+}
+
+// flushRemoved sends a RemovedTxsEvent for all accumulated removals and
+// resets the accumulator. Must be called WITHOUT p.lock held.
+func (p *BlobPool) flushRemoved() {
+	if len(p.removed) > 0 {
+		hashes := p.removed
+		p.removed = nil
+		p.removedFeed.Send(core.RemovedTxsEvent{Hashes: hashes})
 	}
 }
 

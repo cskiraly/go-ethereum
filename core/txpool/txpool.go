@@ -379,6 +379,16 @@ func (p *TxPool) SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) 
 	return p.subs.Track(event.JoinSubscriptions(subs...))
 }
 
+// SubscribeRemovedTransactions registers a subscription for transaction removal
+// events, fired when previously accepted transactions are evicted from a subpool.
+func (p *TxPool) SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription {
+	subs := make([]event.Subscription, len(p.subpools))
+	for i, subpool := range p.subpools {
+		subs[i] = subpool.SubscribeRemovedTransactions(ch)
+	}
+	return p.subs.Track(event.JoinSubscriptions(subs...))
+}
+
 // PoolNonce returns the next nonce of an account, with all transactions executable
 // by the pool already applied on top.
 func (p *TxPool) PoolNonce(addr common.Address) uint64 {

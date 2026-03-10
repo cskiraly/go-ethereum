@@ -26,6 +26,9 @@ import (
 // NewTxsEvent is posted when a batch of transactions enter the transaction pool.
 type NewTxsEvent struct{ Txs []*types.Transaction }
 
+// RemovedTxsEvent is posted when transactions are evicted from the pool.
+type RemovedTxsEvent struct{ Hashes []common.Hash }
+
 // RemovedLogsEvent is posted when a reorg happens
 type RemovedLogsEvent struct{ Logs []*types.Log }
 
