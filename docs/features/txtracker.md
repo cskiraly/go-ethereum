@@ -35,9 +35,11 @@ Single-goroutine event loop (same pattern as TxFetcher):
 
 ### Key Design Decisions
 
-1. **No modifications to core/ packages**: The tracker subscribes to
-   `ChainEvent` and `NewTxsEvent` via standard interfaces. Local transactions
-   are detected as txs appearing in `NewTxsEvent` without prior tracker record.
+1. **Minimal modifications to core/ packages**: The tracker subscribes to
+   `ChainEvent`, `NewTxsEvent`, and `RemovedTxsEvent` via standard interfaces.
+   `RemovedTxsEvent` was added to the `SubPool` interface for reactive pool
+   drop detection. Local transactions are detected as txs appearing in
+   `NewTxsEvent` without prior tracker record.
 
 2. **LRU eviction**: Bounded to `maxEntries` (default 65536). Each status
    transition moves the entry to the front. Finalized and rejected txs age out
@@ -390,17 +392,24 @@ without a fetch.
 
 ### Pool Drop Detection
 
-The pool doesn't fire events when transactions are evicted (time-based,
-capacity, replacement). Previously, once a transaction reached `TxPooled`
-it would stay there until included or LRU-evicted from the tracker — even
-if the pool had long since dropped it.
+Previously, once a transaction reached `TxPooled` it would stay there
+until included or LRU-evicted from the tracker — even if the pool had
+long since dropped it.
 
 **New status**: `TxDropped` (iota 8) — transaction was accepted into the pool
-but is no longer present. Detected via periodic polling.
+but has since been evicted.
 
-**Detection**: A configurable-interval ticker (`dropCheckInterval`, default
-30s) iterates all `TxPooled` records and calls `TxPoolReader.Has(hash)`. If
-the pool no longer contains the transaction, it transitions to `TxDropped`.
+**Detection**: Reactive via `RemovedTxsEvent`. Both legacypool and blobpool
+now fire this event when transactions are removed. The implementation uses
+an accumulate-and-flush pattern: `trackRemoved(hash)` appends to a buffer
+during lock-held operations, and `flushRemoved()` sends a single batched
+event after the lock is released (same pattern as `NewTxsEvent`).
+
+The tracker subscribes to `RemovedTxsEvent` via `TxPoolReader.
+SubscribeRemovedTransactions` and transitions matching `TxPooled` records
+to `TxDropped` instantly. Removal events for transactions already at
+`TxIncluded` or `TxFinalized` are ignored (pool removal also fires when
+transactions are mined into blocks).
 
 **Recovery paths from TxDropped**: A dropped transaction can re-enter the
 lifecycle:
