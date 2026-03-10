@@ -451,9 +451,9 @@ set-code=4)
 with every subscription event, without needing an RPC fetch.
 
 The browser stores `_txType` on each event (preserving the type from earlier
-events if a new event has type 0). Checkbox groups in both Feed and Top filter
-bars let the user toggle visibility per type. The Stats view Sankey diagram
-also respects the Feed type filter, counting only matching transactions.
+events if a new event has type 0). Checkbox groups appear in the Feed, Top, and
+Stats filter bars. All three share a single `typeFilter` Set — toggling a type
+on any pane syncs the checkboxes across all panes and marks all views dirty.
 
 Type 0 serves double duty as both "legacy" and "type not yet known" (e.g.,
 announced but metadata not yet received). This is acceptable since legacy

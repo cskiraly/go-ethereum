@@ -35,10 +35,8 @@
     // --- Stats view state ---
     let statsViewDirty = true;
 
-    // --- Type filter state ---
-    let feedTypeFilter = new Set([0, 1, 2, 3, 4]);
-    let topTypeFilter = new Set([0, 1, 2, 3, 4]);
-    let statsTypeFilter = new Set([0, 1, 2, 3, 4]);
+    // --- Type filter state (shared across all panes) ---
+    let typeFilter = new Set([0, 1, 2, 3, 4]);
 
     // --- DOM refs: shared ---
     const statusDot = document.getElementById('status-dot');
@@ -108,20 +106,25 @@
         for (var i = 0; i < boxes.length; i++) s.add(parseInt(boxes[i].value));
         return s;
     }
-    document.getElementById('feed-type-filter').addEventListener('change', function() {
-        feedTypeFilter = getCheckedTypes('feed-type-filter');
-        feedViewDirty = true;
-        scheduleRender();
-    });
-    document.getElementById('top-type-filter').addEventListener('change', function() {
-        topTypeFilter = getCheckedTypes('top-type-filter');
-        topViewDirty = true;
-        scheduleRender();
-    });
-    document.getElementById('stats-type-filter').addEventListener('change', function() {
-        statsTypeFilter = getCheckedTypes('stats-type-filter');
-        statsViewDirty = true;
-        scheduleRender();
+    var typeFilterContainers = ['feed-type-filter', 'top-type-filter', 'stats-type-filter'];
+    function syncTypeCheckboxes(sourceId) {
+        typeFilterContainers.forEach(function(id) {
+            if (id === sourceId) return;
+            var boxes = document.getElementById(id).querySelectorAll('input[type="checkbox"]');
+            for (var i = 0; i < boxes.length; i++) {
+                boxes[i].checked = typeFilter.has(parseInt(boxes[i].value));
+            }
+        });
+    }
+    typeFilterContainers.forEach(function(id) {
+        document.getElementById(id).addEventListener('change', function() {
+            typeFilter = getCheckedTypes(id);
+            syncTypeCheckboxes(id);
+            feedViewDirty = true;
+            topViewDirty = true;
+            statsViewDirty = true;
+            scheduleRender();
+        });
     });
 
     // Sortable column headers in top view.
@@ -514,7 +517,7 @@
     // Feed view
     // ========================================================================
     function matchesFeedFilter(hash, ev) {
-        if (!feedTypeFilter.has(ev._txType || 0)) return false;
+        if (!typeFilter.has(ev._txType || 0)) return false;
         var status = filterStatus.value;
         if (status && ev.newStatus !== status) return false;
         var text = filterInput.value;
@@ -621,7 +624,7 @@
     // Top view
     // ========================================================================
     function matchesTopFilter(hash, ev) {
-        if (!topTypeFilter.has(ev._txType || 0)) return false;
+        if (!typeFilter.has(ev._txType || 0)) return false;
         var status = topFilterStatus.value;
         if (status && ev.newStatus !== status) return false;
         var text = topFilterInput.value;
@@ -1050,7 +1053,7 @@
         svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
 
         var total = 0;
-        txs.forEach(function(ev) { if (statsTypeFilter.has(ev._txType || 0)) total++; });
+        txs.forEach(function(ev) { if (typeFilter.has(ev._txType || 0)) total++; });
         if (total === 0) {
             drawLabel(svg, W / 2, H / 2, 'Waiting for transactions\u2026', 'middle', '#888', '14');
             return;
@@ -1073,7 +1076,7 @@
         var nReorged = 0;  // total reorg events (included → pooled)
 
         txs.forEach(function(ev) {
-            if (!statsTypeFilter.has(ev._txType || 0)) return;
+            if (!typeFilter.has(ev._txType || 0)) return;
             var s = ev.newStatus;
             if (counts.hasOwnProperty(s)) counts[s]++;
             nReorged += ev._reorgCount || 0;
