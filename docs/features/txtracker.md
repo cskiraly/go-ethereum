@@ -50,8 +50,12 @@ Single-goroutine event loop (same pattern as TxFetcher):
    to `TxPooled`.
 
 4. **Peer statistics**: Maintained alongside tx records in the event loop.
-   Tracks announcements, deliveries, useful deliveries, and first-announcer
-   counts per peer. Stats are cleared on peer disconnect.
+   Tracks announcements, deliveries, useful deliveries, first-announcer
+   counts, included (delivered txs that made it on chain), and finalized
+   (delivered txs whose block was finalized) per peer. The included counter
+   is incremented when a tracked tx with a deliverer transitions to
+   `TxIncluded`, and decremented on reorg. The finalized counter is
+   incremented in `checkFinalization`. Stats are cleared on peer disconnect.
 
 5. **Finalized-block skip**: Transactions first seen in blocks at or below
    `lastFinalNum` are not tracked. During chain sync, `handleChainEvent` fires
@@ -293,8 +297,10 @@ was reverted from included back to the pool.
 Sortable table showing per-peer transaction contribution statistics. Fetches
 data via `txtracker_getAllPeerStats` (single RPC call returning all peers).
 Columns: Peer ID, Announced, Delivered, Useful (deliveries accepted into pool),
-1st Announce (times peer was first to announce), Useful % (UsefulDelivery /
-Delivered), 1st % (FirstAnnouncer / Announced). Auto-refreshes every 3 seconds
+1st Announce (times peer was first to announce), Included (delivered txs
+included on chain), Finalized (delivered txs finalized on chain), Useful %
+(UsefulDelivery / Delivered), 1st % (FirstAnnouncer / Announced), Included %
+(Included / Delivered), Finalized % (Finalized / Delivered). Auto-refreshes every 3 seconds
 when the tab is active. Uses the same virtual scroll infrastructure as Feed
 and Top panes.
 

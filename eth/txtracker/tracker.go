@@ -151,6 +151,8 @@ type peerStats struct {
 	delivered      int64 // Total tx bodies delivered by this peer
 	usefulDelivery int64 // Deliveries that were accepted into pool
 	firstAnnouncer int64 // Times this peer was the first to announce a tx
+	included       int64 // Delivered txs that were included on chain
+	finalized      int64 // Delivered txs that were finalized on chain
 }
 
 // TxInfo is the public, read-only view of a transaction's tracked state.
@@ -188,6 +190,8 @@ type PeerStats struct {
 	Delivered      int64
 	UsefulDelivery int64
 	FirstAnnouncer int64
+	Included       int64
+	Finalized      int64
 }
 
 // TrackerStats is the public snapshot of tracker-wide statistics.
@@ -632,6 +636,8 @@ func (t *Tracker) loop() {
 					Delivered:      ps.delivered,
 					UsefulDelivery: ps.usefulDelivery,
 					FirstAnnouncer: ps.firstAnnouncer,
+					Included:       ps.included,
+					Finalized:      ps.finalized,
 				}
 			} else {
 				q.resp <- PeerStats{}
@@ -652,6 +658,8 @@ func (t *Tracker) loop() {
 					Delivered:      ps.delivered,
 					UsefulDelivery: ps.usefulDelivery,
 					FirstAnnouncer: ps.firstAnnouncer,
+					Included:       ps.included,
+					Finalized:      ps.finalized,
 				}
 			}
 			resp <- result
@@ -927,6 +935,12 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 			case TxDropped:
 				txIncludedFromDroppedMeter.Mark(1)
 			}
+			// Credit the delivering peer for on-chain inclusion.
+			if rec.deliverer != "" {
+				if ps := t.peers[rec.deliverer]; ps != nil {
+					ps.included++
+				}
+			}
 		}
 	}
 }
@@ -946,6 +960,12 @@ func (t *Tracker) handleReorg(newBlockNum uint64) {
 			t.touchLRU(rec)
 			t.emitEvent(hash, TxIncluded, TxPooled, rec, "")
 			txReorgedMeter.Mark(1)
+			// Reverse the inclusion credit for the delivering peer.
+			if rec.deliverer != "" {
+				if ps := t.peers[rec.deliverer]; ps != nil {
+					ps.included--
+				}
+			}
 		}
 	}
 }
@@ -979,6 +999,12 @@ func (t *Tracker) checkFinalization() {
 			t.emitEvent(hash, TxIncluded, TxFinalized, rec, "")
 			txFinalizedMeter.Mark(1)
 			count++
+			// Credit the delivering peer for finalization.
+			if rec.deliverer != "" {
+				if ps := t.peers[rec.deliverer]; ps != nil {
+					ps.finalized++
+				}
+			}
 		}
 	}
 	if count > 0 {

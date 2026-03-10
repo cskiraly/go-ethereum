@@ -244,7 +244,7 @@
     // Column order arrays — index = CSS order value.
     var feedColOrder = ['col-hash', 'col-status', 'col-peer', 'col-block', 'col-age', 'col-error', 'col-progress'];
     var topColOrder = ['top-col-hash', 'top-col-status', 'top-col-from', 'top-col-nonce', 'top-col-value', 'top-col-feecap', 'top-col-tipcap', 'top-col-gas', 'top-col-age', 'top-col-progress'];
-    var peersColOrder = ['peers-col-id', 'peers-col-announced', 'peers-col-delivered', 'peers-col-useful', 'peers-col-first', 'peers-col-useful-pct', 'peers-col-first-pct'];
+    var peersColOrder = ['peers-col-id', 'peers-col-announced', 'peers-col-delivered', 'peers-col-useful', 'peers-col-first', 'peers-col-included', 'peers-col-finalized', 'peers-col-useful-pct', 'peers-col-first-pct', 'peers-col-included-pct', 'peers-col-finalized-pct'];
 
     // Extract the column class (col-* or top-col-*) from an element.
     function getColClass(el) {
@@ -1073,6 +1073,12 @@
                 case 'first':
                     cmp = (sa.FirstAnnouncer || 0) - (sb.FirstAnnouncer || 0);
                     break;
+                case 'included':
+                    cmp = (sa.Included || 0) - (sb.Included || 0);
+                    break;
+                case 'finalized':
+                    cmp = (sa.Finalized || 0) - (sb.Finalized || 0);
+                    break;
                 case 'useful-pct':
                     var ua = sa.Delivered ? (sa.UsefulDelivery || 0) / sa.Delivered : 0;
                     var ub = sb.Delivered ? (sb.UsefulDelivery || 0) / sb.Delivered : 0;
@@ -1082,6 +1088,16 @@
                     var fa = sa.Announced ? (sa.FirstAnnouncer || 0) / sa.Announced : 0;
                     var fb = sb.Announced ? (sb.FirstAnnouncer || 0) / sb.Announced : 0;
                     cmp = fa - fb;
+                    break;
+                case 'included-pct':
+                    var ia = sa.Delivered ? (sa.Included || 0) / sa.Delivered : 0;
+                    var ib = sb.Delivered ? (sb.Included || 0) / sb.Delivered : 0;
+                    cmp = ia - ib;
+                    break;
+                case 'finalized-pct':
+                    var fza = sa.Delivered ? (sa.Finalized || 0) / sa.Delivered : 0;
+                    var fzb = sb.Delivered ? (sb.Finalized || 0) / sb.Delivered : 0;
+                    cmp = fza - fzb;
                     break;
             }
             return peersSortAsc ? cmp : -cmp;
@@ -1119,8 +1135,12 @@
                 '<span class="peers-col-delivered"></span>' +
                 '<span class="peers-col-useful"></span>' +
                 '<span class="peers-col-first"></span>' +
+                '<span class="peers-col-included"></span>' +
+                '<span class="peers-col-finalized"></span>' +
                 '<span class="peers-col-useful-pct"></span>' +
-                '<span class="peers-col-first-pct"></span>';
+                '<span class="peers-col-first-pct"></span>' +
+                '<span class="peers-col-included-pct"></span>' +
+                '<span class="peers-col-finalized-pct"></span>';
             peersRowContainer.appendChild(row);
         }
 
@@ -1137,8 +1157,12 @@
             cols[2].textContent = formatNumber(s.Delivered || 0);
             cols[3].textContent = formatNumber(s.UsefulDelivery || 0);
             cols[4].textContent = formatNumber(s.FirstAnnouncer || 0);
-            cols[5].textContent = s.Delivered ? ((s.UsefulDelivery || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
-            cols[6].textContent = s.Announced ? ((s.FirstAnnouncer || 0) / s.Announced * 100).toFixed(1) + '%' : '-';
+            cols[5].textContent = formatNumber(s.Included || 0);
+            cols[6].textContent = formatNumber(s.Finalized || 0);
+            cols[7].textContent = s.Delivered ? ((s.UsefulDelivery || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
+            cols[8].textContent = s.Announced ? ((s.FirstAnnouncer || 0) / s.Announced * 100).toFixed(1) + '%' : '-';
+            cols[9].textContent = s.Delivered ? ((s.Included || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
+            cols[10].textContent = s.Delivered ? ((s.Finalized || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
         }
     }
 

@@ -229,13 +229,17 @@ header h1 {
 .top-col-progress { flex: 1; min-width: 200px; }
 
 /* --- Peers view columns --- */
-.peers-col-id         { width: 260px; flex-shrink: 0; }
-.peers-col-announced  { width: 100px; flex-shrink: 0; text-align: right; }
-.peers-col-delivered  { width: 100px; flex-shrink: 0; text-align: right; }
-.peers-col-useful     { width: 100px; flex-shrink: 0; text-align: right; }
-.peers-col-first      { width: 110px; flex-shrink: 0; text-align: right; }
-.peers-col-useful-pct { width: 90px;  flex-shrink: 0; text-align: right; }
-.peers-col-first-pct  { width: 90px;  flex-shrink: 0; text-align: right; }
+.peers-col-id             { width: 260px; flex-shrink: 0; }
+.peers-col-announced      { width: 100px; flex-shrink: 0; text-align: right; }
+.peers-col-delivered      { width: 100px; flex-shrink: 0; text-align: right; }
+.peers-col-useful         { width: 100px; flex-shrink: 0; text-align: right; }
+.peers-col-first          { width: 110px; flex-shrink: 0; text-align: right; }
+.peers-col-included       { width: 100px; flex-shrink: 0; text-align: right; }
+.peers-col-finalized      { width: 100px; flex-shrink: 0; text-align: right; }
+.peers-col-useful-pct     { width: 90px;  flex-shrink: 0; text-align: right; }
+.peers-col-first-pct      { width: 90px;  flex-shrink: 0; text-align: right; }
+.peers-col-included-pct   { width: 100px; flex-shrink: 0; text-align: right; }
+.peers-col-finalized-pct  { width: 100px; flex-shrink: 0; text-align: right; }
 
 /* --- Column resize handles --- */
 .table-header > span {
