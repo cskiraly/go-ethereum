@@ -98,8 +98,9 @@ const (
 	rejectedChanSize = 256
 	peerDropChanSize = 64
 	queryChanSize    = 64
-	chainEventSize   = 10
-	newTxsEventSize  = 128
+	chainEventSize       = 10
+	newTxsEventSize      = 128
+	finalizeCheckInterval = 5 * time.Second
 )
 
 // txRecord is the internal per-transaction lifecycle record.
@@ -256,6 +257,10 @@ type Tracker struct {
 
 	// Last known chain head for reorg detection.
 	lastHeadHash common.Hash
+
+	// Last finalized block number used by checkFinalization, to avoid
+	// redundant full scans when the finalized pointer hasn't advanced.
+	lastFinalNum uint64
 
 	// Event channels (buffered; senders block when full or on quit).
 	announceCh      chan *announceEvent
@@ -460,6 +465,18 @@ func (t *Tracker) loop() {
 		defer txsSub.Unsubscribe()
 	}
 
+	// Periodic finalization check. SetFinalized is called by the Engine API
+	// (ForkchoiceUpdated) independently of ChainEvent, so checking only on
+	// ChainEvent can miss finalization advances. This timer ensures we
+	// catch up promptly.
+	var finalizeTicker *time.Ticker
+	var finalizeTickerCh <-chan time.Time
+	if t.chain != nil {
+		finalizeTicker = time.NewTicker(finalizeCheckInterval)
+		finalizeTickerCh = finalizeTicker.C
+		defer finalizeTicker.Stop()
+	}
+
 	// Signal that subscriptions are set up.
 	close(t.ready)
 
@@ -512,6 +529,9 @@ func (t *Tracker) loop() {
 			} else {
 				q.resp <- PeerStats{}
 			}
+
+		case <-finalizeTickerCh:
+			t.checkFinalization()
 
 		case <-t.quit:
 			return
@@ -798,6 +818,12 @@ func (t *Tracker) checkFinalization() {
 		return
 	}
 	finalNum := finalBlock.Number.Uint64()
+
+	// Skip the full scan if the finalized block hasn't advanced.
+	if finalNum <= t.lastFinalNum {
+		return
+	}
+	t.lastFinalNum = finalNum
 
 	for hash, rec := range t.txs {
 		if rec.status == TxIncluded && rec.blockNum <= finalNum {
