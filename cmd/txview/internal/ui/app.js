@@ -36,6 +36,7 @@
     let statsViewDirty = true;
     let cumRejected = 0;         // monotonic: total txs that ever entered rejected
     let cumDropped = 0;          // monotonic: total txs that ever entered dropped
+    let cumFinalized = 0;        // monotonic: total txs that ever entered finalized
 
     // --- Type filter state (shared across all panes) ---
     let typeFilter = new Set([0, 1, 2, 3, 4]);
@@ -479,6 +480,7 @@
         // Track cumulative entries into sink states.
         if (ev.newStatus === 'rejected' && (!old || old.newStatus !== 'rejected')) cumRejected++;
         if (ev.newStatus === 'dropped' && (!old || old.newStatus !== 'dropped')) cumDropped++;
+        if (ev.newStatus === 'finalized' && (!old || old.newStatus !== 'finalized')) cumFinalized++;
 
         // Invalidate top cache for this tx (status changed).
         topCache.delete(hash);
@@ -1310,7 +1312,7 @@
             { n: rcvNode,  key: 'received',   label: 'Received',   now: atReceived,        cum: cumReceived },
             { n: poolNode, key: 'pooled',     label: 'Pooled',     now: atPooled,          cum: cumPooled },
             { n: inclNode, key: 'included',   label: 'Included',   now: atIncluded,        cum: cumIncluded },
-            { n: finNode,  key: 'finalized',  label: 'Finalized',  now: counts.finalized,  cum: toFinalized },
+            { n: finNode,  key: 'finalized',  label: 'Finalized',  now: counts.finalized,  cum: cumFinalized, sink: true },
         ];
 
         for (var i = 0; i < mainNodes.length; i++) {
@@ -1318,11 +1320,22 @@
             if (m.n.h <= 0) continue;
             drawNode(svg, m.n.x, m.n.y, NODE_W, m.n.h, SANKEY_COLORS[m.key]);
             drawLabel(svg, m.n.x + NODE_W / 2, m.n.y - 12, m.label, 'middle', '#e0e0e0');
-            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
-                      m.now.toLocaleString() + ' now', 'middle', '#888', '10');
-            if (m.cum !== m.now) {
-                drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
-                          m.cum.toLocaleString() + ' total', 'middle', '#555', '9');
+            if (m.sink) {
+                // Sink states: show cumulative total as primary label.
+                drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
+                          m.cum.toLocaleString() + ' total', 'middle', '#888', '10');
+                if (m.now !== m.cum) {
+                    drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
+                              m.now.toLocaleString() + ' now', 'middle', '#555', '9');
+                }
+            } else {
+                // Transit states: show current count as primary label.
+                drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
+                          m.now.toLocaleString() + ' now', 'middle', '#888', '10');
+                if (m.cum !== m.now) {
+                    drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
+                              m.cum.toLocaleString() + ' total', 'middle', '#555', '9');
+                }
             }
         }
 
