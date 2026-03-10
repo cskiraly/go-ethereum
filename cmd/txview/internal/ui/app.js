@@ -370,9 +370,14 @@
         var old = txs.get(hash);
         if (old) {
             decrementCounter(old.newStatus);
+            ev._receivedAt = old._receivedAt;
+            ev._firstStatus = old._firstStatus;
+            ev._wasRequested = old._wasRequested || ev.newStatus === 'requested';
+        } else {
+            ev._receivedAt = Date.now();
+            ev._firstStatus = ev.newStatus;
+            ev._wasRequested = ev.newStatus === 'requested';
         }
-
-        ev._receivedAt = Date.now();
         txs.set(hash, ev);
         incrementCounter(ev.newStatus);
         counters.total.textContent = txs.size;
@@ -857,14 +862,10 @@
     // ========================================================================
     // Stats view — Sankey diagram
     // ========================================================================
-    var SANKEY_STAGES = ['announced', 'requested', 'received', 'pooled', 'included', 'finalized'];
-    var SANKEY_LABELS = {
-        announced: 'Announced', requested: 'Requested', received: 'Received',
-        pooled: 'Pooled', included: 'Included', finalized: 'Finalized', rejected: 'Rejected'
-    };
     var SANKEY_COLORS = {
         announced: '#666', requested: '#00838f', received: '#1565c0',
-        pooled: '#f57f17', included: '#2e7d32', finalized: '#6a1b9a', rejected: '#c62828'
+        pooled: '#f57f17', included: '#2e7d32', finalized: '#6a1b9a',
+        rejected: '#c62828', private: '#9c27b0', unsolicited: '#78909c'
     };
 
     function svgEl(tag, attrs) {
@@ -887,6 +888,31 @@
                ' Z';
     }
 
+    function drawNode(svg, x, y, w, h, color) {
+        svg.appendChild(svgEl('rect', {
+            x: x, y: y, width: w, height: Math.max(2, h),
+            fill: color, rx: '2'
+        }));
+    }
+
+    function drawLabel(svg, x, y, text, anchor, color, size) {
+        var el = svgEl('text', {
+            x: x, y: y, 'text-anchor': anchor || 'middle',
+            'dominant-baseline': 'central',
+            fill: color || '#e0e0e0', 'font-size': size || '11', 'font-family': 'inherit'
+        });
+        el.textContent = text;
+        svg.appendChild(el);
+    }
+
+    function drawLink(svg, x1, y1, h1, x2, y2, h2, color, opacity) {
+        if (h1 <= 0 && h2 <= 0) return;
+        svg.appendChild(svgEl('path', {
+            d: sankeyPath(x1, y1, y1 + Math.max(0.5, h1), x2, y2, y2 + Math.max(0.5, h2)),
+            fill: color, opacity: opacity || '0.25'
+        }));
+    }
+
     function renderStats() {
         if (!statsViewDirty) return;
         statsViewDirty = false;
@@ -900,152 +926,230 @@
         while (svg.firstChild) svg.removeChild(svg.firstChild);
         svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
 
-        // Count transactions at each status.
-        var counts = {};
-        for (var s = 0; s < SANKEY_STAGES.length; s++) counts[SANKEY_STAGES[s]] = 0;
-        counts.rejected = 0;
-        txs.forEach(function(ev) {
-            if (counts.hasOwnProperty(ev.newStatus)) counts[ev.newStatus]++;
-        });
         var total = txs.size;
-
         if (total === 0) {
-            var t = svgEl('text', {
-                x: W / 2, y: H / 2, 'text-anchor': 'middle',
-                fill: '#888', 'font-size': '14', 'font-family': 'inherit'
-            });
-            t.textContent = 'Waiting for transactions\u2026';
-            svg.appendChild(t);
+            drawLabel(svg, W / 2, H / 2, 'Waiting for transactions\u2026', 'middle', '#888', '14');
             return;
         }
 
-        // Title.
-        var title = svgEl('text', {
-            x: W / 2, y: 22, 'text-anchor': 'middle',
-            fill: '#888', 'font-size': '13', 'font-family': 'inherit'
-        });
-        title.textContent = 'Transaction Flow \u2014 ' + total.toLocaleString() + ' total';
-        svg.appendChild(title);
+        // -----------------------------------------------------------
+        // Classify every transaction by path and current status.
+        // -----------------------------------------------------------
+        // Path categories:
+        //   private:     first seen at 'included' or 'finalized'
+        //   requested:   went through 'requested' (normal fetch cycle)
+        //   unsolicited: reached 'received'+ without being requested
+        //   pending:     still at 'announced', path not yet determined
+        //
+        // For each path, count txs at each current status.
+        var counts = { announced: 0, requested: 0, received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0 };
+        var reqPath  = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0 };
+        var unsolPath = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0 };
+        var privatePath = { included: 0, finalized: 0 };
 
-        // Compute cumulative flow through each stage.
-        // Each tx at status S implies it passed through all prior stages.
-        // Rejected txs branch off from "received" (pool validation rejection).
-        var nodeValues = [];  // total flow through each stage
-        var linkValues = [];  // flow from stage[i] to stage[i+1]
-        var remaining = total;
-        for (var i = 0; i < SANKEY_STAGES.length; i++) {
-            nodeValues.push(remaining);
-            if (i === 2) remaining -= counts.rejected;  // branch to rejected
-            remaining -= counts[SANKEY_STAGES[i]];
-            if (i < SANKEY_STAGES.length - 1) {
-                linkValues.push(Math.max(0, remaining));
+        txs.forEach(function(ev) {
+            var s = ev.newStatus;
+            if (counts.hasOwnProperty(s)) counts[s]++;
+
+            // Private: first seen already included in chain.
+            if (ev._firstStatus === 'included' || ev._firstStatus === 'finalized') {
+                if (s === 'included') privatePath.included++;
+                if (s === 'finalized') privatePath.finalized++;
+                return;
             }
-        }
+            // Still at announced or requested — path undetermined.
+            if (s === 'announced' || s === 'requested') return;
 
-        // Layout.
-        var PAD = { top: 50, bottom: 50, left: 90, right: 70 };
+            // At received+ (including rejected).
+            if (ev._wasRequested) {
+                if (reqPath.hasOwnProperty(s)) reqPath[s]++;
+            } else {
+                if (unsolPath.hasOwnProperty(s)) unsolPath[s]++;
+            }
+        });
+
+        var nPrivate = privatePath.included + privatePath.finalized;
+        var nAnnounced = counts.announced;  // pending at announced
+        var nRequested = counts.requested;  // pending at requested
+
+        // Total entering the requested node = at requested + all req-path beyond.
+        var reqTotal = nRequested + reqPath.received + reqPath.pooled + reqPath.included + reqPath.finalized + reqPath.rejected;
+
+        // Total unsolicited reaching received+.
+        var unsolTotal = unsolPath.received + unsolPath.pooled + unsolPath.included + unsolPath.finalized + unsolPath.rejected;
+
+        // Non-private total entering announced.
+        var announcedTotal = total - nPrivate;
+
+        // Flows from received onward (merge both paths).
+        var atReceived = reqPath.received + unsolPath.received;
+        var nRejected = reqPath.rejected + unsolPath.rejected;
+        var receivedTotal = reqTotal - nRequested + unsolTotal;  // all that reached received
+        var toPooled = receivedTotal - atReceived - nRejected;
+        var atPooled = reqPath.pooled + unsolPath.pooled;
+        var toIncluded = toPooled - atPooled;
+        var includedTotal = toIncluded + nPrivate;
+        var atIncluded = reqPath.included + unsolPath.included + privatePath.included;
+        var toFinalized = includedTotal - atIncluded;
+
+        // -----------------------------------------------------------
+        // Layout
+        // -----------------------------------------------------------
+        var PAD = { top: 60, bottom: 60, left: 90, right: 70 };
         var NODE_W = 16;
-        var mainH = H - PAD.bottom;  // reserve bottom for rejected
         var availW = W - PAD.left - PAD.right - NODE_W;
-        var availH = mainH - PAD.top - 40; // extra room for labels
-        var colGap = availW / (SANKEY_STAGES.length - 1);
-        var scale = availH / Math.max(1, total);
+        var availH = H - PAD.top - PAD.bottom - 40;
+        var colGap = availW / 5;  // 6 main columns (0..5)
+        var scale = availH / Math.max(1, announcedTotal || total);
 
-        // Position main nodes (centered vertically in the available area).
-        var nodes = [];
-        for (var i = 0; i < SANKEY_STAGES.length; i++) {
-            var h = Math.max(2, nodeValues[i] * scale);
-            nodes.push({
-                x: PAD.left + i * colGap,
-                y: PAD.top + (availH - h) / 2,
-                w: NODE_W,
-                h: h,
-                key: SANKEY_STAGES[i]
-            });
+        // Minimum visible height for nonzero flows.
+        function sh(v) { return v > 0 ? Math.max(2, v * scale) : 0; }
+
+        // Column x positions.
+        function colX(c) { return PAD.left + c * colGap; }
+        var yTop = PAD.top;
+
+        // -----------------------------------------------------------
+        // Position main nodes (top-aligned for smooth flow).
+        // -----------------------------------------------------------
+        var annH  = sh(announcedTotal);
+        var reqH  = sh(reqTotal);
+        var rcvH  = sh(receivedTotal);
+        var poolH = sh(toPooled);
+        var inclH = sh(includedTotal);
+        var finH  = sh(toFinalized);
+
+        var annNode  = { x: colX(0), y: yTop, h: annH };
+        var reqNode  = { x: colX(1), y: yTop, h: reqH };
+        var rcvNode  = { x: colX(2), y: yTop, h: rcvH };
+        var poolNode = { x: colX(3), y: yTop, h: poolH };
+        var inclNode = { x: colX(4), y: yTop, h: inclH };
+        var finNode  = { x: colX(5), y: yTop, h: finH };
+
+        // -----------------------------------------------------------
+        // Draw links (back to front).
+        // -----------------------------------------------------------
+        // 1. Announced → Requested (top portion of announced).
+        if (reqTotal > 0) {
+            drawLink(svg, annNode.x + NODE_W, yTop, sh(reqTotal),
+                     reqNode.x, yTop, reqH,
+                     SANKEY_COLORS.requested);
         }
 
-        // Draw links between consecutive main stages.
-        for (var i = 0; i < linkValues.length; i++) {
-            if (linkValues[i] <= 0) continue;
-            var n0 = nodes[i], n1 = nodes[i + 1];
-            var path = svgEl('path', {
-                d: sankeyPath(n0.x + NODE_W, n0.y, n0.y + n1.h, n1.x, n1.y, n1.y + n1.h),
-                fill: SANKEY_COLORS[SANKEY_STAGES[i]], opacity: '0.25'
-            });
-            svg.appendChild(path);
+        // 2. Announced → Received (unsolicited, below requested flow).
+        if (unsolTotal > 0) {
+            var unsolSrcY = yTop + sh(reqTotal);
+            var unsolTgtY = yTop + sh(reqTotal - nRequested); // below requested-path incoming
+            drawLink(svg, annNode.x + NODE_W, unsolSrcY, sh(unsolTotal),
+                     rcvNode.x, unsolTgtY, sh(unsolTotal),
+                     SANKEY_COLORS.unsolicited);
         }
 
-        // Draw rejected branch (from received node).
-        if (counts.rejected > 0) {
-            var srcNode = nodes[2]; // received
-            var rejH = Math.max(2, counts.rejected * scale);
-            var linkSrcY = srcNode.y + linkValues[2] * scale; // below the pooled-flow portion
-
-            // Position rejected node below the main flow, between received and pooled.
-            var rejX = PAD.left + 2.5 * colGap;
-            var rejY = srcNode.y + srcNode.h + 40;
-            if (rejY + rejH > H - 20) rejY = H - 20 - rejH; // clamp to viewport
-
-            // Link.
-            var path = svgEl('path', {
-                d: sankeyPath(srcNode.x + NODE_W, linkSrcY, linkSrcY + rejH, rejX, rejY, rejY + rejH),
-                fill: SANKEY_COLORS.rejected, opacity: '0.25'
-            });
-            svg.appendChild(path);
-
-            // Node.
-            svg.appendChild(svgEl('rect', {
-                x: rejX, y: rejY, width: NODE_W, height: rejH,
-                fill: SANKEY_COLORS.rejected, rx: '2'
-            }));
-
-            // Label.
-            var rl = svgEl('text', {
-                x: rejX + NODE_W + 6, y: rejY + rejH / 2,
-                'dominant-baseline': 'central', fill: '#e0e0e0',
-                'font-size': '11', 'font-family': 'inherit'
-            });
-            rl.textContent = 'Rejected';
-            svg.appendChild(rl);
-
-            // Count.
-            var rc = svgEl('text', {
-                x: rejX + NODE_W + 6, y: rejY + rejH / 2 + 14,
-                'dominant-baseline': 'central', fill: '#888',
-                'font-size': '10', 'font-family': 'inherit'
-            });
-            rc.textContent = counts.rejected.toLocaleString();
-            svg.appendChild(rc);
+        // 3. Requested → Received (requested path that reached received).
+        var reqToRcv = reqTotal - nRequested;
+        if (reqToRcv > 0) {
+            drawLink(svg, reqNode.x + NODE_W, yTop, sh(reqToRcv),
+                     rcvNode.x, yTop, sh(reqToRcv),
+                     SANKEY_COLORS.requested);
         }
 
+        // 4. Received → Pooled.
+        if (toPooled > 0) {
+            drawLink(svg, rcvNode.x + NODE_W, yTop, sh(toPooled),
+                     poolNode.x, yTop, poolH,
+                     SANKEY_COLORS.received);
+        }
+
+        // 5. Pooled → Included.
+        if (toIncluded > 0) {
+            drawLink(svg, poolNode.x + NODE_W, yTop, sh(toIncluded),
+                     inclNode.x, yTop, sh(toIncluded),
+                     SANKEY_COLORS.pooled);
+        }
+
+        // 6. Included → Finalized.
+        if (toFinalized > 0) {
+            drawLink(svg, inclNode.x + NODE_W, yTop, sh(toFinalized),
+                     finNode.x, yTop, finH,
+                     SANKEY_COLORS.included);
+        }
+
+        // 7. Received → Rejected (branch down).
+        if (nRejected > 0) {
+            var rejSrcY = yTop + sh(toPooled);
+            var rejBarH = sh(nRejected);
+            var rejX = colX(2.5);
+            var rejY = Math.max(rcvNode.y + rcvNode.h + 30, yTop + availH * 0.7);
+            if (rejY + rejBarH > H - 30) rejY = H - 30 - rejBarH;
+
+            drawLink(svg, rcvNode.x + NODE_W, rejSrcY, rejBarH,
+                     rejX, rejY, rejBarH,
+                     SANKEY_COLORS.rejected);
+            // Rejected node.
+            drawNode(svg, rejX, rejY, NODE_W, rejBarH, SANKEY_COLORS.rejected);
+            drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 - 6,
+                      'Rejected', 'start', '#e0e0e0');
+            drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 8,
+                      nRejected.toLocaleString(), 'start', '#888', '10');
+        }
+
+        // 8. Private → Included (from below).
+        if (nPrivate > 0) {
+            var privBarH = sh(nPrivate);
+            var privX = colX(3.5);
+            var privY = Math.max(inclNode.y + inclNode.h + 30, yTop + availH * 0.7);
+            if (privY + privBarH > H - 30) privY = H - 30 - privBarH;
+
+            var privTgtY = yTop + sh(toIncluded); // enters below pooled-flow at included
+            drawLink(svg, privX + NODE_W, privY, privBarH,
+                     inclNode.x, privTgtY, privBarH,
+                     SANKEY_COLORS.private);
+            // Private node.
+            drawNode(svg, privX, privY, NODE_W, privBarH, SANKEY_COLORS.private);
+            drawLabel(svg, privX + NODE_W + 6, privY + privBarH / 2 - 6,
+                      'Private', 'start', '#e0e0e0');
+            drawLabel(svg, privX + NODE_W + 6, privY + privBarH / 2 + 8,
+                      nPrivate.toLocaleString(), 'start', '#888', '10');
+        }
+
+        // -----------------------------------------------------------
         // Draw main nodes and labels.
-        for (var i = 0; i < nodes.length; i++) {
-            var n = nodes[i];
+        // -----------------------------------------------------------
+        var mainNodes = [
+            { n: annNode,  key: 'announced',  label: 'Announced',  count: nAnnounced },
+            { n: reqNode,  key: 'requested',  label: 'Requested',  count: nRequested },
+            { n: rcvNode,  key: 'received',   label: 'Received',   count: atReceived },
+            { n: poolNode, key: 'pooled',     label: 'Pooled',     count: atPooled },
+            { n: inclNode, key: 'included',   label: 'Included',   count: atIncluded },
+            { n: finNode,  key: 'finalized',  label: 'Finalized',  count: toFinalized },
+        ];
 
-            // Node rectangle.
-            svg.appendChild(svgEl('rect', {
-                x: n.x, y: n.y, width: n.w, height: Math.max(2, n.h),
-                fill: SANKEY_COLORS[n.key], rx: '2'
-            }));
-
-            // Stage label above.
-            var label = svgEl('text', {
-                x: n.x + n.w / 2, y: n.y - 10,
-                'text-anchor': 'middle', fill: '#e0e0e0',
-                'font-size': '11', 'font-family': 'inherit'
-            });
-            label.textContent = SANKEY_LABELS[n.key];
-            svg.appendChild(label);
-
-            // Count at this stage below.
-            var countLabel = svgEl('text', {
-                x: n.x + n.w / 2, y: n.y + n.h + 16,
-                'text-anchor': 'middle', fill: '#888',
-                'font-size': '10', 'font-family': 'inherit'
-            });
-            countLabel.textContent = counts[n.key].toLocaleString();
-            svg.appendChild(countLabel);
+        for (var i = 0; i < mainNodes.length; i++) {
+            var m = mainNodes[i];
+            if (m.n.h <= 0) continue;
+            drawNode(svg, m.n.x, m.n.y, NODE_W, m.n.h, SANKEY_COLORS[m.key]);
+            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y - 12, m.label, 'middle', '#e0e0e0');
+            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
+                      m.count.toLocaleString(), 'middle', '#888', '10');
         }
+
+        // -----------------------------------------------------------
+        // Annotation: unsolicited vs requested flow labels.
+        // -----------------------------------------------------------
+        if (reqTotal > 0 && unsolTotal > 0) {
+            // Label on the requested path (above the flow).
+            var midReqX = (annNode.x + NODE_W + reqNode.x) / 2;
+            drawLabel(svg, midReqX, yTop - 4, 'requested', 'middle', '#00838f', '9');
+            // Label on the unsolicited path (below it).
+            var midUnsolX = (annNode.x + NODE_W + rcvNode.x) / 2;
+            var unsolLabelY = yTop + sh(reqTotal) + sh(unsolTotal) / 2;
+            drawLabel(svg, midUnsolX, unsolLabelY, 'unsolicited', 'middle', '#78909c', '9');
+        }
+
+        // Title.
+        drawLabel(svg, W / 2, 20,
+                  'Transaction Flow \u2014 ' + total.toLocaleString() + ' total',
+                  'middle', '#888', '13');
     }
 
     // Re-render stats on window resize.
