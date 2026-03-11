@@ -287,6 +287,15 @@ Each node shows two labels:
 Forward flows (left to right) are filled bands connecting consecutive states.
 Terminal states (Rejected, Dropped) branch downward from their source.
 
+**Included → Finalized flow conservation**: The Finalized node and the band
+from Included are sized to equal the Included inflow, not just the
+already-finalized count. This reflects that finalization is guaranteed for
+included transactions (barring reorgs). Without this, the Finalized node
+would appear much smaller than Included because finalization happens in
+batches every ~6.4 minutes while inclusion happens every ~12 seconds. A
+"N pending" label below the Finalized node shows how many included
+transactions are waiting for the next finalization batch.
+
 **Backward links** visualize reorgs (Included → Pooled). These are drawn as
 dashed amber arcs below the main flow, labeled with the reorg count. The
 `_reorgCount` field on each tx event tracks how many times that transaction

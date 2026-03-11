@@ -1376,7 +1376,7 @@
         if (toIncluded < 0) toIncluded = 0;
         var includedTotal = toIncluded + nPrivate;
         var atIncluded = reqPath.included + unsolPath.included + privatePath.included;
-        var toFinalized = includedTotal - atIncluded;
+        var toFinalized = includedTotal;  // everything included will finalize (conservation)
 
         // -----------------------------------------------------------
         // Layout
@@ -1558,31 +1558,28 @@
             { n: rcvNode,  key: 'received',   label: 'Received',   now: atReceived,        cum: cumReceived },
             { n: poolNode, key: 'pooled',     label: 'Pooled',     now: atPooled,          cum: cumPooled },
             { n: inclNode, key: 'included',   label: 'Included',   now: atIncluded,        cum: cumIncluded },
-            { n: finNode,  key: 'finalized',  label: 'Finalized',  now: counts.finalized,  cum: cumFinalized, sink: true },
+            { n: finNode,  key: 'finalized',  label: 'Finalized',  now: counts.finalized,  cum: cumFinalized },
         ];
+        var pendingFinalization = atIncluded;  // txs at Included waiting for finalization
 
         for (var i = 0; i < mainNodes.length; i++) {
             var m = mainNodes[i];
             if (m.n.h <= 0) continue;
             drawNode(svg, m.n.x, m.n.y, NODE_W, m.n.h, SANKEY_COLORS[m.key]);
             drawLabel(svg, m.n.x + NODE_W / 2, m.n.y - 12, m.label, 'middle', '#e0e0e0');
-            if (m.sink) {
-                // Sink states: show cumulative total as primary label.
-                drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
-                          m.cum.toLocaleString() + ' total', 'middle', '#888', '10');
-                if (m.now !== m.cum) {
-                    drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
-                              m.now.toLocaleString() + ' now', 'middle', '#555', '9');
-                }
-            } else {
-                // Transit states: show current count as primary label.
-                drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
-                          m.now.toLocaleString() + ' now', 'middle', '#888', '10');
-                if (m.cum !== m.now) {
-                    drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
-                              m.cum.toLocaleString() + ' total', 'middle', '#555', '9');
-                }
+            // Transit states: show current count as primary label.
+            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
+                      m.now.toLocaleString() + ' now', 'middle', '#888', '10');
+            if (m.cum !== m.now) {
+                drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
+                          m.cum.toLocaleString() + ' total', 'middle', '#555', '9');
             }
+        }
+        // Show pending finalization count below the Finalized node.
+        if (pendingFinalization > 0 && finNode.h > 0) {
+            var pendY = finNode.y + finNode.h + (cumFinalized !== counts.finalized ? 38 : 26);
+            drawLabel(svg, finNode.x + NODE_W / 2, pendY,
+                      pendingFinalization.toLocaleString() + ' pending', 'middle', '#b0860a', '9');
         }
 
         // -----------------------------------------------------------
