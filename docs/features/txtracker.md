@@ -345,6 +345,13 @@ peers' finalized). Auto-refreshes every 3 seconds
 when the tab is active. Uses the same virtual scroll infrastructure as Feed
 and Top panes.
 
+Clicking a peer row opens a **detail panel** on the right (same pattern as
+the transaction detail panels in Feed and Top views). The panel displays all
+raw counters, per-peer percentages, and network share percentages. It uses
+cached `peersData` (no additional RPC call) and auto-refreshes when new data
+arrives. The resize handle and close button reuse the existing detail panel
+CSS and JS infrastructure.
+
 ### Usage
 
 #### Building

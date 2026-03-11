@@ -53,6 +53,7 @@
     let peersLastFetch = 0;
     let peersTotalIncluded = 0;   // sum of Included across all peers
     let peersTotalFinalized = 0;  // sum of Finalized across all peers
+    let selectedPeer = null;
 
     // --- Type filter state (shared across all panes) ---
     let typeFilter = new Set([0, 1, 2, 3, 4]);
@@ -109,6 +110,8 @@
     const peersScrollSpacer = document.getElementById('peers-scroll-spacer');
     const peersRowContainer = document.getElementById('peers-row-container');
     const peersTableHeader = document.getElementById('peers-table-header');
+    const peersDetailPanel = document.getElementById('peers-detail-panel');
+    const peersDetailContent = document.getElementById('peers-detail-content');
 
     // --- Init ---
     fetch('/config')
@@ -960,6 +963,64 @@
         closeDetail(topDetailPanel);
     });
 
+    // --- Peer detail panel ---
+
+    function selectPeer(peer) {
+        selectedPeer = peer;
+        scheduleRender();
+
+        peersDetailPanel.classList.add('visible');
+
+        var s = peersData[peer];
+        if (!s) {
+            peersDetailContent.innerHTML = '<p>Peer not found</p>';
+            return;
+        }
+        renderPeerDetail(peer, s, peersDetailContent);
+    }
+
+    function closePeerDetail() {
+        peersDetailPanel.classList.remove('visible');
+        selectedPeer = null;
+        scheduleRender();
+    }
+
+    peersDetailPanel.querySelector('.detail-close').addEventListener('click', function() {
+        closePeerDetail();
+    });
+
+    function renderPeerDetail(peer, s, container) {
+        var delivered = s.Delivered || 0;
+        var announced = s.Announced || 0;
+        var useful = s.UsefulDelivery || 0;
+        var first = s.FirstAnnouncer || 0;
+        var included = s.Included || 0;
+        var finalized = s.Finalized || 0;
+
+        var fields = [
+            ['Peer ID', peer],
+            ['Announced', formatNumber(announced)],
+            ['Delivered', formatNumber(delivered)],
+            ['Useful Deliveries', formatNumber(useful)],
+            ['First Announcements', formatNumber(first)],
+            ['Included', formatNumber(included)],
+            ['Finalized', formatNumber(finalized)],
+            ['Useful %', delivered ? (useful / delivered * 100).toFixed(1) + '%' : '-'],
+            ['1st Announce %', announced ? (first / announced * 100).toFixed(1) + '%' : '-'],
+            ['Included %', delivered ? (included / delivered * 100).toFixed(1) + '%' : '-'],
+            ['Finalized %', delivered ? (finalized / delivered * 100).toFixed(1) + '%' : '-'],
+            ['Included Share', peersTotalIncluded ? (included / peersTotalIncluded * 100).toFixed(1) + '%' : '-'],
+            ['Finalized Share', peersTotalFinalized ? (finalized / peersTotalFinalized * 100).toFixed(1) + '%' : '-'],
+        ];
+
+        var html = '';
+        for (var i = 0; i < fields.length; i++) {
+            html += '<div class="field"><label>' + escapeHtml(fields[i][0]) +
+                    '</label><div class="value">' + escapeHtml(String(fields[i][1])) + '</div></div>';
+        }
+        container.innerHTML = html;
+    }
+
     function renderDetail(hash, info, container) {
         var base = parseTS(info.FirstSeen);
         var fields = [
@@ -1056,6 +1117,9 @@
             peersData = result;
             peersLastFetch = Date.now();
             peersViewDirty = true;
+            if (selectedPeer && peersData[selectedPeer]) {
+                renderPeerDetail(selectedPeer, peersData[selectedPeer], peersDetailContent);
+            }
             scheduleRender();
         });
     }
@@ -1195,6 +1259,13 @@
             cols[10].textContent = s.Delivered ? ((s.Finalized || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
             cols[11].textContent = peersTotalIncluded ? ((s.Included || 0) / peersTotalIncluded * 100).toFixed(1) + '%' : '-';
             cols[12].textContent = peersTotalFinalized ? ((s.Finalized || 0) / peersTotalFinalized * 100).toFixed(1) + '%' : '-';
+
+            r.onclick = (function(p) { return function() { selectPeer(p); }; })(entry.peer);
+            if (entry.peer === selectedPeer) {
+                r.classList.add('selected');
+            } else {
+                r.classList.remove('selected');
+            }
         }
     }
 
