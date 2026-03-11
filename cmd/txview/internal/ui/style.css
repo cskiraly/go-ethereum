@@ -239,7 +239,9 @@ header h1 {
 .peers-col-useful-pct     { width: 90px;  flex-shrink: 0; text-align: right; }
 .peers-col-first-pct      { width: 90px;  flex-shrink: 0; text-align: right; }
 .peers-col-included-pct   { width: 100px; flex-shrink: 0; text-align: right; }
-.peers-col-finalized-pct  { width: 100px; flex-shrink: 0; text-align: right; }
+.peers-col-finalized-pct    { width: 100px; flex-shrink: 0; text-align: right; }
+.peers-col-included-share   { width: 100px; flex-shrink: 0; text-align: right; }
+.peers-col-finalized-share  { width: 100px; flex-shrink: 0; text-align: right; }
 
 /* --- Column resize handles --- */
 .table-header > span {

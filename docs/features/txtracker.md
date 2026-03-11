@@ -300,7 +300,9 @@ Columns: Peer ID, Announced, Delivered, Useful (deliveries accepted into pool),
 1st Announce (times peer was first to announce), Included (delivered txs
 included on chain), Finalized (delivered txs finalized on chain), Useful %
 (UsefulDelivery / Delivered), 1st % (FirstAnnouncer / Announced), Included %
-(Included / Delivered), Finalized % (Finalized / Delivered). Auto-refreshes every 3 seconds
+(Included / Delivered), Finalized % (Finalized / Delivered), Incl Share
+(peer's included / all peers' included), Final Share (peer's finalized / all
+peers' finalized). Auto-refreshes every 3 seconds
 when the tab is active. Uses the same virtual scroll infrastructure as Feed
 and Top panes.
 

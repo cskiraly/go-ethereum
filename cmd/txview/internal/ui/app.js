@@ -45,6 +45,8 @@
     let peersSortKey = 'announced';
     let peersSortAsc = false;
     let peersLastFetch = 0;
+    let peersTotalIncluded = 0;   // sum of Included across all peers
+    let peersTotalFinalized = 0;  // sum of Finalized across all peers
 
     // --- Type filter state (shared across all panes) ---
     let typeFilter = new Set([0, 1, 2, 3, 4]);
@@ -244,7 +246,7 @@
     // Column order arrays — index = CSS order value.
     var feedColOrder = ['col-hash', 'col-status', 'col-peer', 'col-block', 'col-age', 'col-error', 'col-progress'];
     var topColOrder = ['top-col-hash', 'top-col-status', 'top-col-from', 'top-col-nonce', 'top-col-value', 'top-col-feecap', 'top-col-tipcap', 'top-col-gas', 'top-col-age', 'top-col-progress'];
-    var peersColOrder = ['peers-col-id', 'peers-col-announced', 'peers-col-delivered', 'peers-col-useful', 'peers-col-first', 'peers-col-included', 'peers-col-finalized', 'peers-col-useful-pct', 'peers-col-first-pct', 'peers-col-included-pct', 'peers-col-finalized-pct'];
+    var peersColOrder = ['peers-col-id', 'peers-col-announced', 'peers-col-delivered', 'peers-col-useful', 'peers-col-first', 'peers-col-included', 'peers-col-finalized', 'peers-col-useful-pct', 'peers-col-first-pct', 'peers-col-included-pct', 'peers-col-finalized-pct', 'peers-col-included-share', 'peers-col-finalized-share'];
 
     // Extract the column class (col-* or top-col-*) from an element.
     function getColClass(el) {
@@ -1057,6 +1059,14 @@
                 arr.push({peer: peer, stats: peersData[peer]});
             }
         }
+        var totalIncl = 0, totalFinal = 0;
+        for (var j = 0; j < arr.length; j++) {
+            totalIncl += arr[j].stats.Included || 0;
+            totalFinal += arr[j].stats.Finalized || 0;
+        }
+        peersTotalIncluded = totalIncl;
+        peersTotalFinalized = totalFinal;
+
         arr.sort(function(a, b) {
             var sa = a.stats, sb = b.stats;
             var cmp = 0;
@@ -1099,6 +1109,16 @@
                     var fzb = sb.Delivered ? (sb.Finalized || 0) / sb.Delivered : 0;
                     cmp = fza - fzb;
                     break;
+                case 'included-share':
+                    var isa = peersTotalIncluded ? (sa.Included || 0) / peersTotalIncluded : 0;
+                    var isb = peersTotalIncluded ? (sb.Included || 0) / peersTotalIncluded : 0;
+                    cmp = isa - isb;
+                    break;
+                case 'finalized-share':
+                    var fsa = peersTotalFinalized ? (sa.Finalized || 0) / peersTotalFinalized : 0;
+                    var fsb = peersTotalFinalized ? (sb.Finalized || 0) / peersTotalFinalized : 0;
+                    cmp = fsa - fsb;
+                    break;
             }
             return peersSortAsc ? cmp : -cmp;
         });
@@ -1140,7 +1160,9 @@
                 '<span class="peers-col-useful-pct"></span>' +
                 '<span class="peers-col-first-pct"></span>' +
                 '<span class="peers-col-included-pct"></span>' +
-                '<span class="peers-col-finalized-pct"></span>';
+                '<span class="peers-col-finalized-pct"></span>' +
+                '<span class="peers-col-included-share"></span>' +
+                '<span class="peers-col-finalized-share"></span>';
             peersRowContainer.appendChild(row);
         }
 
@@ -1163,6 +1185,8 @@
             cols[8].textContent = s.Announced ? ((s.FirstAnnouncer || 0) / s.Announced * 100).toFixed(1) + '%' : '-';
             cols[9].textContent = s.Delivered ? ((s.Included || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
             cols[10].textContent = s.Delivered ? ((s.Finalized || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
+            cols[11].textContent = peersTotalIncluded ? ((s.Included || 0) / peersTotalIncluded * 100).toFixed(1) + '%' : '-';
+            cols[12].textContent = peersTotalFinalized ? ((s.Finalized || 0) / peersTotalFinalized * 100).toFixed(1) + '%' : '-';
         }
     }
 
