@@ -38,6 +38,12 @@
     let cumDropped = 0;          // monotonic: total txs that ever entered dropped
     let cumFinalized = 0;        // monotonic: total txs that ever entered finalized
 
+    // --- Sankey smoothing state ---
+    let sankeySnapshots = [];        // ring buffer of periodic snapshots
+    const SNAPSHOT_INTERVAL = 12000; // 12 seconds (one Ethereum block)
+    const MAX_SNAPSHOTS = 7200;      // 24 hours at 12s intervals
+    let smoothingAlpha = 0;          // 0 = cumulative (default), 1 = most recent only
+
     // --- Peers view state ---
     let peersData = {};           // peer -> PeerStats from RPC
     let peersSorted = [];         // sorted [{peer, stats}] for rendering
@@ -1277,6 +1283,131 @@
         }));
     }
 
+    // Compute a snapshot of the current Sankey diagram data from txs.
+    function computeSankeySnapshot() {
+        var total = 0;
+        var counts = { announced: 0, requested: 0, received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
+        var reqPath  = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
+        var unsolPath = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
+        var privatePath = { included: 0, finalized: 0 };
+        var nReorged = 0;
+        var dropReasons = {};
+        var rejectReasons = {};
+
+        txs.forEach(function(ev) {
+            if (!typeFilter.has(ev._txType || 0)) return;
+            if (!showPrivate && isPrivateTx(ev)) return;
+            total++;
+            var s = ev.newStatus;
+            if (counts.hasOwnProperty(s)) counts[s]++;
+            nReorged += ev._reorgCount || 0;
+            if (ev._dropReason) {
+                dropReasons[ev._dropReason] = (dropReasons[ev._dropReason] || 0) + 1;
+            }
+            if (ev._rejectErr) {
+                var rk = normalizeRejectErr(ev._rejectErr);
+                rejectReasons[rk] = (rejectReasons[rk] || 0) + 1;
+            }
+            if (isPrivateTx(ev)) {
+                if (s === 'included') privatePath.included++;
+                if (s === 'finalized') privatePath.finalized++;
+                return;
+            }
+            if (s === 'announced' || s === 'requested') return;
+            if (ev._wasRequested) {
+                if (reqPath.hasOwnProperty(s)) reqPath[s]++;
+            } else {
+                if (unsolPath.hasOwnProperty(s)) unsolPath[s]++;
+            }
+        });
+
+        return {
+            ts: Date.now(),
+            total: total,
+            counts: counts,
+            reqPath: reqPath,
+            unsolPath: unsolPath,
+            privatePath: privatePath,
+            nReorged: nReorged,
+            dropReasons: dropReasons,
+            rejectReasons: rejectReasons,
+            cumRejected: cumRejected,
+            cumDropped: cumDropped,
+            cumFinalized: cumFinalized
+        };
+    }
+
+    // Deep-copy a snapshot object for smoothing accumulation.
+    function deepCopySnapshot(snap) {
+        var copy = {
+            ts: snap.ts,
+            total: snap.total,
+            counts: {},
+            reqPath: {},
+            unsolPath: {},
+            privatePath: {},
+            nReorged: snap.nReorged,
+            dropReasons: {},
+            rejectReasons: {},
+            cumRejected: snap.cumRejected,
+            cumDropped: snap.cumDropped,
+            cumFinalized: snap.cumFinalized
+        };
+        var k;
+        for (k in snap.counts) copy.counts[k] = snap.counts[k];
+        for (k in snap.reqPath) copy.reqPath[k] = snap.reqPath[k];
+        for (k in snap.unsolPath) copy.unsolPath[k] = snap.unsolPath[k];
+        for (k in snap.privatePath) copy.privatePath[k] = snap.privatePath[k];
+        for (k in snap.dropReasons) copy.dropReasons[k] = snap.dropReasons[k];
+        for (k in snap.rejectReasons) copy.rejectReasons[k] = snap.rejectReasons[k];
+        return copy;
+    }
+
+    // Blend snap into acc: acc.field = alpha * snap.field + (1-alpha) * acc.field.
+    function blendSnapshot(acc, snap, alpha) {
+        var oneMinusAlpha = 1 - alpha;
+        acc.total = alpha * snap.total + oneMinusAlpha * acc.total;
+        acc.nReorged = alpha * snap.nReorged + oneMinusAlpha * acc.nReorged;
+        acc.cumRejected = alpha * snap.cumRejected + oneMinusAlpha * acc.cumRejected;
+        acc.cumDropped = alpha * snap.cumDropped + oneMinusAlpha * acc.cumDropped;
+        acc.cumFinalized = alpha * snap.cumFinalized + oneMinusAlpha * acc.cumFinalized;
+
+        var k;
+        for (k in acc.counts) acc.counts[k] = alpha * (snap.counts[k] || 0) + oneMinusAlpha * acc.counts[k];
+        for (k in snap.counts) if (!(k in acc.counts)) acc.counts[k] = alpha * snap.counts[k];
+
+        for (k in acc.reqPath) acc.reqPath[k] = alpha * (snap.reqPath[k] || 0) + oneMinusAlpha * acc.reqPath[k];
+        for (k in snap.reqPath) if (!(k in acc.reqPath)) acc.reqPath[k] = alpha * snap.reqPath[k];
+
+        for (k in acc.unsolPath) acc.unsolPath[k] = alpha * (snap.unsolPath[k] || 0) + oneMinusAlpha * acc.unsolPath[k];
+        for (k in snap.unsolPath) if (!(k in acc.unsolPath)) acc.unsolPath[k] = alpha * snap.unsolPath[k];
+
+        for (k in acc.privatePath) acc.privatePath[k] = alpha * (snap.privatePath[k] || 0) + oneMinusAlpha * acc.privatePath[k];
+        for (k in snap.privatePath) if (!(k in acc.privatePath)) acc.privatePath[k] = alpha * snap.privatePath[k];
+
+        // Blend reason maps (collect all keys from both).
+        blendReasonMap(acc.dropReasons, snap.dropReasons, alpha, oneMinusAlpha);
+        blendReasonMap(acc.rejectReasons, snap.rejectReasons, alpha, oneMinusAlpha);
+    }
+
+    function blendReasonMap(accMap, snapMap, alpha, oneMinusAlpha) {
+        var k;
+        for (k in accMap) accMap[k] = alpha * (snapMap[k] || 0) + oneMinusAlpha * accMap[k];
+        for (k in snapMap) if (!(k in accMap)) accMap[k] = alpha * snapMap[k];
+    }
+
+    // Apply exponential smoothing across all snapshots.
+    function smoothSnapshots(snapshots, alpha) {
+        if (snapshots.length === 0) return null;
+        if (alpha === 0) return snapshots[snapshots.length - 1];
+
+        var acc = deepCopySnapshot(snapshots[0]);
+        for (var i = 1; i < snapshots.length; i++) {
+            blendSnapshot(acc, snapshots[i], alpha);
+        }
+        return acc;
+    }
+
     function renderStats() {
         if (!statsViewDirty) return;
         statsViewDirty = false;
@@ -1290,82 +1421,43 @@
         while (svg.firstChild) svg.removeChild(svg.firstChild);
         svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
 
-        var total = 0;
-        txs.forEach(function(ev) {
-            if (!typeFilter.has(ev._txType || 0)) return;
-            if (!showPrivate && isPrivateTx(ev)) return;
-            total++;
-        });
+        // -----------------------------------------------------------
+        // Get snapshot (live or smoothed).
+        // -----------------------------------------------------------
+        var snap;
+        if (smoothingAlpha > 0 && sankeySnapshots.length > 1) {
+            snap = smoothSnapshots(sankeySnapshots, smoothingAlpha);
+        } else {
+            snap = computeSankeySnapshot();
+        }
+
+        var total = snap.total;
         if (total === 0) {
             drawLabel(svg, W / 2, H / 2, 'Waiting for transactions\u2026', 'middle', '#888', '14');
             return;
         }
 
-        // -----------------------------------------------------------
-        // Classify every transaction by path and current status.
-        // -----------------------------------------------------------
-        // Path categories:
-        //   private:     first seen at 'included' or 'finalized'
-        //   requested:   went through 'requested' (normal fetch cycle)
-        //   unsolicited: reached 'received'+ without being requested
-        //   pending:     still at 'announced', path not yet determined
-        //
-        // For each path, count txs at each current status.
-        var counts = { announced: 0, requested: 0, received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
-        var reqPath  = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
-        var unsolPath = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
-        var privatePath = { included: 0, finalized: 0 };
-        var nReorged = 0;  // total reorg events (included → pooled)
-        var dropReasons = {}; // reason string -> count
-        var rejectReasons = {}; // reason string -> count
-
-        txs.forEach(function(ev) {
-            if (!typeFilter.has(ev._txType || 0)) return;
-            if (!showPrivate && isPrivateTx(ev)) return;
-            var s = ev.newStatus;
-            if (counts.hasOwnProperty(s)) counts[s]++;
-            nReorged += ev._reorgCount || 0;
-            // Cumulative reason breakdowns: count every tx that was ever
-            // dropped/rejected, not just those currently at that status.
-            if (ev._dropReason) {
-                dropReasons[ev._dropReason] = (dropReasons[ev._dropReason] || 0) + 1;
-            }
-            if (ev._rejectErr) {
-                var rk = normalizeRejectErr(ev._rejectErr);
-                rejectReasons[rk] = (rejectReasons[rk] || 0) + 1;
-            }
-
-            // Private: first seen already included in chain.
-            if (isPrivateTx(ev)) {
-                if (s === 'included') privatePath.included++;
-                if (s === 'finalized') privatePath.finalized++;
-                return;
-            }
-            // Still at announced or requested — path undetermined.
-            if (s === 'announced' || s === 'requested') return;
-
-            // At received+ (including rejected).
-            if (ev._wasRequested) {
-                if (reqPath.hasOwnProperty(s)) reqPath[s]++;
-            } else {
-                if (unsolPath.hasOwnProperty(s)) unsolPath[s]++;
-            }
-        });
+        var counts = snap.counts;
+        var reqPath = snap.reqPath;
+        var unsolPath = snap.unsolPath;
+        var privatePath = snap.privatePath;
+        var nReorged = snap.nReorged;
+        var dropReasons = snap.dropReasons;
+        var rejectReasons = snap.rejectReasons;
 
         var nPrivate = privatePath.included + privatePath.finalized;
-        var nAnnounced = counts.announced;  // pending at announced
-        var nRequested = counts.requested;  // pending at requested
+        var nAnnounced = counts.announced;
+        var nRequested = counts.requested;
 
-        // Total entering the requested node = at requested + all req-path beyond.
         var reqTotal = nRequested + reqPath.received + reqPath.pooled + reqPath.included + reqPath.finalized + reqPath.rejected + reqPath.dropped;
-
-        // Total unsolicited reaching received+.
         var unsolTotal = unsolPath.received + unsolPath.pooled + unsolPath.included + unsolPath.finalized + unsolPath.rejected + unsolPath.dropped;
-
-        // Non-private total entering announced.
         var announcedTotal = total - nPrivate;
 
-        // Flows from received onward (merge both paths).
+        // Use snapshot's cumulative values (smoothed when α > 0).
+        var snapCumRejected = snap.cumRejected;
+        var snapCumDropped = snap.cumDropped;
+        var snapCumFinalized = snap.cumFinalized;
+
         var atReceived = reqPath.received + unsolPath.received;
         var nRejected = reqPath.rejected + unsolPath.rejected;
         var nDropped = reqPath.dropped + unsolPath.dropped;
@@ -1476,18 +1568,18 @@
             drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 - 6,
                       'Rejected', 'start', '#e0e0e0');
             drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 8,
-                      cumRejected.toLocaleString() + ' total', 'start', '#888', '10');
-            if (counts.rejected !== cumRejected) {
+                      Math.round(snapCumRejected).toLocaleString() + ' total', 'start', '#888', '10');
+            if (Math.round(counts.rejected) !== Math.round(snapCumRejected)) {
                 drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 20,
-                          counts.rejected.toLocaleString() + ' now', 'start', '#555', '9');
+                          Math.round(counts.rejected).toLocaleString() + ' now', 'start', '#555', '9');
             }
             // Show reject reason breakdown (one line per reason).
             var rejReasonKeys = Object.keys(rejectReasons).sort(function(a, b) { return rejectReasons[b] - rejectReasons[a]; });
             if (rejReasonKeys.length > 0) {
-                var rejBaseY = rejY + rejBarH / 2 + (counts.rejected !== cumRejected ? 32 : 20);
+                var rejBaseY = rejY + rejBarH / 2 + (Math.round(counts.rejected) !== Math.round(snapCumRejected) ? 32 : 20);
                 for (var ri = 0; ri < rejReasonKeys.length; ri++) {
                     drawLabel(svg, rejX + NODE_W + 6, rejBaseY + ri * 12,
-                              rejectReasons[rejReasonKeys[ri]] + ' ' + rejReasonKeys[ri], 'start', '#777', '9');
+                              Math.round(rejectReasons[rejReasonKeys[ri]]) + ' ' + rejReasonKeys[ri], 'start', '#777', '9');
                 }
             }
         }
@@ -1508,18 +1600,18 @@
             drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 - 6,
                       'Dropped', 'start', '#e0e0e0');
             drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 8,
-                      cumDropped.toLocaleString() + ' total', 'start', '#888', '10');
-            if (counts.dropped !== cumDropped) {
+                      Math.round(snapCumDropped).toLocaleString() + ' total', 'start', '#888', '10');
+            if (Math.round(counts.dropped) !== Math.round(snapCumDropped)) {
                 drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 20,
-                          counts.dropped.toLocaleString() + ' now', 'start', '#555', '9');
+                          Math.round(counts.dropped).toLocaleString() + ' now', 'start', '#555', '9');
             }
             // Show drop reason breakdown (one line per reason).
             var reasonKeys = Object.keys(dropReasons).sort(function(a, b) { return dropReasons[b] - dropReasons[a]; });
             if (reasonKeys.length > 0) {
-                var baseY = dropY + dropBarH / 2 + (counts.dropped !== cumDropped ? 32 : 20);
+                var baseY = dropY + dropBarH / 2 + (Math.round(counts.dropped) !== Math.round(snapCumDropped) ? 32 : 20);
                 for (var ri = 0; ri < reasonKeys.length; ri++) {
                     drawLabel(svg, dropX + NODE_W + 6, baseY + ri * 12,
-                              dropReasons[reasonKeys[ri]] + ' ' + reasonKeys[ri], 'start', '#777', '9');
+                              Math.round(dropReasons[reasonKeys[ri]]) + ' ' + reasonKeys[ri], 'start', '#777', '9');
                 }
             }
         }
@@ -1540,7 +1632,7 @@
             drawLabel(svg, privX - 6, privY + privBarH / 2 - 6,
                       'Private', 'end', '#e0e0e0');
             drawLabel(svg, privX - 6, privY + privBarH / 2 + 8,
-                      nPrivate.toLocaleString() + ' total', 'end', '#888', '10');
+                      Math.round(nPrivate).toLocaleString() + ' total', 'end', '#888', '10');
         }
 
         // -----------------------------------------------------------
@@ -1558,7 +1650,7 @@
             { n: rcvNode,  key: 'received',   label: 'Received',   now: atReceived,        cum: cumReceived },
             { n: poolNode, key: 'pooled',     label: 'Pooled',     now: atPooled,          cum: cumPooled },
             { n: inclNode, key: 'included',   label: 'Included',   now: atIncluded,        cum: cumIncluded },
-            { n: finNode,  key: 'finalized',  label: 'Finalized',  now: counts.finalized,  cum: cumFinalized },
+            { n: finNode,  key: 'finalized',  label: 'Finalized',  now: counts.finalized,  cum: snapCumFinalized },
         ];
         var pendingFinalization = atIncluded;  // txs at Included waiting for finalization
 
@@ -1569,17 +1661,17 @@
             drawLabel(svg, m.n.x + NODE_W / 2, m.n.y - 12, m.label, 'middle', '#e0e0e0');
             // Transit states: show current count as primary label.
             drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
-                      m.now.toLocaleString() + ' now', 'middle', '#888', '10');
-            if (m.cum !== m.now) {
+                      Math.round(m.now).toLocaleString() + ' now', 'middle', '#888', '10');
+            if (Math.round(m.cum) !== Math.round(m.now)) {
                 drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
-                          m.cum.toLocaleString() + ' total', 'middle', '#555', '9');
+                          Math.round(m.cum).toLocaleString() + ' total', 'middle', '#555', '9');
             }
         }
         // Show pending finalization count below the Finalized node.
         if (pendingFinalization > 0 && finNode.h > 0) {
-            var pendY = finNode.y + finNode.h + (cumFinalized !== counts.finalized ? 38 : 26);
+            var pendY = finNode.y + finNode.h + (Math.round(snapCumFinalized) !== Math.round(counts.finalized) ? 38 : 26);
             drawLabel(svg, finNode.x + NODE_W / 2, pendY,
-                      pendingFinalization.toLocaleString() + ' pending', 'middle', '#b0860a', '9');
+                      Math.round(pendingFinalization).toLocaleString() + ' pending', 'middle', '#b0860a', '9');
         }
 
         // -----------------------------------------------------------
@@ -1618,7 +1710,7 @@
 
         // Title.
         drawLabel(svg, W / 2, 20,
-                  'Transaction Flow \u2014 ' + total.toLocaleString() + ' total',
+                  'Transaction Flow \u2014 ' + Math.round(total).toLocaleString() + ' total',
                   'middle', '#888', '13');
     }
 
@@ -1694,6 +1786,30 @@
         if (activeTab === 'stats') fetchEvictionStats();
         if (activeTab === 'peers' && Date.now() - peersLastFetch >= 3000) fetchPeersData();
     }, 5000);
+
+    // Snapshot Sankey data every 12 seconds for exponential smoothing.
+    setInterval(function() {
+        if (txs.size === 0) return;
+        var snap = computeSankeySnapshot();
+        sankeySnapshots.push(snap);
+        if (sankeySnapshots.length > MAX_SNAPSHOTS) sankeySnapshots.shift();
+        if (activeTab === 'stats' && smoothingAlpha > 0) {
+            statsViewDirty = true;
+            scheduleRender();
+        }
+    }, SNAPSHOT_INTERVAL);
+
+    // Smoothing slider wiring.
+    var smoothingSlider = document.getElementById('smoothing-slider');
+    var smoothingValueLabel = document.getElementById('smoothing-value');
+    if (smoothingSlider) {
+        smoothingSlider.addEventListener('input', function() {
+            smoothingAlpha = parseInt(this.value) / 100;
+            smoothingValueLabel.textContent = this.value + '%';
+            statsViewDirty = true;
+            scheduleRender();
+        });
+    }
 
     // Re-render stats on window resize.
     window.addEventListener('resize', function() {

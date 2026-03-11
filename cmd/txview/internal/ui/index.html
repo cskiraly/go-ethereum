@@ -143,6 +143,7 @@
                 <label title="SetCode (type 4)"><input type="checkbox" value="4" checked>4</label>
             </div>
             <label class="private-toggle" title="Show transactions first seen in a block (not via mempool)"><input type="checkbox" class="private-cb" checked>Private</label>
+            <label class="smoothing-label" title="Exponential smoothing coefficient. 0% = cumulative totals (no smoothing). 100% = only the most recent 12-second window.">Smoothing <input type="range" id="smoothing-slider" min="0" max="100" value="0"><span id="smoothing-value">0%</span></label>
         </div>
         <div class="stats-area">
             <svg id="sankey-svg"></svg>

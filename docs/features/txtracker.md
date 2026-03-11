@@ -301,6 +301,36 @@ dashed amber arcs below the main flow, labeled with the reorg count. The
 `_reorgCount` field on each tx event tracks how many times that transaction
 was reverted from included back to the pool.
 
+##### Exponential Smoothing
+
+By default (slider at 0%), the Sankey diagram shows cumulative all-time counts
+from page load. Over long sessions, early events dominate and the diagram stops
+reflecting current behavior. A **Smoothing** slider (0–100%) in the Stats
+filter bar controls exponential smoothing over time-bucketed snapshots.
+
+**Snapshots**: Every 12 seconds (one Ethereum block), the current status
+distribution is captured into a ring buffer capped at 7,200 entries (24 hours).
+Each snapshot records the same data as the Sankey counting loop: per-status
+counts, per-path breakdowns, reorg counts, reason maps, and cumulative totals.
+
+**Smoothing formula**: Given snapshots S[0]…S[n] (oldest to newest) and
+coefficient α = slider/100:
+```
+V[0] = S[0]
+V[i] = α × S[i] + (1 − α) × V[i−1]
+```
+At α=0 (default): V[n] = S[0] ≈ cumulative totals (no smoothing).
+At α=1: V[n] = S[n] = only the most recent 12-second window.
+
+Smoothing applies to all numeric fields independently, including per-reason
+breakdown maps. Fractional smoothed values work fine for band sizing; display
+labels are rounded.
+
+**Implementation**: `computeSankeySnapshot()` extracts the counting loop from
+`renderStats()`. `smoothSnapshots()` iterates oldest→newest applying the blend.
+`renderStats()` uses the smoothed snapshot when α > 0 and snapshots exist,
+otherwise uses a live snapshot (current behavior).
+
 #### Peers Pane
 
 Sortable table showing per-peer transaction contribution statistics. Fetches

@@ -344,6 +344,18 @@ header h1 {
 /* Loading indicator for top rows awaiting fetch */
 .top-loading { color: #555; font-style: italic; }
 
+/* --- Smoothing slider --- */
+.smoothing-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #999;
+    margin-left: 12px;
+}
+#smoothing-slider { width: 100px; }
+#smoothing-value { min-width: 28px; }
+
 /* --- Stats view --- */
 .stats-area {
     flex: 1;
