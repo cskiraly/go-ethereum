@@ -1331,7 +1331,8 @@
                 dropReasons[ev._dropReason] = (dropReasons[ev._dropReason] || 0) + 1;
             }
             if (ev._rejectErr) {
-                rejectReasons[ev._rejectErr] = (rejectReasons[ev._rejectErr] || 0) + 1;
+                var rk = normalizeRejectErr(ev._rejectErr);
+                rejectReasons[rk] = (rejectReasons[rk] || 0) + 1;
             }
 
             // Private: first seen already included in chain.
@@ -1769,6 +1770,15 @@
         if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
         if (n >= 1e3) return (n / 1e3).toFixed(0) + 'k';
         return String(n);
+    }
+
+    // Normalize reject error strings for grouping. Go-ethereum errors follow
+    // fmt.Errorf("%w: values...", baseErr, ...) — the base error before the
+    // first colon is the stable category, everything after has variable values.
+    function normalizeRejectErr(s) {
+        var idx = s.indexOf(':');
+        if (idx > 0) return s.substring(0, idx);
+        return s;
     }
 
     var STATUS_ORD = {announced:1, requested:2, received:3, pooled:4, included:5, finalized:6, rejected:7, dropped:8};
