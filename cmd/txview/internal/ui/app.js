@@ -153,6 +153,7 @@
         document.getElementById(id).addEventListener('change', function() {
             typeFilter = getCheckedTypes(id);
             syncTypeCheckboxes(id);
+            sankeySnapshots.length = 0;
             feedViewDirty = true;
             topViewDirty = true;
             statsViewDirty = true;
@@ -171,6 +172,7 @@
         privateCbs[pi].addEventListener('change', function(e) {
             showPrivate = e.target.checked;
             syncPrivateCbs(e.target);
+            sankeySnapshots.length = 0;
             feedViewDirty = true;
             topViewDirty = true;
             statsViewDirty = true;
