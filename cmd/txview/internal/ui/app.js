@@ -153,7 +153,6 @@
         document.getElementById(id).addEventListener('change', function() {
             typeFilter = getCheckedTypes(id);
             syncTypeCheckboxes(id);
-            sankeySnapshots.length = 0;
             feedViewDirty = true;
             topViewDirty = true;
             statsViewDirty = true;
@@ -172,7 +171,6 @@
         privateCbs[pi].addEventListener('change', function(e) {
             showPrivate = e.target.checked;
             syncPrivateCbs(e.target);
-            sankeySnapshots.length = 0;
             feedViewDirty = true;
             topViewDirty = true;
             statsViewDirty = true;
@@ -1356,58 +1354,90 @@
         }));
     }
 
-    // Compute a snapshot of the current Sankey diagram data from txs.
-    function computeSankeySnapshot() {
-        var total = 0;
-        var counts = { announced: 0, requested: 0, received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
-        var reqPath  = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
-        var unsolPath = { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 };
-        var privatePath = { included: 0, finalized: 0 };
-        var nReorged = 0;
-        var dropReasons = {};
-        var rejectReasons = {};
-
+    // Compute an unfiltered snapshot bucketed by (txType, isPrivate).
+    // Filters are applied at render time via filterSnapshot().
+    function computeRawSnapshot() {
+        var buckets = {};
         txs.forEach(function(ev) {
-            if (!typeFilter.has(ev._txType || 0)) return;
-            if (!showPrivate && isPrivateTx(ev)) return;
-            total++;
+            var type = ev._txType || 0;
+            var priv = isPrivateTx(ev) ? 1 : 0;
+            var key = type + ':' + priv;
+            var b = buckets[key];
+            if (!b) {
+                b = buckets[key] = {
+                    total: 0,
+                    counts: { announced: 0, requested: 0, received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
+                    reqPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
+                    unsolPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
+                    privatePath: { included: 0, finalized: 0 },
+                    nReorged: 0, dropReasons: {}, rejectReasons: {},
+                    cumRejected: 0, cumDropped: 0, cumFinalized: 0
+                };
+            }
+            b.total++;
             var s = ev.newStatus;
-            if (counts.hasOwnProperty(s)) counts[s]++;
-            nReorged += ev._reorgCount || 0;
+            if (b.counts.hasOwnProperty(s)) b.counts[s]++;
+            b.nReorged += ev._reorgCount || 0;
             if (ev._dropReason) {
-                dropReasons[ev._dropReason] = (dropReasons[ev._dropReason] || 0) + 1;
+                b.dropReasons[ev._dropReason] = (b.dropReasons[ev._dropReason] || 0) + 1;
+                b.cumDropped++;
             }
             if (ev._rejectErr) {
                 var rk = normalizeRejectErr(ev._rejectErr);
-                rejectReasons[rk] = (rejectReasons[rk] || 0) + 1;
+                b.rejectReasons[rk] = (b.rejectReasons[rk] || 0) + 1;
+                b.cumRejected++;
             }
-            if (isPrivateTx(ev)) {
-                if (s === 'included') privatePath.included++;
-                if (s === 'finalized') privatePath.finalized++;
+            b.cumFinalized = b.counts.finalized;
+            if (priv) {
+                if (s === 'included') b.privatePath.included++;
+                if (s === 'finalized') b.privatePath.finalized++;
                 return;
             }
             if (s === 'announced' || s === 'requested') return;
             if (ev._wasRequested) {
-                if (reqPath.hasOwnProperty(s)) reqPath[s]++;
+                if (b.reqPath.hasOwnProperty(s)) b.reqPath[s]++;
             } else {
-                if (unsolPath.hasOwnProperty(s)) unsolPath[s]++;
+                if (b.unsolPath.hasOwnProperty(s)) b.unsolPath[s]++;
             }
         });
+        return { ts: Date.now(), buckets: buckets };
+    }
 
-        return {
-            ts: Date.now(),
-            total: total,
-            counts: counts,
-            reqPath: reqPath,
-            unsolPath: unsolPath,
-            privatePath: privatePath,
-            nReorged: nReorged,
-            dropReasons: dropReasons,
-            rejectReasons: rejectReasons,
-            cumRejected: cumRejected,
-            cumDropped: cumDropped,
-            cumFinalized: cumFinalized
+    // Aggregate matching buckets from a raw snapshot into a flat snapshot.
+    function filterSnapshot(raw, tf, sp) {
+        var r = {
+            ts: raw.ts, total: 0,
+            counts: { announced: 0, requested: 0, received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
+            reqPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
+            unsolPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
+            privatePath: { included: 0, finalized: 0 },
+            nReorged: 0, dropReasons: {}, rejectReasons: {},
+            cumRejected: 0, cumDropped: 0, cumFinalized: 0
         };
+        for (var key in raw.buckets) {
+            var parts = key.split(':');
+            if (!tf.has(parseInt(parts[0]))) continue;
+            if (!sp && parts[1] === '1') continue;
+            var b = raw.buckets[key];
+            r.total += b.total;
+            r.nReorged += b.nReorged;
+            r.cumRejected += b.cumRejected;
+            r.cumDropped += b.cumDropped;
+            r.cumFinalized += b.cumFinalized;
+            var k;
+            for (k in b.counts) r.counts[k] = (r.counts[k] || 0) + b.counts[k];
+            for (k in b.reqPath) r.reqPath[k] = (r.reqPath[k] || 0) + b.reqPath[k];
+            for (k in b.unsolPath) r.unsolPath[k] = (r.unsolPath[k] || 0) + b.unsolPath[k];
+            for (k in b.privatePath) r.privatePath[k] = (r.privatePath[k] || 0) + b.privatePath[k];
+            for (k in b.dropReasons) r.dropReasons[k] = (r.dropReasons[k] || 0) + b.dropReasons[k];
+            for (k in b.rejectReasons) r.rejectReasons[k] = (r.rejectReasons[k] || 0) + b.rejectReasons[k];
+        }
+        return r;
+    }
+
+    // Convenience: compute a filtered snapshot from live data.
+    function computeSankeySnapshot() {
+        return filterSnapshot(computeRawSnapshot(), typeFilter, showPrivate);
     }
 
     // Deep-copy a snapshot object for smoothing accumulation.
@@ -1505,7 +1535,12 @@
         // -----------------------------------------------------------
         var snap;
         if (smoothingAlpha > 0 && sankeySnapshots.length > 1) {
-            snap = smoothSnapshots(sankeySnapshots, smoothingAlpha);
+            // Filter each raw snapshot with current settings, then smooth.
+            var filtered = [];
+            for (var si = 0; si < sankeySnapshots.length; si++) {
+                filtered.push(filterSnapshot(sankeySnapshots[si], typeFilter, showPrivate));
+            }
+            snap = smoothSnapshots(filtered, smoothingAlpha);
         } else {
             snap = computeSankeySnapshot();
         }
@@ -1866,10 +1901,10 @@
     }, 5000);
 
     // Snapshot Sankey data every 12 seconds for exponential smoothing.
+    // Stores unfiltered (bucketed) snapshots; filters applied at render time.
     setInterval(function() {
         if (txs.size === 0) return;
-        var snap = computeSankeySnapshot();
-        sankeySnapshots.push(snap);
+        sankeySnapshots.push(computeRawSnapshot());
         if (sankeySnapshots.length > MAX_SNAPSHOTS) sankeySnapshots.shift();
         if (activeTab === 'stats' && smoothingAlpha > 0) {
             statsViewDirty = true;
