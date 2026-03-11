@@ -525,6 +525,7 @@
             ev._txType = ev.txType || old._txType || 0;
             ev.peer = ev.peer || old.peer;
             ev._dropReason = ev.dropReason || old._dropReason;
+            ev._rejectErr = ev.rejectErr || old._rejectErr;
             // Track backward transition: included → pooled (reorg).
             if (old.newStatus === 'included' && ev.newStatus === 'pooled') {
                 ev._reorgCount++;
@@ -536,6 +537,7 @@
             ev._reorgCount = 0;
             ev._txType = ev.txType || 0;
             ev._dropReason = ev.dropReason || '';
+            ev._rejectErr = ev.rejectErr || '';
         }
         txs.set(hash, ev);
         incrementCounter(ev.newStatus);
@@ -1323,11 +1325,13 @@
             var s = ev.newStatus;
             if (counts.hasOwnProperty(s)) counts[s]++;
             nReorged += ev._reorgCount || 0;
-            if (s === 'dropped' && ev._dropReason) {
+            // Cumulative reason breakdowns: count every tx that was ever
+            // dropped/rejected, not just those currently at that status.
+            if (ev._dropReason) {
                 dropReasons[ev._dropReason] = (dropReasons[ev._dropReason] || 0) + 1;
             }
-            if (s === 'rejected' && ev.rejectErr) {
-                rejectReasons[ev.rejectErr] = (rejectReasons[ev.rejectErr] || 0) + 1;
+            if (ev._rejectErr) {
+                rejectReasons[ev._rejectErr] = (rejectReasons[ev._rejectErr] || 0) + 1;
             }
 
             // Private: first seen already included in chain.
