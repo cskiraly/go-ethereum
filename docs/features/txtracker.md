@@ -314,22 +314,26 @@ Each snapshot records the same data as the Sankey counting loop: per-status
 counts, per-path breakdowns, reorg counts, reason maps, and cumulative totals.
 
 **Smoothing formula**: Given snapshots S[0]…S[n] (oldest to newest) and
-coefficient α = slider/100:
+coefficient α = slider/100, the blend iterates oldest→newest with the slider
+value controlling how much history is retained:
 ```
 V[0] = S[0]
-V[i] = α × S[i] + (1 − α) × V[i−1]
+V[i] = (1 − α) × S[i] + α × V[i−1]
 ```
-At α=0 (default): V[n] = S[0] ≈ cumulative totals (no smoothing).
-At α=1: V[n] = S[n] = only the most recent 12-second window.
+At α=0 (default): each snapshot fully replaces the accumulator, so
+V[n] = S[n] = newest snapshot ≈ cumulative totals. This ensures a smooth
+continuous transition from 0% (no smoothing, live data) to small values.
+At α=1: the accumulator never updates, V[n] = S[0] = oldest snapshot.
 
 Smoothing applies to all numeric fields independently, including per-reason
 breakdown maps. Fractional smoothed values work fine for band sizing; display
 labels are rounded.
 
 **Implementation**: `computeSankeySnapshot()` extracts the counting loop from
-`renderStats()`. `smoothSnapshots()` iterates oldest→newest applying the blend.
-`renderStats()` uses the smoothed snapshot when α > 0 and snapshots exist,
-otherwise uses a live snapshot (current behavior).
+`renderStats()`. `smoothSnapshots()` iterates oldest→newest, passing `1 − α`
+as the blend weight to invert the slider semantics. `renderStats()` uses the
+smoothed snapshot when α > 0 and snapshots exist, otherwise uses a live
+snapshot (current behavior, no smoothing overhead).
 
 #### Peers Pane
 

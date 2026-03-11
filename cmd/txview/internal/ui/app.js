@@ -1468,13 +1468,19 @@
     }
 
     // Apply exponential smoothing across all snapshots.
+    // Iterates oldest→newest with the blend weight inverted from the slider:
+    //   acc = (1−α)·S[i] + α·acc
+    // At α=0: each S[i] fully replaces acc → result = S[newest] = cumulative.
+    // At α=1: acc never updates → result = S[oldest] = earliest snapshot.
+    // This gives a smooth transition from cumulative (0%) to time-decayed (100%).
     function smoothSnapshots(snapshots, alpha) {
         if (snapshots.length === 0) return null;
-        if (alpha === 0) return snapshots[snapshots.length - 1];
+        if (snapshots.length === 1) return deepCopySnapshot(snapshots[0]);
 
         var acc = deepCopySnapshot(snapshots[0]);
         for (var i = 1; i < snapshots.length; i++) {
-            blendSnapshot(acc, snapshots[i], alpha);
+            // blend with (1-alpha) as the weight for the new snapshot
+            blendSnapshot(acc, snapshots[i], 1 - alpha);
         }
         return acc;
     }
