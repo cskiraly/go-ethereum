@@ -1773,10 +1773,9 @@
             // Label on the requested path (above the flow).
             var midReqX = (annNode.x + NODE_W + reqNode.x) / 2;
             drawLabel(svg, midReqX, yTop - 4, 'requested', 'middle', '#00838f', '9');
-            // Label on the unsolicited path (below it).
-            var midUnsolX = (annNode.x + NODE_W + rcvNode.x) / 2;
+            // Label on the unsolicited path (below requested label).
             var unsolLabelY = yTop + sh(reqTotal) + sh(unsolTotal) / 2;
-            drawLabel(svg, midUnsolX, unsolLabelY, 'unsolicited', 'middle', '#78909c', '9');
+            drawLabel(svg, midReqX, unsolLabelY, 'unsolicited', 'middle', '#78909c', '9');
         }
 
         // Title.
