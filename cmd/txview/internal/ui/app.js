@@ -1476,15 +1476,14 @@
                 drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 20,
                           counts.rejected.toLocaleString() + ' now', 'start', '#555', '9');
             }
-            // Show reject reason breakdown.
+            // Show reject reason breakdown (one line per reason).
             var rejReasonKeys = Object.keys(rejectReasons).sort(function(a, b) { return rejectReasons[b] - rejectReasons[a]; });
             if (rejReasonKeys.length > 0) {
-                var rejParts = [];
-                for (var ri = 0; ri < rejReasonKeys.length; ri++) {
-                    rejParts.push(rejectReasons[rejReasonKeys[ri]] + ' ' + rejReasonKeys[ri]);
-                }
                 var rejBaseY = rejY + rejBarH / 2 + (counts.rejected !== cumRejected ? 32 : 20);
-                drawLabel(svg, rejX + NODE_W + 6, rejBaseY, rejParts.join(', '), 'start', '#777', '9');
+                for (var ri = 0; ri < rejReasonKeys.length; ri++) {
+                    drawLabel(svg, rejX + NODE_W + 6, rejBaseY + ri * 12,
+                              rejectReasons[rejReasonKeys[ri]] + ' ' + rejReasonKeys[ri], 'start', '#777', '9');
+                }
             }
         }
 
@@ -1509,15 +1508,14 @@
                 drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 20,
                           counts.dropped.toLocaleString() + ' now', 'start', '#555', '9');
             }
-            // Show drop reason breakdown.
+            // Show drop reason breakdown (one line per reason).
             var reasonKeys = Object.keys(dropReasons).sort(function(a, b) { return dropReasons[b] - dropReasons[a]; });
             if (reasonKeys.length > 0) {
-                var parts = [];
-                for (var ri = 0; ri < reasonKeys.length; ri++) {
-                    parts.push(dropReasons[reasonKeys[ri]] + ' ' + reasonKeys[ri]);
-                }
                 var baseY = dropY + dropBarH / 2 + (counts.dropped !== cumDropped ? 32 : 20);
-                drawLabel(svg, dropX + NODE_W + 6, baseY, parts.join(', '), 'start', '#777', '9');
+                for (var ri = 0; ri < reasonKeys.length; ri++) {
+                    drawLabel(svg, dropX + NODE_W + 6, baseY + ri * 12,
+                              dropReasons[reasonKeys[ri]] + ' ' + reasonKeys[ri], 'start', '#777', '9');
+                }
             }
         }
 
