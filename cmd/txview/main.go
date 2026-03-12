@@ -18,6 +18,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,7 +28,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/ethereum/go-ethereum/cmd/txview/internal/ui"
 	"github.com/ethereum/go-ethereum/internal/flags"
@@ -105,7 +108,7 @@ func run(ctx *cli.Context) error {
 		}
 		wsURL := scheme + "://" + r.Host + "/ws"
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"rpcEndpoint": wsURL,
 		})
 	})
@@ -129,10 +132,24 @@ func run(ctx *cli.Context) error {
 	}
 	http.Handle("/", http.FileServerFS(assets))
 
+	srv := &http.Server{Addr: addr}
+
 	fmt.Printf("txview listening on http://%s\n", addr)
 	fmt.Printf("  Geth RPC: %s (proxied at /ws)\n", endpoint)
 	fmt.Println("  Ensure geth is started with: --ws --ws.api txtracker")
 	fmt.Println()
 
-	return http.ListenAndServe(addr, nil)
+	// Graceful shutdown on SIGINT/SIGTERM.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Println("\nShutting down...")
+		srv.Shutdown(context.Background())
+	}()
+
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		return err
+	}
+	return nil
 }

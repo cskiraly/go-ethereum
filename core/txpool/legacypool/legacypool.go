@@ -1084,7 +1084,7 @@ func (pool *LegacyPool) Has(hash common.Hash) bool {
 // which could lead to a premature release of the lock.
 //
 // Returns the number of transactions removed from the pending queue.
-func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool, unreserve bool, reason ...string) int {
+func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool, unreserve bool, reason string) int {
 	// Fetch the transaction we wish to delete
 	tx := pool.all.Get(hash)
 	if tx == nil {
@@ -1108,11 +1108,7 @@ func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool, unreserve bo
 	}
 	// Remove it from the list of known transactions
 	pool.all.Remove(hash)
-	r := ""
-	if len(reason) > 0 {
-		r = reason[0]
-	}
-	pool.trackRemoved(hash, r)
+	pool.trackRemoved(hash, reason)
 	if outofbound {
 		pool.priced.Removed(1)
 	}
@@ -1270,7 +1266,7 @@ func (pool *LegacyPool) runReorg(done chan struct{}, reset *txpoolResetRequest, 
 					return true
 				})
 				for _, hash := range hashes {
-					pool.removeTx(hash, true, true)
+					pool.removeTx(hash, true, true, "gas limit exceeded")
 				}
 			}
 		}

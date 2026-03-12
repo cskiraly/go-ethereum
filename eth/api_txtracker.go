@@ -71,7 +71,9 @@ func (api *TxTrackerAPI) Events(ctx context.Context) (*rpc.Subscription, error) 
 		for {
 			select {
 			case ev := <-events:
-				notifier.Notify(rpcSub.ID, ev)
+				if err := notifier.Notify(rpcSub.ID, ev); err != nil {
+					return
+				}
 			case <-rpcSub.Err():
 				return
 			}

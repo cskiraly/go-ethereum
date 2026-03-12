@@ -640,6 +640,16 @@ link-drawing code.
 - Added missing `TxRequested` entry to `TestStatusString` test table.
 - Removed hardcoded `MaxEntries: 262144` and `Clock: mclock.System{}` from
   handler.go; `txtracker.New` already applies these defaults when zero/nil.
+- Changed `legacypool.removeTx` `reason` from variadic `...string` to required
+  `string` parameter. Added missing reason `"gas limit exceeded"` for the Osaka
+  gas cap removal path.
+- Replaced custom `itoa`/`containsSubstring` in `helpers_test.go` with
+  `strconv.Itoa`/`strings.Contains` from stdlib.
+- Added graceful shutdown (SIGINT/SIGTERM) to `cmd/txview/main.go`.
+- Handle `notifier.Notify` error in `api_txtracker.go` Events subscription.
+- Use single `now` variable in `checkFinalization` instead of calling
+  `time.Now()` per iteration.
+- Explicitly discard `json.Encoder.Encode` error in `/config` handler.
 
 ## Future Work
 

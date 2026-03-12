@@ -17,6 +17,8 @@
 package ui
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/dop251/goja"
@@ -101,7 +103,7 @@ func TestJSMsDelta(t *testing.T) {
 	}
 	for _, tt := range tests {
 		expr := "(function() { var b = new Date(1000000); var t = new Date(1000000 + " +
-			itoa(tt.deltaMs) + "); return txviewHelpers.msDelta(t, b); })()"
+			strconv.Itoa(tt.deltaMs) + "); return txviewHelpers.msDelta(t, b); })()"
 		got := callHelper(t, vm, expr)
 		if got != tt.want {
 			t.Errorf("msDelta(%dms): got %q, want %q", tt.deltaMs, got, tt.want)
@@ -197,8 +199,8 @@ func TestJSBuildTxFields(t *testing.T) {
 		{22, "Announcers", "peer1, peer2"},
 	}
 	for _, c := range checks {
-		label := callHelper(t, vm, "testFields["+itoa(c.index)+"][0]")
-		value := callHelper(t, vm, "String(testFields["+itoa(c.index)+"][1])")
+		label := callHelper(t, vm, "testFields["+strconv.Itoa(c.index)+"][0]")
+		value := callHelper(t, vm, "String(testFields["+strconv.Itoa(c.index)+"][1])")
 		if label != c.label {
 			t.Errorf("field %d label: got %q, want %q", c.index, label, c.label)
 		}
@@ -249,7 +251,7 @@ func TestJSFormatTS(t *testing.T) {
 		t.Errorf("formatTS with base: got %q, expected non-empty with delta", got)
 	}
 	// Check that the delta suffix is included.
-	if !containsSubstring(got, "(+5.3s)") {
+	if !strings.Contains(got, "(+5.3s)") {
 		t.Errorf("formatTS with base: got %q, expected to contain '(+5.3s)'", got)
 	}
 
@@ -258,48 +260,13 @@ func TestJSFormatTS(t *testing.T) {
 	if got == "-" {
 		t.Errorf("formatTS(valid, null): got '-', want formatted time")
 	}
-	if containsSubstring(got, "(+") {
+	if strings.Contains(got, "(+") {
 		t.Errorf("formatTS without base should not have delta suffix, got %q", got)
 	}
-}
-
-// itoa converts an int to a string (avoids importing strconv for a test helper).
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	s := ""
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	for n > 0 {
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
 }
 
 // jsString returns a JS string literal for the given Go string.
 func jsString(s string) string {
 	// Simple escaping for test inputs (no backslashes or single quotes expected).
 	return "'" + s + "'"
-}
-
-// containsSubstring checks if s contains sub.
-func containsSubstring(s, sub string) bool {
-	return len(s) >= len(sub) && searchSubstring(s, sub)
-}
-
-func searchSubstring(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

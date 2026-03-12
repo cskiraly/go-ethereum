@@ -953,11 +953,12 @@ func (t *Tracker) checkFinalization() {
 	log.Debug("Finalization advancing", "old", t.lastFinalNum, "new", finalNum)
 	t.lastFinalNum = finalNum
 
+	now := time.Now()
 	var count int
 	for hash, rec := range t.txs {
 		if rec.status == TxIncluded && rec.blockNum <= finalNum {
 			rec.status = TxFinalized
-			rec.finalized = time.Now()
+			rec.finalized = now
 			t.touchLRU(rec)
 			t.emitEvent(hash, TxIncluded, TxFinalized, rec, "")
 			txFinalizedMeter.Mark(1)
