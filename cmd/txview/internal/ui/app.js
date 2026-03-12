@@ -714,8 +714,8 @@
             var cols = r.children;
             cols[0].textContent = shortHash(hash);
             cols[0].title = hash;
-            cols[1].textContent = ev.newStatus;
-            cols[1].className = 'col-status badge badge-' + ev.newStatus;
+            cols[1].innerHTML = renderLampStrip(ev);
+            cols[1].className = 'col-status';
             cols[2].textContent = ev.peer || '-';
             cols[3].textContent = ev.blockNum || '-';
             cols[4].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
@@ -859,9 +859,9 @@
             cols[0].textContent = shortHash(hash);
             cols[0].title = hash;
 
-            // Status from event (always available).
-            cols[1].textContent = ev.newStatus;
-            cols[1].className = 'top-col-status badge badge-' + ev.newStatus;
+            // Status lamp strip from event (always available).
+            cols[1].innerHTML = renderLampStrip(ev);
+            cols[1].className = 'top-col-status';
 
             if (cached) {
                 var info = cached.info;
@@ -1037,6 +1037,56 @@
 
     function renderDetail(hash, info, container) {
         txviewHelpers.renderFields(txviewHelpers.buildTxFields(hash, info), container);
+    }
+
+    // ========================================================================
+    // Lamp strip (lifecycle state indicators, from event data only)
+    // ========================================================================
+    var LAMP_DEFS = [
+        ['A',  'announced', 1],
+        ['Rq', 'requested', 2],
+        ['Rv', 'received',  3],
+        ['P',  'pooled',    4],
+        ['I',  'included',  5],
+        ['F',  'finalized', 6]
+    ];
+
+    function renderLampStrip(ev) {
+        var current = ev.newStatus;
+        var currentOrd = statusOrd(current);
+        var firstOrd = statusOrd(ev._firstStatus) || currentOrd;
+
+        // For terminal states, determine the highest happy-path state reached.
+        var happyOrd = currentOrd;
+        if (current === 'rejected') happyOrd = 3; // branched after received
+        if (current === 'dropped')  happyOrd = 4; // branched after pooled
+
+        var parts = [];
+        for (var i = 0; i < LAMP_DEFS.length; i++) {
+            var abbr = LAMP_DEFS[i][0];
+            var key  = LAMP_DEFS[i][1];
+            var ord  = LAMP_DEFS[i][2];
+
+            var lit = (ord >= firstOrd && ord <= happyOrd);
+            // Requested lamp only lights if the tx actually passed through it.
+            if (key === 'requested' && !ev._wasRequested) lit = false;
+
+            var cls = 'lamp';
+            if (lit) {
+                cls += ' lamp-lit-' + key;
+                if (key === current) cls += ' lamp-current';
+            }
+            parts.push('<span class="' + cls + '">' + abbr + '</span>');
+        }
+
+        // Append terminal lamp if in a terminal state.
+        if (current === 'rejected') {
+            parts.push('<span class="lamp lamp-lit-rejected lamp-current">Rej</span>');
+        } else if (current === 'dropped') {
+            parts.push('<span class="lamp lamp-lit-dropped lamp-current">Dr</span>');
+        }
+
+        return '<span class="lamp-strip">' + parts.join('') + '</span>';
     }
 
     // ========================================================================

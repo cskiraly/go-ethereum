@@ -588,6 +588,19 @@ Type 0 serves double duty as both "legacy" and "type not yet known" (e.g.,
 announced but metadata not yet received). This is acceptable since legacy
 transactions are genuinely type 0.
 
+## Status Lamp Strip
+
+The Feed and Top views show transaction lifecycle state as a row of colored
+lamp indicators rather than a single badge. Each lamp represents a happy-path
+state (A→Rq→Rv→P→I→F) and lights up when the transaction has passed through
+it. Terminal states (Rej, Dr) appear as an additional lamp at the end.
+
+Lamp lit/dim state is inferred from event data only (no RPC):
+- `_firstStatus` determines the entry point (e.g., local txs start at pooled)
+- `_wasRequested` controls the Rq lamp independently
+- For rejected/dropped, the happy-path lamps light up to received/pooled
+  respectively, then the terminal lamp is appended with emphasis styling.
+
 ## Code Quality: Shared Helpers
 
 ### helpers.js

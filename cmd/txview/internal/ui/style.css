@@ -209,7 +209,7 @@ header h1 {
 
 /* --- Feed view columns --- */
 .col-hash   { width: 180px; flex-shrink: 0; }
-.col-status { width: 90px;  flex-shrink: 0; }
+.col-status { width: 170px; flex-shrink: 0; }
 .col-peer   { width: 140px; flex-shrink: 0; }
 .col-block  { width: 90px;  flex-shrink: 0; }
 .col-age    { width: 70px;  flex-shrink: 0; }
@@ -218,7 +218,7 @@ header h1 {
 
 /* --- Top view columns --- */
 .top-col-hash    { width: 150px; flex-shrink: 0; }
-.top-col-status  { width: 80px;  flex-shrink: 0; }
+.top-col-status  { width: 170px; flex-shrink: 0; }
 .top-col-from    { width: 130px; flex-shrink: 0; }
 .top-col-nonce   { width: 70px;  flex-shrink: 0; text-align: right; }
 .top-col-value   { width: 100px; flex-shrink: 0; text-align: right; }
@@ -314,6 +314,40 @@ header h1 {
 .badge-finalized  { background: #6a1b9a; color: #e1bee7; }
 .badge-rejected   { background: #c62828; color: #ffcdd2; }
 .badge-dropped    { background: #e65100; color: #ffe0b2; }
+
+/* --- Lamp strip (lifecycle state indicators) --- */
+.lamp-strip {
+    display: inline-flex;
+    gap: 2px;
+    align-items: center;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 18px;
+}
+
+.lamp {
+    display: inline-block;
+    padding: 0 3px;
+    border-radius: 2px;
+    text-align: center;
+    min-width: 18px;
+    background: #2a2a2a;
+    color: #555;
+}
+
+.lamp-lit-announced  { background: #555;    color: #ccc; }
+.lamp-lit-requested  { background: #00838f; color: #b2ebf2; }
+.lamp-lit-received   { background: #1565c0; color: #bbdefb; }
+.lamp-lit-pooled     { background: #f57f17; color: #fff8e1; }
+.lamp-lit-included   { background: #2e7d32; color: #c8e6c9; }
+.lamp-lit-finalized  { background: #6a1b9a; color: #e1bee7; }
+.lamp-lit-rejected   { background: #c62828; color: #ffcdd2; }
+.lamp-lit-dropped    { background: #e65100; color: #ffe0b2; }
+
+.lamp-current {
+    box-shadow: 0 0 4px currentColor;
+    filter: brightness(1.3);
+}
 
 /* --- Progress pipeline --- */
 .progress {
