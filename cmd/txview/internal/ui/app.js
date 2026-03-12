@@ -42,7 +42,9 @@
     let sankeySnapshots = [];        // ring buffer of periodic snapshots
     const SNAPSHOT_INTERVAL = 12000; // 12 seconds (one Ethereum block)
     const MAX_SNAPSHOTS = 7200;      // 24 hours at 12s intervals
-    let smoothingAlpha = 0;          // 0 = cumulative (default), 1 = most recent only
+    let sankeyHalfLife = 0;          // 0 = cumulative, >0 = half-life in seconds, Infinity = simple avg
+    let sankeyRateMode = false;      // true when slider > 0
+    let emaState = null;             // { prevFlows, ema, ts } or null (needs recompute)
 
     // --- Peers view state ---
     let peersData = {};           // peer -> PeerStats from RPC
@@ -156,6 +158,7 @@
             feedViewDirty = true;
             topViewDirty = true;
             statsViewDirty = true;
+            emaState = null; // invalidate EMA — filters changed
             scheduleRender();
         });
     });
@@ -174,6 +177,7 @@
             feedViewDirty = true;
             topViewDirty = true;
             statsViewDirty = true;
+            emaState = null; // invalidate EMA — filter changed
             scheduleRender();
         });
     }
@@ -1440,81 +1444,166 @@
         return filterSnapshot(computeRawSnapshot(), typeFilter, showPrivate);
     }
 
-    // Deep-copy a snapshot object for smoothing accumulation.
-    function deepCopySnapshot(snap) {
-        var copy = {
-            ts: snap.ts,
+    // --- Rate-based EMA helpers ---
+
+    // Extract cumulative flow values from a filtered snapshot into a flat object.
+    function extractFlowValues(snap) {
+        return {
             total: snap.total,
-            counts: {},
-            reqPath: {},
-            unsolPath: {},
-            privatePath: {},
+            announced: snap.counts.announced,
+            requested: snap.counts.requested,
+            received: snap.counts.received,
+            pooled: snap.counts.pooled,
+            included: snap.counts.included,
+            finalized: snap.counts.finalized,
+            rejected: snap.counts.rejected,
+            dropped: snap.counts.dropped,
+            reqPipeline: snap.counts.requested + snap.reqPath.received + snap.reqPath.pooled + snap.reqPath.included + snap.reqPath.finalized + snap.reqPath.rejected + snap.reqPath.dropped,
+            unsolicited: snap.unsolPath.received + snap.unsolPath.pooled + snap.unsolPath.included + snap.unsolPath.finalized + snap.unsolPath.rejected + snap.unsolPath.dropped,
+            reqToReceived: (snap.counts.requested + snap.reqPath.received + snap.reqPath.pooled + snap.reqPath.included + snap.reqPath.finalized + snap.reqPath.rejected + snap.reqPath.dropped) - snap.counts.requested,
+            received_total: (snap.counts.requested + snap.reqPath.received + snap.reqPath.pooled + snap.reqPath.included + snap.reqPath.finalized + snap.reqPath.rejected + snap.reqPath.dropped) - snap.counts.requested + snap.unsolPath.received + snap.unsolPath.pooled + snap.unsolPath.included + snap.unsolPath.finalized + snap.unsolPath.rejected + snap.unsolPath.dropped,
+            toPooled: snap.reqPath.pooled + snap.reqPath.included + snap.reqPath.finalized + snap.reqPath.dropped + snap.unsolPath.pooled + snap.unsolPath.included + snap.unsolPath.finalized + snap.unsolPath.dropped,
+            nRejected: snap.reqPath.rejected + snap.unsolPath.rejected,
+            nDropped: snap.reqPath.dropped + snap.unsolPath.dropped,
+            private: snap.privatePath.included + snap.privatePath.finalized,
             nReorged: snap.nReorged,
-            dropReasons: {},
-            rejectReasons: {},
             cumRejected: snap.cumRejected,
             cumDropped: snap.cumDropped,
-            cumFinalized: snap.cumFinalized
+            cumFinalized: snap.cumFinalized,
+            // Per-reason maps (copy).
+            dropReasons: Object.assign({}, snap.dropReasons),
+            rejectReasons: Object.assign({}, snap.rejectReasons)
         };
-        var k;
-        for (k in snap.counts) copy.counts[k] = snap.counts[k];
-        for (k in snap.reqPath) copy.reqPath[k] = snap.reqPath[k];
-        for (k in snap.unsolPath) copy.unsolPath[k] = snap.unsolPath[k];
-        for (k in snap.privatePath) copy.privatePath[k] = snap.privatePath[k];
-        for (k in snap.dropReasons) copy.dropReasons[k] = snap.dropReasons[k];
-        for (k in snap.rejectReasons) copy.rejectReasons[k] = snap.rejectReasons[k];
-        return copy;
     }
 
-    // Blend snap into acc: acc.field = alpha * snap.field + (1-alpha) * acc.field.
-    function blendSnapshot(acc, snap, alpha) {
-        var oneMinusAlpha = 1 - alpha;
-        acc.total = alpha * snap.total + oneMinusAlpha * acc.total;
-        acc.nReorged = alpha * snap.nReorged + oneMinusAlpha * acc.nReorged;
-        acc.cumRejected = alpha * snap.cumRejected + oneMinusAlpha * acc.cumRejected;
-        acc.cumDropped = alpha * snap.cumDropped + oneMinusAlpha * acc.cumDropped;
-        acc.cumFinalized = alpha * snap.cumFinalized + oneMinusAlpha * acc.cumFinalized;
-
-        var k;
-        for (k in acc.counts) acc.counts[k] = alpha * (snap.counts[k] || 0) + oneMinusAlpha * acc.counts[k];
-        for (k in snap.counts) if (!(k in acc.counts)) acc.counts[k] = alpha * snap.counts[k];
-
-        for (k in acc.reqPath) acc.reqPath[k] = alpha * (snap.reqPath[k] || 0) + oneMinusAlpha * acc.reqPath[k];
-        for (k in snap.reqPath) if (!(k in acc.reqPath)) acc.reqPath[k] = alpha * snap.reqPath[k];
-
-        for (k in acc.unsolPath) acc.unsolPath[k] = alpha * (snap.unsolPath[k] || 0) + oneMinusAlpha * acc.unsolPath[k];
-        for (k in snap.unsolPath) if (!(k in acc.unsolPath)) acc.unsolPath[k] = alpha * snap.unsolPath[k];
-
-        for (k in acc.privatePath) acc.privatePath[k] = alpha * (snap.privatePath[k] || 0) + oneMinusAlpha * acc.privatePath[k];
-        for (k in snap.privatePath) if (!(k in acc.privatePath)) acc.privatePath[k] = alpha * snap.privatePath[k];
-
-        // Blend reason maps (collect all keys from both).
-        blendReasonMap(acc.dropReasons, snap.dropReasons, alpha, oneMinusAlpha);
-        blendReasonMap(acc.rejectReasons, snap.rejectReasons, alpha, oneMinusAlpha);
+    // Slider value (0-100) → half-life in seconds. 0=cumulative, 100=Infinity (simple avg).
+    function sliderToHalfLife(v) {
+        if (v <= 0) return 0;
+        if (v >= 100) return Infinity;
+        return 12 * Math.pow(300, v / 100);
     }
 
-    function blendReasonMap(accMap, snapMap, alpha, oneMinusAlpha) {
-        var k;
-        for (k in accMap) accMap[k] = alpha * (snapMap[k] || 0) + oneMinusAlpha * accMap[k];
-        for (k in snapMap) if (!(k in accMap)) accMap[k] = alpha * snapMap[k];
+    // Format half-life for display.
+    function formatHalfLife(sec) {
+        if (sec === 0) return 'cumulative';
+        if (!isFinite(sec)) return '\u221E (avg)';
+        if (sec < 60) return Math.round(sec) + 's';
+        if (sec < 3600) return (sec / 60).toFixed(1).replace(/\.0$/, '') + 'm';
+        return (sec / 3600).toFixed(1).replace(/\.0$/, '') + 'h';
     }
 
-    // Apply exponential smoothing across all snapshots.
-    // Iterates oldest→newest with the blend weight inverted from the slider:
-    //   acc = (1−α)·S[i] + α·acc
-    // At α=0: each S[i] fully replaces acc → result = S[newest] = cumulative.
-    // At α=1: acc never updates → result = S[oldest] = earliest snapshot.
-    // This gives a smooth transition from cumulative (0%) to time-decayed (100%).
-    function smoothSnapshots(snapshots, alpha) {
-        if (snapshots.length === 0) return null;
-        if (snapshots.length === 1) return deepCopySnapshot(snapshots[0]);
+    // Format a per-second rate adaptively.
+    function formatRate(r) {
+        if (r >= 100) return Math.round(r).toString();
+        if (r >= 1) return r.toFixed(1);
+        if (r >= 0.01) return r.toFixed(2);
+        return r.toFixed(3);
+    }
 
-        var acc = deepCopySnapshot(snapshots[0]);
-        for (var i = 1; i < snapshots.length; i++) {
-            // blend with (1-alpha) as the weight for the new snapshot
-            blendSnapshot(acc, snapshots[i], 1 - alpha);
+    // O(1) incremental EMA update on a new raw snapshot.
+    function updateEmaState(rawSnap, halfLife) {
+        var filtered = filterSnapshot(rawSnap, typeFilter, showPrivate);
+        var flows = extractFlowValues(filtered);
+        var ts = rawSnap.ts;
+
+        if (!emaState) {
+            // First snapshot — no delta yet, just store flows for next time.
+            emaState = { prevFlows: flows, ema: null, ts: ts };
+            return;
         }
-        return acc;
+
+        var dt = (ts - emaState.ts) / 1000;
+        if (dt <= 0) dt = SNAPSHOT_INTERVAL / 1000;
+        var prev = emaState.prevFlows;
+
+        // Compute per-second rates from deltas.
+        var rates = {};
+        var scalarKeys = ['total', 'announced', 'requested', 'received', 'pooled',
+            'included', 'finalized', 'rejected', 'dropped', 'reqPipeline',
+            'unsolicited', 'reqToReceived', 'received_total', 'toPooled',
+            'nRejected', 'nDropped', 'private', 'nReorged', 'cumRejected',
+            'cumDropped', 'cumFinalized'];
+        for (var i = 0; i < scalarKeys.length; i++) {
+            var k = scalarKeys[i];
+            var delta = (flows[k] || 0) - (prev[k] || 0);
+            rates[k] = Math.max(0, delta / dt);
+        }
+        // Per-reason rate maps.
+        rates.dropReasons = computeReasonRates(flows.dropReasons, prev.dropReasons, dt);
+        rates.rejectReasons = computeReasonRates(flows.rejectReasons, prev.rejectReasons, dt);
+
+        // Blend into EMA.
+        var decay = Math.pow(2, -dt / halfLife);
+        if (!emaState.ema) {
+            // Second snapshot — initialize EMA to first rate.
+            emaState.ema = rates;
+        } else {
+            var ema = emaState.ema;
+            for (var j = 0; j < scalarKeys.length; j++) {
+                var sk = scalarKeys[j];
+                ema[sk] = rates[sk] * (1 - decay) + (ema[sk] || 0) * decay;
+            }
+            blendEmaReasonMap(ema.dropReasons, rates.dropReasons, decay);
+            blendEmaReasonMap(ema.rejectReasons, rates.rejectReasons, decay);
+        }
+
+        emaState.prevFlows = flows;
+        emaState.ts = ts;
+    }
+
+    function computeReasonRates(curr, prev, dt) {
+        var rates = {};
+        for (var k in curr) {
+            var delta = (curr[k] || 0) - (prev[k] || 0);
+            rates[k] = Math.max(0, delta / dt);
+        }
+        return rates;
+    }
+
+    function blendEmaReasonMap(ema, rates, decay) {
+        var k;
+        // Blend existing keys.
+        for (k in ema) {
+            ema[k] = (rates[k] || 0) * (1 - decay) + ema[k] * decay;
+            if (ema[k] < 1e-6) delete ema[k]; // prune near-zero
+        }
+        // Add new keys from rates.
+        for (k in rates) {
+            if (!(k in ema)) ema[k] = rates[k] * (1 - decay);
+        }
+    }
+
+    // Replay all stored snapshots to rebuild EMA from scratch.
+    function recomputeEmaState(halfLife) {
+        emaState = null;
+        for (var i = 0; i < sankeySnapshots.length; i++) {
+            updateEmaState(sankeySnapshots[i], halfLife);
+        }
+    }
+
+    // Simple average rates: (latest - first) / elapsed. For slider=100.
+    function getSimpleAverageRates() {
+        if (sankeySnapshots.length < 2) return null;
+        var first = filterSnapshot(sankeySnapshots[0], typeFilter, showPrivate);
+        var last = filterSnapshot(sankeySnapshots[sankeySnapshots.length - 1], typeFilter, showPrivate);
+        var firstFlows = extractFlowValues(first);
+        var lastFlows = extractFlowValues(last);
+        var elapsed = (last.ts - first.ts) / 1000;
+        if (elapsed <= 0) return null;
+
+        var rates = {};
+        var scalarKeys = ['total', 'announced', 'requested', 'received', 'pooled',
+            'included', 'finalized', 'rejected', 'dropped', 'reqPipeline',
+            'unsolicited', 'reqToReceived', 'received_total', 'toPooled',
+            'nRejected', 'nDropped', 'private', 'nReorged', 'cumRejected',
+            'cumDropped', 'cumFinalized'];
+        for (var i = 0; i < scalarKeys.length; i++) {
+            var k = scalarKeys[i];
+            rates[k] = Math.max(0, ((lastFlows[k] || 0) - (firstFlows[k] || 0)) / elapsed);
+        }
+        rates.dropReasons = computeReasonRates(lastFlows.dropReasons, firstFlows.dropReasons, elapsed);
+        rates.rejectReasons = computeReasonRates(lastFlows.rejectReasons, firstFlows.rejectReasons, elapsed);
+        return rates;
     }
 
     function renderStats() {
@@ -1531,19 +1620,38 @@
         svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
 
         // -----------------------------------------------------------
-        // Get snapshot (live or smoothed).
+        // Rate mode: use EMA or simple average rates.
         // -----------------------------------------------------------
-        var snap;
-        if (smoothingAlpha > 0 && sankeySnapshots.length > 1) {
-            // Filter each raw snapshot with current settings, then smooth.
-            var filtered = [];
-            for (var si = 0; si < sankeySnapshots.length; si++) {
-                filtered.push(filterSnapshot(sankeySnapshots[si], typeFilter, showPrivate));
+        if (sankeyRateMode) {
+            var rates = null;
+            var titleSuffix = '';
+
+            if (sankeyHalfLife === Infinity) {
+                // Simple average (slider=100).
+                rates = getSimpleAverageRates();
+                titleSuffix = '(avg)';
+            } else {
+                // EMA (slider 1-99).
+                if (!emaState || !emaState.ema) recomputeEmaState(sankeyHalfLife);
+                if (emaState && emaState.ema) {
+                    rates = emaState.ema;
+                    titleSuffix = '(half-life: ' + formatHalfLife(sankeyHalfLife) + ')';
+                }
             }
-            snap = smoothSnapshots(filtered, smoothingAlpha);
-        } else {
-            snap = computeSankeySnapshot();
+
+            if (!rates || sankeySnapshots.length < 2) {
+                drawLabel(svg, W / 2, H / 2, 'Collecting rate data\u2026', 'middle', '#888', '14');
+                return;
+            }
+
+            renderSankeyFromRates(svg, W, H, rates, titleSuffix);
+            return;
         }
+
+        // -----------------------------------------------------------
+        // Cumulative mode (slider=0): existing behavior.
+        // -----------------------------------------------------------
+        var snap = computeSankeySnapshot();
 
         var total = snap.total;
         if (total === 0) {
@@ -1567,7 +1675,7 @@
         var unsolTotal = unsolPath.received + unsolPath.pooled + unsolPath.included + unsolPath.finalized + unsolPath.rejected + unsolPath.dropped;
         var announcedTotal = total - nPrivate;
 
-        // Use snapshot's cumulative values (smoothed when α > 0).
+        // Use snapshot's cumulative values.
         var snapCumRejected = snap.cumRejected;
         var snapCumDropped = snap.cumDropped;
         var snapCumFinalized = snap.cumFinalized;
@@ -1827,6 +1935,180 @@
                   'middle', '#888', '13');
     }
 
+    // Render Sankey diagram from per-second rate values.
+    function renderSankeyFromRates(svg, W, H, rates, titleSuffix) {
+        var totalRate = rates.total || 0;
+        if (totalRate < 1e-6) {
+            drawLabel(svg, W / 2, H / 2, 'No flow detected\u2026', 'middle', '#888', '14');
+            return;
+        }
+
+        var nPrivate = rates.private || 0;
+        var nAnnounced = rates.announced || 0;
+        var nRequested = rates.requested || 0;
+        var reqTotal = rates.reqPipeline || 0;
+        var unsolTotal = rates.unsolicited || 0;
+        var announcedTotal = totalRate - nPrivate;
+
+        var snapCumRejected = rates.cumRejected || 0;
+        var snapCumDropped = rates.cumDropped || 0;
+        var snapCumFinalized = rates.cumFinalized || 0;
+
+        var atReceived = rates.received || 0; // currently at received (not meaningful for rates, use 0)
+        var nRejected = rates.nRejected || 0;
+        var nDropped = rates.nDropped || 0;
+        var receivedTotal = rates.received_total || 0;
+        var toPooled = rates.toPooled || 0;
+        var atPooled = rates.pooled || 0; // currently at pooled
+        var toIncluded = toPooled - nDropped;
+        if (toIncluded < 0) toIncluded = 0;
+        var includedTotal = toIncluded + nPrivate;
+        var atIncluded = rates.included || 0;
+        var toFinalized = includedTotal;
+        var nReorged = rates.nReorged || 0;
+        var dropReasons = rates.dropReasons || {};
+        var rejectReasons = rates.rejectReasons || {};
+
+        // --- Layout (same as cumulative mode) ---
+        var PAD = { top: 60, bottom: 72, left: 90, right: 70 };
+        var NODE_W = 16;
+        var availW = W - PAD.left - PAD.right - NODE_W;
+        var availH = H - PAD.top - PAD.bottom - 40;
+        var colGap = availW / 5;
+        var scale = availH / Math.max(1e-6, announcedTotal || totalRate);
+        function sh(v) { return v > 0 ? Math.max(2, v * scale) : 0; }
+        function colX(c) { return PAD.left + c * colGap; }
+        var yTop = PAD.top;
+
+        var annH  = sh(announcedTotal);
+        var reqH  = sh(reqTotal);
+        var rcvH  = sh(receivedTotal);
+        var poolH = sh(toPooled);
+        var inclH = sh(includedTotal);
+        var finH  = sh(toFinalized);
+
+        var annNode  = { x: colX(0), y: yTop, h: annH };
+        var reqNode  = { x: colX(1), y: yTop, h: reqH };
+        var rcvNode  = { x: colX(2), y: yTop, h: rcvH };
+        var poolNode = { x: colX(3), y: yTop, h: poolH };
+        var inclNode = { x: colX(4), y: yTop, h: inclH };
+        var finNode  = { x: colX(5), y: yTop, h: finH };
+
+        // --- Draw links ---
+        if (reqTotal > 0)
+            drawLink(svg, annNode.x + NODE_W, yTop, sh(reqTotal), reqNode.x, yTop, reqH, SANKEY_COLORS.requested);
+        if (unsolTotal > 0) {
+            var unsolSrcY = yTop + sh(reqTotal);
+            var unsolTgtY = yTop + sh(reqTotal - nRequested);
+            drawLink(svg, annNode.x + NODE_W, unsolSrcY, sh(unsolTotal), rcvNode.x, unsolTgtY, sh(unsolTotal), SANKEY_COLORS.unsolicited);
+        }
+        var reqToRcv = reqTotal - nRequested;
+        if (reqToRcv > 0)
+            drawLink(svg, reqNode.x + NODE_W, yTop, sh(reqToRcv), rcvNode.x, yTop, sh(reqToRcv), SANKEY_COLORS.requested);
+        if (toPooled > 0)
+            drawLink(svg, rcvNode.x + NODE_W, yTop, sh(toPooled), poolNode.x, yTop, poolH, SANKEY_COLORS.received);
+        if (toIncluded > 0)
+            drawLink(svg, poolNode.x + NODE_W, yTop, sh(toIncluded), inclNode.x, yTop, sh(toIncluded), SANKEY_COLORS.pooled);
+        if (toFinalized > 0)
+            drawLink(svg, inclNode.x + NODE_W, yTop, sh(toFinalized), finNode.x, yTop, finH, SANKEY_COLORS.included);
+
+        // Rejected branch.
+        if (nRejected > 0) {
+            var rejBarH = sh(nRejected);
+            var rejX = colX(2.5);
+            var rejY = Math.max(rcvNode.y + rcvNode.h + 30, yTop + availH * 0.7);
+            if (rejY + rejBarH > H - 30) rejY = H - 30 - rejBarH;
+            drawLink(svg, rcvNode.x + NODE_W, yTop + sh(toPooled), rejBarH, rejX, rejY, rejBarH, SANKEY_COLORS.rejected);
+            drawNode(svg, rejX, rejY, NODE_W, rejBarH, SANKEY_COLORS.rejected);
+            drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 - 6, 'Rejected', 'start', '#e0e0e0');
+            drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 8, formatRate(snapCumRejected) + '/s', 'start', '#888', '10');
+            var rejReasonKeys = Object.keys(rejectReasons).sort(function(a, b) { return (rejectReasons[b] || 0) - (rejectReasons[a] || 0); });
+            if (rejReasonKeys.length > 0) {
+                var rejBaseY = rejY + rejBarH / 2 + 20;
+                for (var ri = 0; ri < rejReasonKeys.length; ri++) {
+                    drawLabel(svg, rejX + NODE_W + 6, rejBaseY + ri * 12,
+                              formatRate(rejectReasons[rejReasonKeys[ri]]) + '/s ' + rejReasonKeys[ri], 'start', '#777', '9');
+                }
+            }
+        }
+
+        // Dropped branch.
+        if (nDropped > 0) {
+            var dropBarH = sh(nDropped);
+            var dropX = colX(3.5);
+            var dropY = Math.max(poolNode.y + poolNode.h + 30, yTop + availH * 0.55);
+            if (dropY + dropBarH > H - 30) dropY = H - 30 - dropBarH;
+            drawLink(svg, poolNode.x + NODE_W, yTop + sh(toIncluded), dropBarH, dropX, dropY, dropBarH, SANKEY_COLORS.dropped);
+            drawNode(svg, dropX, dropY, NODE_W, dropBarH, SANKEY_COLORS.dropped);
+            drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 - 6, 'Dropped', 'start', '#e0e0e0');
+            drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 8, formatRate(snapCumDropped) + '/s', 'start', '#888', '10');
+            var reasonKeys = Object.keys(dropReasons).sort(function(a, b) { return (dropReasons[b] || 0) - (dropReasons[a] || 0); });
+            if (reasonKeys.length > 0) {
+                var baseY = dropY + dropBarH / 2 + 20;
+                for (var ri = 0; ri < reasonKeys.length; ri++) {
+                    drawLabel(svg, dropX + NODE_W + 6, baseY + ri * 12,
+                              formatRate(dropReasons[reasonKeys[ri]]) + '/s ' + reasonKeys[ri], 'start', '#777', '9');
+                }
+            }
+        }
+
+        // Private branch.
+        if (nPrivate > 0) {
+            var privBarH = sh(nPrivate);
+            var privX = colX(3.9);
+            var privY = Math.max(inclNode.y + inclNode.h + 30, yTop + availH * 0.7);
+            if (privY + privBarH > H - 30) privY = H - 30 - privBarH;
+            var privTgtY = yTop + sh(toIncluded);
+            drawLink(svg, privX + NODE_W, privY, privBarH, inclNode.x, privTgtY, privBarH, SANKEY_COLORS.private);
+            drawNode(svg, privX, privY, NODE_W, privBarH, SANKEY_COLORS.private);
+            drawLabel(svg, privX - 6, privY + privBarH / 2 - 6, 'Private', 'end', '#e0e0e0');
+            drawLabel(svg, privX - 6, privY + privBarH / 2 + 8, formatRate(nPrivate) + '/s', 'end', '#888', '10');
+        }
+
+        // --- Main nodes and labels (rate mode) ---
+        var mainNodes = [
+            { n: annNode,  key: 'announced',  label: 'Announced',  rate: announcedTotal },
+            { n: reqNode,  key: 'requested',  label: 'Requested',  rate: reqTotal },
+            { n: rcvNode,  key: 'received',   label: 'Received',   rate: receivedTotal },
+            { n: poolNode, key: 'pooled',     label: 'Pooled',     rate: toPooled },
+            { n: inclNode, key: 'included',   label: 'Included',   rate: includedTotal },
+            { n: finNode,  key: 'finalized',  label: 'Finalized',  rate: toFinalized },
+        ];
+        for (var i = 0; i < mainNodes.length; i++) {
+            var m = mainNodes[i];
+            if (m.n.h <= 0) continue;
+            drawNode(svg, m.n.x, m.n.y, NODE_W, m.n.h, SANKEY_COLORS[m.key]);
+            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y - 12, m.label, 'middle', '#e0e0e0');
+            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
+                      formatRate(m.rate) + '/s', 'middle', '#888', '10');
+        }
+
+        // Reorg backward link.
+        if (nReorged > 0) {
+            var reorgBandH = sh(nReorged);
+            var maxBottom = Math.max(poolNode.y + poolNode.h, inclNode.y + inclNode.h);
+            var reorgDropY = maxBottom + 40;
+            if (reorgDropY + reorgBandH + 20 > H) reorgDropY = H - reorgBandH - 20;
+            drawBackLink(svg, inclNode, poolNode, NODE_W, reorgBandH, reorgDropY, '#ff6f00');
+            var reorgMidX = (inclNode.x + poolNode.x + NODE_W) / 2;
+            drawLabel(svg, reorgMidX, reorgDropY + reorgBandH / 2 + 8,
+                      formatRate(nReorged) + '/s reorged', 'middle', '#ff6f00', '10');
+        }
+
+        // Unsolicited vs requested labels.
+        if (reqTotal > 0 && unsolTotal > 0) {
+            var midReqX = (annNode.x + NODE_W + reqNode.x) / 2;
+            drawLabel(svg, midReqX, yTop - 4, 'requested', 'middle', '#00838f', '9');
+            var unsolLabelY = yTop + sh(reqTotal) + sh(unsolTotal) / 2;
+            drawLabel(svg, midReqX, unsolLabelY, 'unsolicited', 'middle', '#78909c', '9');
+        }
+
+        // Title with rate.
+        drawLabel(svg, W / 2, 20,
+                  'Transaction Flow \u2014 ' + formatRate(totalRate) + ' tx/s ' + titleSuffix,
+                  'middle', '#888', '13');
+    }
+
     // Eviction stats — fetched periodically from the tracker.
     var lastEvictionStats = null;
 
@@ -1900,25 +2182,33 @@
         if (activeTab === 'peers' && Date.now() - peersLastFetch >= 3000) fetchPeersData();
     }, 5000);
 
-    // Snapshot Sankey data every 12 seconds for exponential smoothing.
+    // Snapshot Sankey data every 12 seconds for rate-based EMA.
     // Stores unfiltered (bucketed) snapshots; filters applied at render time.
     setInterval(function() {
         if (txs.size === 0) return;
-        sankeySnapshots.push(computeRawSnapshot());
+        var rawSnap = computeRawSnapshot();
+        sankeySnapshots.push(rawSnap);
         if (sankeySnapshots.length > MAX_SNAPSHOTS) sankeySnapshots.shift();
-        if (activeTab === 'stats' && smoothingAlpha > 0) {
+        // Incrementally update EMA if in rate mode (not simple average).
+        if (sankeyRateMode && isFinite(sankeyHalfLife)) {
+            updateEmaState(rawSnap, sankeyHalfLife);
+        }
+        if (activeTab === 'stats') {
             statsViewDirty = true;
             scheduleRender();
         }
     }, SNAPSHOT_INTERVAL);
 
-    // Smoothing slider wiring.
+    // Half-life slider wiring.
     var smoothingSlider = document.getElementById('smoothing-slider');
     var smoothingValueLabel = document.getElementById('smoothing-value');
     if (smoothingSlider) {
         smoothingSlider.addEventListener('input', function() {
-            smoothingAlpha = parseInt(this.value) / 100;
-            smoothingValueLabel.textContent = this.value + '%';
+            var v = parseInt(this.value);
+            sankeyHalfLife = sliderToHalfLife(v);
+            sankeyRateMode = (v > 0);
+            smoothingValueLabel.textContent = formatHalfLife(sankeyHalfLife);
+            emaState = null; // invalidate — will recompute on next render
             statsViewDirty = true;
             scheduleRender();
         });

@@ -354,7 +354,7 @@ header h1 {
     margin-left: 12px;
 }
 #smoothing-slider { width: 100px; }
-#smoothing-value { min-width: 28px; }
+#smoothing-value { min-width: 68px; }
 
 /* --- Stats view --- */
 .stats-area {

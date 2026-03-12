@@ -301,39 +301,42 @@ dashed amber arcs below the main flow, labeled with the reorg count. The
 `_reorgCount` field on each tx event tracks how many times that transaction
 was reverted from included back to the pool.
 
-##### Exponential Smoothing
+##### Rate-Based Smoothing with Half-Life
 
-By default (slider at 0%), the Sankey diagram shows cumulative all-time counts
-from page load. Over long sessions, early events dominate and the diagram stops
-reflecting current behavior. A **Smoothing** slider (0–100%) in the Stats
-filter bar controls exponential smoothing over time-bucketed snapshots.
+By default (slider at 0), the Sankey diagram shows cumulative all-time counts
+from page load. A **Half-life** slider (0–100) in the Stats filter bar switches
+to per-second flow rates with EMA smoothing.
+
+**Slider mapping**: 0 = cumulative totals (existing behavior, default).
+1–99 = rate mode with logarithmic half-life: `halfLife = 12 × 300^(v/100)`,
+giving ~12s to ~1h. 100 = simple average rate (infinite half-life).
 
 **Snapshots**: Every 12 seconds (one Ethereum block), the current status
 distribution is captured into a ring buffer capped at 7,200 entries (24 hours).
 Each snapshot records the same data as the Sankey counting loop: per-status
 counts, per-path breakdowns, reorg counts, reason maps, and cumulative totals.
 
-**Smoothing formula**: Given snapshots S[0]…S[n] (oldest to newest) and
-coefficient α = slider/100, the blend iterates oldest→newest with the slider
-value controlling how much history is retained:
+**EMA state** — maintained as a single object, updated O(1) per new snapshot:
 ```
-V[0] = S[0]
-V[i] = (1 − α) × S[i] + α × V[i−1]
+emaState = { prevFlows, ema, ts }  // or null when invalidated
 ```
-At α=0 (default): each snapshot fully replaces the accumulator, so
-V[n] = S[n] = newest snapshot ≈ cumulative totals. This ensures a smooth
-continuous transition from 0% (no smoothing, live data) to small values.
-At α=1: the accumulator never updates, V[n] = S[0] = oldest snapshot.
+On each new snapshot: `filterSnapshot(raw)` → `extractFlowValues(filtered)` →
+compute deltas from `prevFlows` → per-second rates → blend into `ema` using
+`decay = 2^(−dt/halfLife)`: `ema[k] = rate×(1−decay) + ema[k]×decay`.
+For per-reason maps: same EMA per reason key, keys with rate ≈ 0 are pruned.
 
-Smoothing applies to all numeric fields independently, including per-reason
-breakdown maps. Fractional smoothed values work fine for band sizing; display
-labels are rounded.
+**Invalidation**: `emaState` is set to `null` when half-life, typeFilter, or
+showPrivate changes. On next render, `recomputeEmaState()` replays all stored
+raw snapshots (same incremental logic applied sequentially from the start).
 
-**Implementation**: `computeSankeySnapshot()` extracts the counting loop from
-`renderStats()`. `smoothSnapshots()` iterates oldest→newest, passing `1 − α`
-as the blend weight to invert the slider semantics. `renderStats()` uses the
-smoothed snapshot when α > 0 and snapshots exist, otherwise uses a live
-snapshot (current behavior, no smoothing overhead).
+**Simple average (slider=100)**: `(latestFlows[k] − firstFlows[k]) / elapsed`.
+Always O(1) — only needs first and latest filtered snapshots. No EMA state;
+computed directly by `getSimpleAverageRates()`.
+
+**Rate rendering**: `renderSankeyFromRates()` uses the same Sankey layout as
+cumulative mode but with per-second rates as band sizes. Labels show
+`formatRate(v)+'/s'` with adaptive precision (≥100→"123", ≥1→"1.2", else
+"0.12"). Title shows "Transaction Flow — X.X tx/s (half-life: Ys)".
 
 #### Peers Pane
 
