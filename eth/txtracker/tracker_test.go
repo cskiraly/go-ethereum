@@ -1041,6 +1041,7 @@ func TestStatusString(t *testing.T) {
 		want   string
 	}{
 		{TxAnnounced, "announced"},
+		{TxRequested, "requested"},
 		{TxReceived, "received"},
 		{TxPooled, "pooled"},
 		{TxIncluded, "included"},

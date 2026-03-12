@@ -630,6 +630,17 @@ link-drawing code.
 - `poolAndWait`/`dropAndWait` test helpers and consistent `makeTx()` usage
   reduce boilerplate in `tracker_test.go`.
 
+## Code Review Fixes (post-review)
+
+- Fixed misplaced doc comment: `getOrCreatePeer` comment was accidentally
+  merged into `fillTxMeta`'s comment block. Split into separate comments.
+- Fixed `testTxPool.SubscribeRemovedTransactions` in `handler_test.go`:
+  was reusing `txFeed` (which sends `NewTxsEvent`), causing a latent
+  `event.Feed` type-mismatch panic. Added dedicated `removedFeed` field.
+- Added missing `TxRequested` entry to `TestStatusString` test table.
+- Removed hardcoded `MaxEntries: 262144` and `Clock: mclock.System{}` from
+  handler.go; `txtracker.New` already applies these defaults when zero/nil.
+
 ## Future Work
 
 - Use tracker data for peer scoring (bandwidth waste detection)

@@ -1126,7 +1126,6 @@ func (t *Tracker) evictOldest() {
 	txTrackerSize.Update(int64(len(t.txs)))
 }
 
-// getOrCreatePeer returns the peerStats for a peer, creating it if needed.
 // fillTxMeta populates transaction metadata fields on a record from a full
 // transaction object. Also updates txType and txSize to accurate values.
 func fillTxMeta(rec *txRecord, tx *types.Transaction) {
@@ -1149,6 +1148,7 @@ func fillTxMeta(rec *txRecord, tx *types.Transaction) {
 	}
 }
 
+// getOrCreatePeer returns the peerStats for a peer, creating it if needed.
 func (t *Tracker) getOrCreatePeer(peer string) *peerStats {
 	ps := t.peers[peer]
 	if ps == nil {

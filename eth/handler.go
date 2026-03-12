@@ -29,7 +29,6 @@ import (
 
 	"github.com/dchest/siphash"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/txpool"
@@ -215,10 +214,8 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	}
 	h.txFetcher = fetcher.NewTxFetcher(h.chain, validateMeta, addTxs, fetchTx, h.removePeer)
 	h.txTracker = txtracker.New(txtracker.Config{
-		MaxEntries: 262144,
-		Clock:      mclock.System{},
-		Chain:      config.Chain,
-		TxPool:     h.txpool,
+		Chain:  config.Chain,
+		TxPool: h.txpool,
 	})
 	return h, nil
 }

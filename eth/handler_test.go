@@ -56,8 +56,9 @@ var (
 type testTxPool struct {
 	pool map[common.Hash]*types.Transaction // Hash map of collected transactions
 
-	txFeed event.Feed   // Notification feed to allow waiting for inclusion
-	lock   sync.RWMutex // Protects the transaction pool
+	txFeed      event.Feed   // Notification feed to allow waiting for inclusion
+	removedFeed event.Feed   // Notification feed for removed transactions
+	lock        sync.RWMutex // Protects the transaction pool
 }
 
 // newTestTxPool creates a mock transaction pool.
@@ -166,7 +167,7 @@ func (p *testTxPool) SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bo
 // SubscribeRemovedTransactions should return an event subscription of
 // RemovedTxsEvent and send events to the given channel.
 func (p *testTxPool) SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription {
-	return p.txFeed.Subscribe(ch)
+	return p.removedFeed.Subscribe(ch)
 }
 
 // FilterType should check whether the pool supports the given type of transactions.
