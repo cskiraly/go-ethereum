@@ -69,6 +69,10 @@ func (m *mockTxPool) sendRemoved(hashes ...common.Hash) {
 	m.removedFeed.Send(core.RemovedTxsEvent{Hashes: hashes})
 }
 
+func (m *mockTxPool) sendRemovedWithReasons(hashes []common.Hash, reasons []string) {
+	m.removedFeed.Send(core.RemovedTxsEvent{Hashes: hashes, Reasons: reasons})
+}
+
 // testTracker creates a tracker with a simulated clock and mock dependencies,
 // starts it, and returns all components. The caller must call tracker.Stop().
 func testTracker(maxEntries int) (*Tracker, *mclock.Simulated, *mockChain, *mockTxPool) {
@@ -1049,5 +1053,320 @@ func TestStatusString(t *testing.T) {
 		if got := tt.status.String(); got != tt.want {
 			t.Errorf("TxStatus(%d).String() = %q, want %q", tt.status, got, tt.want)
 		}
+	}
+}
+
+func TestGetStats(t *testing.T) {
+	tr, _, _, _ := testTracker(5)
+	defer tr.Stop()
+
+	// Add 5 announced transactions.
+	hashes := make([]common.Hash, 5)
+	for i := range hashes {
+		hashes[i] = makeHash(byte(i + 1))
+		tr.NotifyAnnounced("peerA", []common.Hash{hashes[i]}, []byte{0}, []uint32{100})
+		waitStep(t, tr)
+	}
+
+	stats := tr.GetStats()
+	if stats.Total != 5 {
+		t.Fatalf("expected Total=5, got %d", stats.Total)
+	}
+	if stats.Capacity != 5 {
+		t.Fatalf("expected Capacity=5, got %d", stats.Capacity)
+	}
+	if stats.Evicted.Total != 0 {
+		t.Fatalf("expected no evictions yet, got %d", stats.Evicted.Total)
+	}
+
+	// Add 6th → evicts oldest (announced state).
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(6)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	stats = tr.GetStats()
+	if stats.Total != 5 {
+		t.Fatalf("expected Total=5 after eviction, got %d", stats.Total)
+	}
+	if stats.Evicted.Announced != 1 {
+		t.Fatalf("expected Evicted.Announced=1, got %d", stats.Evicted.Announced)
+	}
+	if stats.Evicted.Total != 1 {
+		t.Fatalf("expected Evicted.Total=1, got %d", stats.Evicted.Total)
+	}
+
+	// Per-state eviction: capacity-1 tracker, pool a tx, then evict it.
+	tr2, _, _, _ := testTracker(1)
+	defer tr2.Stop()
+
+	h := makeHash(0x10)
+	poolAndWait(t, tr2, []common.Hash{h})
+
+	// Adding a second tx evicts the pooled one.
+	tr2.NotifyAnnounced("peerA", []common.Hash{makeHash(0x11)}, []byte{0}, []uint32{100})
+	waitStep(t, tr2)
+
+	stats2 := tr2.GetStats()
+	if stats2.Evicted.Pooled != 1 {
+		t.Fatalf("expected Evicted.Pooled=1, got %d", stats2.Evicted.Pooled)
+	}
+}
+
+func TestDropReason(t *testing.T) {
+	tr, _, _, pool := testTracker(0)
+	defer tr.Stop()
+
+	eventCh := make(chan TxTrackerEvent, 64)
+	sub := tr.SubscribeEvents(eventCh)
+	defer sub.Unsubscribe()
+
+	// Pool and drop with a reason.
+	hash1 := makeHash(1)
+	hash2 := makeHash(2)
+	poolAndWait(t, tr, []common.Hash{hash1, hash2})
+
+	pool.sendRemovedWithReasons([]common.Hash{hash1, hash2}, []string{"underpriced"})
+	waitStep(t, tr)
+
+	// hash1 should have the reason, hash2 should have empty reason (Reasons shorter than Hashes).
+	info1 := tr.Get(hash1)
+	if info1.DropReason != "underpriced" {
+		t.Fatalf("expected DropReason=%q, got %q", "underpriced", info1.DropReason)
+	}
+	info2 := tr.Get(hash2)
+	if info2.DropReason != "" {
+		t.Fatalf("expected empty DropReason for hash2, got %q", info2.DropReason)
+	}
+
+	// Verify event feed carries the drop reason.
+	events := drainEvents(eventCh)
+	var dropEvents []TxTrackerEvent
+	for _, ev := range events {
+		if ev.NewStatus == TxDropped {
+			dropEvents = append(dropEvents, ev)
+		}
+	}
+	if len(dropEvents) != 2 {
+		t.Fatalf("expected 2 drop events, got %d", len(dropEvents))
+	}
+	// Find the event for hash1.
+	for _, ev := range dropEvents {
+		if ev.TxHash == hash1 && ev.DropReason != "underpriced" {
+			t.Fatalf("expected drop event DropReason=%q for hash1, got %q", "underpriced", ev.DropReason)
+		}
+		if ev.TxHash == hash2 && ev.DropReason != "" {
+			t.Fatalf("expected empty DropReason in event for hash2, got %q", ev.DropReason)
+		}
+	}
+}
+
+func TestPeerStatsIncludedFinalized(t *testing.T) {
+	tr, _, chain, _ := testTracker(0)
+	defer tr.Stop()
+
+	tx := makeTx(50)
+	hash := tx.Hash()
+
+	// peerA announces, peerB delivers.
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	tr.NotifyReceived("peerB", []*types.Transaction{tx})
+	waitStep(t, tr)
+	tr.NotifyPooled([]common.Hash{hash})
+	waitStep(t, tr)
+
+	// Include in block.
+	header := makeHeader(10, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header,
+		Transactions: []*types.Transaction{tx},
+	})
+	waitStep(t, tr)
+
+	psB := tr.GetPeerStats("peerB")
+	if psB.Included != 1 {
+		t.Fatalf("peerB Included: expected 1, got %d", psB.Included)
+	}
+	// Announcer should not get inclusion credit.
+	psA := tr.GetPeerStats("peerA")
+	if psA.Included != 0 {
+		t.Fatalf("peerA Included: expected 0, got %d", psA.Included)
+	}
+
+	// Finalize.
+	chain.finalBlock = makeHeader(100, common.Hash{0xaa})
+	header2 := makeHeader(11, header.Hash())
+	chain.sendChainEvent(core.ChainEvent{Header: header2})
+	waitStep(t, tr)
+
+	psB = tr.GetPeerStats("peerB")
+	if psB.Finalized != 1 {
+		t.Fatalf("peerB Finalized: expected 1, got %d", psB.Finalized)
+	}
+	psA = tr.GetPeerStats("peerA")
+	if psA.Finalized != 0 {
+		t.Fatalf("peerA Finalized: expected 0, got %d", psA.Finalized)
+	}
+}
+
+func TestReorgPeerStats(t *testing.T) {
+	tr, _, chain, _ := testTracker(0)
+	defer tr.Stop()
+
+	tx := makeTx(60)
+	hash := tx.Hash()
+
+	// peerA delivers and tx gets included.
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
+	waitStep(t, tr)
+	tr.NotifyPooled([]common.Hash{hash})
+	waitStep(t, tr)
+
+	header := makeHeader(10, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header,
+		Transactions: []*types.Transaction{tx},
+	})
+	waitStep(t, tr)
+
+	ps := tr.GetPeerStats("peerA")
+	if ps.Included != 1 {
+		t.Fatalf("peerA Included before reorg: expected 1, got %d", ps.Included)
+	}
+
+	// Reorg: new block 10 with different parent.
+	reorgHeader := makeHeader(10, common.Hash{0xde, 0xad})
+	chain.sendChainEvent(core.ChainEvent{Header: reorgHeader})
+	waitStep(t, tr)
+
+	ps = tr.GetPeerStats("peerA")
+	if ps.Included != 0 {
+		t.Fatalf("peerA Included after reorg: expected 0, got %d", ps.Included)
+	}
+}
+
+func TestGetAllPeerStats(t *testing.T) {
+	tr, _, _, _ := testTracker(0)
+	defer tr.Stop()
+
+	tx := makeTx(70)
+	hash := tx.Hash()
+
+	// peerA and peerB both announce.
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	tr.NotifyAnnounced("peerB", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	// peerA delivers.
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
+	waitStep(t, tr)
+
+	all := tr.GetAllPeerStats()
+	if len(all) != 2 {
+		t.Fatalf("expected 2 peers, got %d", len(all))
+	}
+	if all["peerA"].Announced != 1 || all["peerA"].Delivered != 1 {
+		t.Fatalf("peerA stats unexpected: %+v", all["peerA"])
+	}
+	if all["peerB"].Announced != 1 || all["peerB"].Delivered != 0 {
+		t.Fatalf("peerB stats unexpected: %+v", all["peerB"])
+	}
+
+	// Cross-check against individual calls.
+	if all["peerA"] != tr.GetPeerStats("peerA") {
+		t.Fatal("GetAllPeerStats peerA != GetPeerStats peerA")
+	}
+	if all["peerB"] != tr.GetPeerStats("peerB") {
+		t.Fatal("GetAllPeerStats peerB != GetPeerStats peerB")
+	}
+
+	// Drop peerB and verify it's gone.
+	tr.NotifyPeerDrop("peerB")
+	waitStep(t, tr)
+
+	all = tr.GetAllPeerStats()
+	if _, ok := all["peerB"]; ok {
+		t.Fatal("peerB should be removed after NotifyPeerDrop")
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 peer after drop, got %d", len(all))
+	}
+}
+
+func TestRemoveAfterInclusion(t *testing.T) {
+	tr, _, chain, pool := testTracker(0)
+	defer tr.Stop()
+
+	tx := makeTx(80)
+	hash := tx.Hash()
+
+	// Pool and include.
+	poolAndWait(t, tr, []common.Hash{hash})
+	header := makeHeader(20, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header,
+		Transactions: []*types.Transaction{tx},
+	})
+	waitStep(t, tr)
+
+	if s := tr.Status(hash); s != TxIncluded {
+		t.Fatalf("expected TxIncluded, got %v", s)
+	}
+
+	// Pool removal event after inclusion should be ignored.
+	pool.sendRemoved(hash)
+	waitStep(t, tr)
+
+	if s := tr.Status(hash); s != TxIncluded {
+		t.Fatalf("expected status to remain TxIncluded after removal event, got %v", s)
+	}
+}
+
+func TestChainOnlySkipFinalized(t *testing.T) {
+	tr, _, chain, _ := testTracker(0)
+	defer tr.Stop()
+
+	// Pre-seed finalized block at 50.
+	chain.finalBlock = makeHeader(50, common.Hash{})
+	// Trigger checkFinalization so the tracker picks up lastFinalNum.
+	dummyHeader := makeHeader(51, common.Hash{0x01})
+	chain.sendChainEvent(core.ChainEvent{Header: dummyHeader})
+	waitStep(t, tr)
+
+	// Now send a chain event with a new tx in block 40 (below finalized).
+	tx := makeTx(90)
+	hash := tx.Hash()
+	header40 := makeHeader(40, common.Hash{0x02})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header40,
+		Transactions: []*types.Transaction{tx},
+	})
+	waitStep(t, tr)
+
+	// The tx should NOT be tracked because its block is already finalized.
+	if s := tr.Status(hash); s != 0 {
+		t.Fatalf("expected tx in finalized block to be skipped, got status %v", s)
+	}
+}
+
+func TestShutdownGetStatsAndAllPeerStats(t *testing.T) {
+	tr, _, _, _ := testTracker(0)
+
+	// Add a peer so there's state to query.
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(1)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	tr.Stop()
+
+	// GetStats should return zero value after shutdown.
+	stats := tr.GetStats()
+	if stats.Total != 0 || stats.Capacity != 0 {
+		t.Fatalf("expected zero TrackerStats after Stop, got %+v", stats)
+	}
+
+	// GetAllPeerStats should return nil after shutdown.
+	all := tr.GetAllPeerStats()
+	if all != nil {
+		t.Fatalf("expected nil AllPeerStats after Stop, got %+v", all)
 	}
 }
