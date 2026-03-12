@@ -119,6 +119,20 @@ func makeTx(nonce uint64) *types.Transaction {
 	return types.NewTx(&types.LegacyTx{Nonce: nonce, GasPrice: big.NewInt(1), Gas: 21000})
 }
 
+// poolAndWait notifies the tracker that hashes are pooled and waits for processing.
+func poolAndWait(t *testing.T, tr *Tracker, hashes []common.Hash) {
+	t.Helper()
+	tr.NotifyPooled(hashes)
+	waitStep(t, tr)
+}
+
+// dropAndWait sends a removal event for hash and waits for processing.
+func dropAndWait(t *testing.T, tr *Tracker, pool *mockTxPool, hash common.Hash) {
+	t.Helper()
+	pool.sendRemoved(hash)
+	waitStep(t, tr)
+}
+
 func makeHeader(num uint64, parent common.Hash) *types.Header {
 	return &types.Header{
 		Number:     new(big.Int).SetUint64(num),
@@ -303,7 +317,7 @@ func TestFullLifecycle(t *testing.T) {
 	defer tr.Stop()
 
 	// Use a real tx so that tx.Hash() in ChainEvent matches the tracked hash.
-	tx := types.NewTx(&types.LegacyTx{Nonce: 42, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(42)
 	txHash := tx.Hash()
 
 	// Step 1: Announced
@@ -365,7 +379,7 @@ func TestReorg(t *testing.T) {
 	tr, _, chain, _ := testTracker(0)
 	defer tr.Stop()
 
-	tx := types.NewTx(&types.LegacyTx{Nonce: 99, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(99)
 	txHash := tx.Hash()
 
 	tr.NotifyPooled([]common.Hash{txHash})
@@ -536,7 +550,7 @@ func TestLocalTxDetection(t *testing.T) {
 	defer tr.Stop()
 
 	// Simulate a local transaction entering the pool.
-	tx := types.NewTx(&types.LegacyTx{Nonce: 7, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(7)
 	pool.sendNewTxs(core.NewTxsEvent{Txs: []*types.Transaction{tx}})
 	waitStep(t, tr)
 
@@ -557,7 +571,7 @@ func TestLocalTxNotOverridden(t *testing.T) {
 	defer tr.Stop()
 
 	// First track via P2P announcement.
-	tx := types.NewTx(&types.LegacyTx{Nonce: 8, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(8)
 	hash := tx.Hash()
 
 	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
@@ -659,7 +673,7 @@ func TestRejectedToIncluded(t *testing.T) {
 	tr, _, chain, _ := testTracker(0)
 	defer tr.Stop()
 
-	tx := types.NewTx(&types.LegacyTx{Nonce: 77, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(77)
 	txHash := tx.Hash()
 
 	// Receive and reject the transaction (e.g., underpriced locally).
@@ -695,7 +709,7 @@ func TestChainOnlyTracking(t *testing.T) {
 
 	// A transaction that was never announced, received, or pooled locally —
 	// it appears for the first time in a canonical block.
-	tx := types.NewTx(&types.LegacyTx{Nonce: 200, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(200)
 	txHash := tx.Hash()
 
 	header := makeHeader(300, common.Hash{})
@@ -725,7 +739,7 @@ func TestChainOnlyFinalization(t *testing.T) {
 	defer tr.Stop()
 
 	// Chain-only tx gets included then finalized.
-	tx := types.NewTx(&types.LegacyTx{Nonce: 201, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(201)
 	txHash := tx.Hash()
 
 	header1 := makeHeader(400, common.Hash{})
@@ -783,7 +797,7 @@ func TestReceiveRepairsLocalFlag(t *testing.T) {
 	tr, _, _, pool := testTracker(0)
 	defer tr.Stop()
 
-	tx := types.NewTx(&types.LegacyTx{Nonce: 55, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(55)
 	hash := tx.Hash()
 
 	// Simulate the race: NewTxsEvent arrives before the receive event.
@@ -814,16 +828,13 @@ func TestPoolDropDetection(t *testing.T) {
 
 	hash := makeHash(1)
 
-	tr.NotifyPooled([]common.Hash{hash})
-	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
 
 	if s := tr.Status(hash); s != TxPooled {
 		t.Fatalf("expected TxPooled, got %v", s)
 	}
 
-	// Fire removal event from pool.
-	pool.sendRemoved(hash)
-	waitStep(t, tr)
+	dropAndWait(t, tr, pool, hash)
 
 	if s := tr.Status(hash); s != TxDropped {
 		t.Fatalf("expected TxDropped, got %v", s)
@@ -839,15 +850,11 @@ func TestDroppedToIncluded(t *testing.T) {
 	tr, _, chain, pool := testTracker(0)
 	defer tr.Stop()
 
-	tx := types.NewTx(&types.LegacyTx{Nonce: 200, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(200)
 	hash := tx.Hash()
 
-	// Pool the tx, then drop it via removal event.
-	tr.NotifyPooled([]common.Hash{hash})
-	waitStep(t, tr)
-
-	pool.sendRemoved(hash)
-	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+	dropAndWait(t, tr, pool, hash)
 
 	if s := tr.Status(hash); s != TxDropped {
 		t.Fatalf("expected TxDropped, got %v", s)
@@ -872,20 +879,15 @@ func TestDroppedToPooled(t *testing.T) {
 
 	hash := makeHash(2)
 
-	// Pool the tx, then drop it via removal event.
-	tr.NotifyPooled([]common.Hash{hash})
-	waitStep(t, tr)
-
-	pool.sendRemoved(hash)
-	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+	dropAndWait(t, tr, pool, hash)
 
 	if s := tr.Status(hash); s != TxDropped {
 		t.Fatalf("expected TxDropped, got %v", s)
 	}
 
 	// Re-add to pool.
-	tr.NotifyPooled([]common.Hash{hash})
-	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
 
 	if s := tr.Status(hash); s != TxPooled {
 		t.Fatalf("expected TxPooled after re-add, got %v", s)
@@ -898,12 +900,8 @@ func TestDroppedToRequested(t *testing.T) {
 
 	hash := makeHash(3)
 
-	// Pool the tx, then drop it via removal event.
-	tr.NotifyPooled([]common.Hash{hash})
-	waitStep(t, tr)
-
-	pool.sendRemoved(hash)
-	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+	dropAndWait(t, tr, pool, hash)
 
 	if s := tr.Status(hash); s != TxDropped {
 		t.Fatalf("expected TxDropped, got %v", s)
@@ -928,7 +926,7 @@ func TestEventFeed(t *testing.T) {
 	defer sub.Unsubscribe()
 
 	// Use a real tx so ChainEvent hash matches.
-	tx := types.NewTx(&types.LegacyTx{Nonce: 100, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(100)
 	txHash := tx.Hash()
 
 	// Step 1: Announced
@@ -998,7 +996,7 @@ func TestEventFeedReorg(t *testing.T) {
 	sub := tr.SubscribeEvents(eventCh)
 	defer sub.Unsubscribe()
 
-	tx := types.NewTx(&types.LegacyTx{Nonce: 101, GasPrice: big.NewInt(1), Gas: 21000})
+	tx := makeTx(101)
 	txHash := tx.Hash()
 
 	tr.NotifyPooled([]common.Hash{txHash})
