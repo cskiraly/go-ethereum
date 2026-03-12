@@ -155,6 +155,17 @@ type peerStats struct {
 	finalized      int64 // Delivered txs that were finalized on chain
 }
 
+func (ps *peerStats) toPublic() PeerStats {
+	return PeerStats{
+		Announced:      ps.announced,
+		Delivered:      ps.delivered,
+		UsefulDelivery: ps.usefulDelivery,
+		FirstAnnouncer: ps.firstAnnouncer,
+		Included:       ps.included,
+		Finalized:      ps.finalized,
+	}
+}
+
 // TxInfo is the public, read-only view of a transaction's tracked state.
 type TxInfo struct {
 	Status        TxStatus
@@ -418,87 +429,53 @@ func (t *Tracker) NotifyPeerDrop(peer string) {
 	}
 }
 
+// awaitReply sends a request on reqCh and waits for the response on respCh,
+// returning zero if the tracker shuts down at either stage.
+func awaitReply[Req any, Resp any](reqCh chan<- Req, req Req, respCh <-chan Resp, quit <-chan struct{}, zero Resp) Resp {
+	select {
+	case reqCh <- req:
+		select {
+		case v := <-respCh:
+			return v
+		case <-quit:
+			return zero
+		}
+	case <-quit:
+		return zero
+	}
+}
+
 // Get returns the full lifecycle info for a tracked transaction, or nil if
 // the transaction is not tracked. This method blocks until the event loop
 // processes the query.
 func (t *Tracker) Get(hash common.Hash) *TxInfo {
 	resp := make(chan *TxInfo, 1)
-	select {
-	case t.queryCh <- &txQuery{hash: hash, resp: resp}:
-		select {
-		case info := <-resp:
-			return info
-		case <-t.quit:
-			return nil
-		}
-	case <-t.quit:
-		return nil
-	}
+	return awaitReply(t.queryCh, &txQuery{hash: hash, resp: resp}, resp, t.quit, nil)
 }
 
 // Status returns just the current status of a tracked transaction, or 0 if
 // untracked.
 func (t *Tracker) Status(hash common.Hash) TxStatus {
 	resp := make(chan TxStatus, 1)
-	select {
-	case t.statusCh <- &statusQuery{hash: hash, resp: resp}:
-		select {
-		case s := <-resp:
-			return s
-		case <-t.quit:
-			return 0
-		}
-	case <-t.quit:
-		return 0
-	}
+	return awaitReply(t.statusCh, &statusQuery{hash: hash, resp: resp}, resp, t.quit, 0)
 }
 
 // GetPeerStats returns the transaction contribution statistics for a peer.
 func (t *Tracker) GetPeerStats(peer string) PeerStats {
 	resp := make(chan PeerStats, 1)
-	select {
-	case t.peerStatsCh <- &peerStatsQuery{peer: peer, resp: resp}:
-		select {
-		case ps := <-resp:
-			return ps
-		case <-t.quit:
-			return PeerStats{}
-		}
-	case <-t.quit:
-		return PeerStats{}
-	}
+	return awaitReply(t.peerStatsCh, &peerStatsQuery{peer: peer, resp: resp}, resp, t.quit, PeerStats{})
 }
 
 // GetStats returns tracker-wide statistics including eviction counters.
 func (t *Tracker) GetStats() TrackerStats {
 	resp := make(chan TrackerStats, 1)
-	select {
-	case t.trackerStatsCh <- resp:
-		select {
-		case s := <-resp:
-			return s
-		case <-t.quit:
-			return TrackerStats{}
-		}
-	case <-t.quit:
-		return TrackerStats{}
-	}
+	return awaitReply(t.trackerStatsCh, resp, resp, t.quit, TrackerStats{})
 }
 
 // GetAllPeerStats returns transaction contribution statistics for all peers.
 func (t *Tracker) GetAllPeerStats() map[string]PeerStats {
 	resp := make(chan map[string]PeerStats, 1)
-	select {
-	case t.allPeerStatsCh <- resp:
-		select {
-		case ps := <-resp:
-			return ps
-		case <-t.quit:
-			return nil
-		}
-	case <-t.quit:
-		return nil
-	}
+	return awaitReply(t.allPeerStatsCh, resp, resp, t.quit, nil)
 }
 
 // SubscribeEvents creates a subscription for transaction state transition events.
@@ -631,14 +608,7 @@ func (t *Tracker) loop() {
 		case q := <-t.peerStatsCh:
 			ps := t.peers[q.peer]
 			if ps != nil {
-				q.resp <- PeerStats{
-					Announced:      ps.announced,
-					Delivered:      ps.delivered,
-					UsefulDelivery: ps.usefulDelivery,
-					FirstAnnouncer: ps.firstAnnouncer,
-					Included:       ps.included,
-					Finalized:      ps.finalized,
-				}
+				q.resp <- ps.toPublic()
 			} else {
 				q.resp <- PeerStats{}
 			}
@@ -653,14 +623,7 @@ func (t *Tracker) loop() {
 		case resp := <-t.allPeerStatsCh:
 			result := make(map[string]PeerStats, len(t.peers))
 			for peer, ps := range t.peers {
-				result[peer] = PeerStats{
-					Announced:      ps.announced,
-					Delivered:      ps.delivered,
-					UsefulDelivery: ps.usefulDelivery,
-					FirstAnnouncer: ps.firstAnnouncer,
-					Included:       ps.included,
-					Finalized:      ps.finalized,
-				}
+				result[peer] = ps.toPublic()
 			}
 			resp <- result
 
