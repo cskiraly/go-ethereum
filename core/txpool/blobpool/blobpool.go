@@ -382,8 +382,8 @@ type BlobPool struct {
 	spent  map[common.Address]*uint256.Int  // Expenditure tracking for individual accounts
 	evict  *evictHeap                       // Heap of cheapest accounts for eviction when full
 
-	discoverFeed event.Feed // Event feed to send out new tx events on pool discovery (reorg excluded)
-	insertFeed   event.Feed // Event feed to send out new tx events on pool inclusion (reorg included)
+	discoverFeed   event.Feed    // Event feed to send out new tx events on pool discovery (reorg excluded)
+	insertFeed     event.Feed    // Event feed to send out new tx events on pool inclusion (reorg included)
 	removedFeed    event.Feed    // Event feed for evicted transactions
 	removed        []common.Hash // Accumulator for batch removal notifications
 	removedReasons []string      // Parallel reasons for batch removal notifications

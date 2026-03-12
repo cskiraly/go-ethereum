@@ -38,13 +38,13 @@ type TxStatus uint8
 
 const (
 	TxAnnounced TxStatus = iota + 1 // Hash announced by peer, body not yet received
-	TxRequested                      // Body requested from peer, awaiting response
-	TxReceived                       // Full body received from peer
-	TxPooled                         // Accepted into local transaction pool
-	TxIncluded                       // Mined into a canonical block
-	TxFinalized                      // Containing block is finalized
-	TxRejected                       // Pool rejected the transaction
-	TxDropped                        // Evicted from pool after being accepted
+	TxRequested                     // Body requested from peer, awaiting response
+	TxReceived                      // Full body received from peer
+	TxPooled                        // Accepted into local transaction pool
+	TxIncluded                      // Mined into a canonical block
+	TxFinalized                     // Containing block is finalized
+	TxRejected                      // Pool rejected the transaction
+	TxDropped                       // Evicted from pool after being accepted
 )
 
 // String returns a human-readable name for the status.
@@ -78,17 +78,17 @@ func (s TxStatus) MarshalJSON() ([]byte, error) {
 
 // TxTrackerEvent is emitted whenever a tracked transaction changes state.
 type TxTrackerEvent struct {
-	TxHash    common.Hash    `json:"txHash"`
-	OldStatus TxStatus       `json:"oldStatus"`
-	NewStatus TxStatus       `json:"newStatus"`
-	Timestamp mclock.AbsTime `json:"timestamp"`
-	Peer      string         `json:"peer,omitempty"`
-	BlockNum  uint64         `json:"blockNum,omitempty"`
-	BlockHash common.Hash    `json:"blockHash,omitempty"`
+	TxHash     common.Hash    `json:"txHash"`
+	OldStatus  TxStatus       `json:"oldStatus"`
+	NewStatus  TxStatus       `json:"newStatus"`
+	Timestamp  mclock.AbsTime `json:"timestamp"`
+	Peer       string         `json:"peer,omitempty"`
+	BlockNum   uint64         `json:"blockNum,omitempty"`
+	BlockHash  common.Hash    `json:"blockHash,omitempty"`
 	RejectErr  string         `json:"rejectErr,omitempty"`
 	DropReason string         `json:"dropReason,omitempty"`
 	Local      bool           `json:"local,omitempty"`
-	TxType    uint8          `json:"txType"`
+	TxType     uint8          `json:"txType"`
 }
 
 const (
@@ -97,12 +97,12 @@ const (
 
 	// Channel sizes for the event loop.
 	announceChanSize      = 1024
-	fetchRequestChanSize = 256
-	receiveChanSize      = 256
-	pooledChanSize   = 256
-	rejectedChanSize = 256
-	peerDropChanSize = 64
-	queryChanSize    = 64
+	fetchRequestChanSize  = 256
+	receiveChanSize       = 256
+	pooledChanSize        = 256
+	rejectedChanSize      = 256
+	peerDropChanSize      = 64
+	queryChanSize         = 64
 	chainEventSize        = 10
 	newTxsEventSize       = 128
 	removedTxsEventSize   = 128
@@ -137,10 +137,10 @@ type txRecord struct {
 	announcers    []string    // Peers that announced (ordered, first = earliest)
 	requestedFrom string      // Peer we requested the body from
 	deliverer     string      // Peer that delivered the full transaction
-	blockNum   uint64      // Block number (when included)
-	blockHash  common.Hash // Block hash (when included)
-	rejectErr  string      // Rejection reason (when status == TxRejected)
-	dropReason string      // Drop reason (when status == TxDropped)
+	blockNum      uint64      // Block number (when included)
+	blockHash     common.Hash // Block hash (when included)
+	rejectErr     string      // Rejection reason (when status == TxRejected)
+	dropReason    string      // Drop reason (when status == TxDropped)
 
 	evictElem *list.Element // Position in eviction list
 }
@@ -157,17 +157,17 @@ type peerStats struct {
 
 // TxInfo is the public, read-only view of a transaction's tracked state.
 type TxInfo struct {
-	Status     TxStatus
-	Local      bool
-	TxType     uint8
-	TxSize     uint32
-	From       common.Address
-	Nonce      uint64
-	Gas        uint64
-	GasFeeCap  *big.Int
-	GasTipCap  *big.Int
-	Value      *big.Int
-	To         *common.Address
+	Status        TxStatus
+	Local         bool
+	TxType        uint8
+	TxSize        uint32
+	From          common.Address
+	Nonce         uint64
+	Gas           uint64
+	GasFeeCap     *big.Int
+	GasTipCap     *big.Int
+	Value         *big.Int
+	To            *common.Address
 	FirstSeen     time.Time
 	Requested     time.Time
 	Received      time.Time
@@ -178,10 +178,10 @@ type TxInfo struct {
 	Announcers    []string
 	RequestedFrom string
 	Deliverer     string
-	BlockNum   uint64
-	BlockHash  common.Hash
-	RejectErr  string
-	DropReason string
+	BlockNum      uint64
+	BlockHash     common.Hash
+	RejectErr     string
+	DropReason    string
 }
 
 // PeerStats is the public view of a peer's transaction contribution.
@@ -196,9 +196,9 @@ type PeerStats struct {
 
 // TrackerStats is the public snapshot of tracker-wide statistics.
 type TrackerStats struct {
-	Total    int            `json:"total"`    // Current number of tracked transactions
-	Capacity int            `json:"capacity"` // Maximum tracker capacity
-	Evicted  EvictionStats  `json:"evicted"`  // Cumulative per-state eviction counts
+	Total    int           `json:"total"`    // Current number of tracked transactions
+	Capacity int           `json:"capacity"` // Maximum tracker capacity
+	Evicted  EvictionStats `json:"evicted"`  // Cumulative per-state eviction counts
 }
 
 // EvictionStats counts how many records were LRU-evicted from each state.
@@ -282,14 +282,14 @@ type Config struct {
 // through finalization. It runs a single-goroutine event loop, matching the
 // pattern used by TxFetcher.
 type Tracker struct {
-	txs       map[common.Hash]*txRecord
-	peers     map[string]*peerStats
-	clock     mclock.Clock
-	chain     BlockchainReader
-	txpool    TxPoolReader
+	txs    map[common.Hash]*txRecord
+	peers  map[string]*peerStats
+	clock  mclock.Clock
+	chain  BlockchainReader
+	txpool TxPoolReader
 
 	maxEntries int
-	evictList  *list.List // LRU ordered by last update (front = most recent)
+	evictList  *list.List    // LRU ordered by last update (front = most recent)
 	evicted    EvictionStats // Cumulative per-state eviction counts
 
 	// Last known chain head for reorg detection.
@@ -300,18 +300,18 @@ type Tracker struct {
 	lastFinalNum uint64
 
 	// Event channels (buffered; senders block when full or on quit).
-	announceCh      chan *announceEvent
-	fetchRequestCh  chan *fetchRequestedEvent
-	receiveCh       chan *receiveEvent
-	pooledCh    chan *pooledEvent
-	rejectedCh  chan *rejectedEvent
-	peerDropCh  chan string
+	announceCh     chan *announceEvent
+	fetchRequestCh chan *fetchRequestedEvent
+	receiveCh      chan *receiveEvent
+	pooledCh       chan *pooledEvent
+	rejectedCh     chan *rejectedEvent
+	peerDropCh     chan string
 
 	// Query channels (blocking request/response).
-	queryCh      chan *txQuery
-	statusCh     chan *statusQuery
-	peerStatsCh  chan *peerStatsQuery
-	trackerStatsCh    chan chan TrackerStats
+	queryCh        chan *txQuery
+	statusCh       chan *statusQuery
+	peerStatsCh    chan *peerStatsQuery
+	trackerStatsCh chan chan TrackerStats
 	allPeerStatsCh chan chan map[string]PeerStats
 
 	// Event feed for state transition notifications.
@@ -334,28 +334,28 @@ func New(config Config) *Tracker {
 		clock = mclock.System{}
 	}
 	return &Tracker{
-		txs:        make(map[common.Hash]*txRecord),
-		peers:      make(map[string]*peerStats),
-		clock:      clock,
-		chain:      config.Chain,
-		txpool:     config.TxPool,
-		maxEntries: maxEntries,
-		evictList:  list.New(),
+		txs:            make(map[common.Hash]*txRecord),
+		peers:          make(map[string]*peerStats),
+		clock:          clock,
+		chain:          config.Chain,
+		txpool:         config.TxPool,
+		maxEntries:     maxEntries,
+		evictList:      list.New(),
 		announceCh:     make(chan *announceEvent, announceChanSize),
 		fetchRequestCh: make(chan *fetchRequestedEvent, fetchRequestChanSize),
 		receiveCh:      make(chan *receiveEvent, receiveChanSize),
-		pooledCh:    make(chan *pooledEvent, pooledChanSize),
-		rejectedCh:  make(chan *rejectedEvent, rejectedChanSize),
-		peerDropCh:  make(chan string, peerDropChanSize),
+		pooledCh:       make(chan *pooledEvent, pooledChanSize),
+		rejectedCh:     make(chan *rejectedEvent, rejectedChanSize),
+		peerDropCh:     make(chan string, peerDropChanSize),
 		queryCh:        make(chan *txQuery, queryChanSize),
 		statusCh:       make(chan *statusQuery, queryChanSize),
 		peerStatsCh:    make(chan *peerStatsQuery, queryChanSize),
-		trackerStatsCh:    make(chan chan TrackerStats, queryChanSize),
+		trackerStatsCh: make(chan chan TrackerStats, queryChanSize),
 		allPeerStatsCh: make(chan chan map[string]PeerStats, queryChanSize),
-		emitCh: make(chan TxTrackerEvent, emitChanSize),
-		quit:   make(chan struct{}),
-		step:  make(chan struct{}, 1),
-		ready: make(chan struct{}),
+		emitCh:         make(chan TxTrackerEvent, emitChanSize),
+		quit:           make(chan struct{}),
+		step:           make(chan struct{}, 1),
+		ready:          make(chan struct{}),
 	}
 }
 
@@ -1194,4 +1194,3 @@ func (t *Tracker) getOrCreatePeer(peer string) *peerStats {
 	}
 	return ps
 }
-

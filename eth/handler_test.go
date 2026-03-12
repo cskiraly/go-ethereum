@@ -163,6 +163,12 @@ func (p *testTxPool) SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bo
 	return p.txFeed.Subscribe(ch)
 }
 
+// SubscribeRemovedTransactions should return an event subscription of
+// RemovedTxsEvent and send events to the given channel.
+func (p *testTxPool) SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription {
+	return p.txFeed.Subscribe(ch)
+}
+
 // FilterType should check whether the pool supports the given type of transactions.
 func (p *testTxPool) FilterType(kind byte) bool {
 	switch kind {

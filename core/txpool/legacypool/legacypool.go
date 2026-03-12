@@ -227,16 +227,16 @@ func (config *Config) sanitize() Config {
 // will reject new transactions with delegations from that account with standard in-flight
 // transactions.
 type LegacyPool struct {
-	config      Config
-	chainconfig *params.ChainConfig
-	chain       BlockChain
-	gasTip      atomic.Pointer[uint256.Int]
-	txFeed      event.Feed
+	config         Config
+	chainconfig    *params.ChainConfig
+	chain          BlockChain
+	gasTip         atomic.Pointer[uint256.Int]
+	txFeed         event.Feed
 	removedFeed    event.Feed    // Event feed for evicted transactions
 	removed        []common.Hash // Accumulator for batch removal notifications
 	removedReasons []string      // Parallel reasons for batch removal notifications
-	signer      types.Signer
-	mu          sync.RWMutex
+	signer         types.Signer
+	mu             sync.RWMutex
 
 	currentHead   atomic.Pointer[types.Header] // Current head of the blockchain
 	currentState  *state.StateDB               // Current state in the blockchain head
