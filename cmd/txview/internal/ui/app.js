@@ -4,6 +4,12 @@
 (function() {
     'use strict';
 
+    // Aliases for shared helpers (from helpers.js).
+    var parseTS = txviewHelpers.parseTS;
+    var formatTS = txviewHelpers.formatTS;
+    var msDelta = txviewHelpers.msDelta;
+    var escapeHtml = txviewHelpers.escapeHtml;
+
     // --- Constants ---
     const ROW_HEIGHT = 28;       // px per row (must match CSS)
     const OVERSCAN = 10;         // extra rows rendered above/below viewport
@@ -37,6 +43,13 @@
     let cumRejected = 0;         // monotonic: total txs that ever entered rejected
     let cumDropped = 0;          // monotonic: total txs that ever entered dropped
     let cumFinalized = 0;        // monotonic: total txs that ever entered finalized
+
+    // --- EMA scalar keys (shared by rate helpers) ---
+    const SCALAR_KEYS = ['total', 'announced', 'requested', 'received', 'pooled',
+        'included', 'finalized', 'rejected', 'dropped', 'reqPipeline',
+        'unsolicited', 'reqToReceived', 'received_total', 'toPooled',
+        'nRejected', 'nDropped', 'private', 'nReorged', 'cumRejected',
+        'cumDropped', 'cumFinalized'];
 
     // --- Sankey smoothing state ---
     let sankeySnapshots = [];        // ring buffer of periodic snapshots
@@ -606,6 +619,29 @@
     }
 
     // ========================================================================
+    // Virtual scroll helpers (shared by feed, top, peers viewports)
+    // ========================================================================
+    function computeVisibleWindow(viewportEl, totalRows) {
+        var scrollTop = viewportEl.scrollTop;
+        var viewHeight = viewportEl.clientHeight;
+        var firstVisible = Math.floor(scrollTop / ROW_HEIGHT);
+        var lastVisible = Math.ceil((scrollTop + viewHeight) / ROW_HEIGHT);
+        var startIdx = Math.max(0, firstVisible - OVERSCAN);
+        var endIdx = Math.min(totalRows, lastVisible + OVERSCAN);
+        return { startIdx: startIdx, endIdx: endIdx, count: endIdx - startIdx };
+    }
+
+    function ensureRows(container, count, templateHtml) {
+        while (container.children.length > count) container.removeChild(container.lastChild);
+        while (container.children.length < count) {
+            var row = document.createElement('div');
+            row.className = 'vrow';
+            row.innerHTML = templateHtml;
+            container.appendChild(row);
+        }
+    }
+
+    // ========================================================================
     // Feed view
     // ========================================================================
     function isPrivateTx(ev) {
@@ -635,41 +671,27 @@
         feedViewDirty = false;
     }
 
+    var FEED_ROW_TPL =
+        '<span class="col-hash"></span>' +
+        '<span class="col-status"></span>' +
+        '<span class="col-peer"></span>' +
+        '<span class="col-block"></span>' +
+        '<span class="col-age"></span>' +
+        '<span class="col-error"></span>' +
+        '<span class="col-progress"></span>';
+
     function renderFeedViewport() {
         if (feedViewDirty) rebuildFeedHashes();
 
         var totalRows = visibleHashes.length;
         scrollSpacer.style.height = (totalRows * ROW_HEIGHT) + 'px';
-
-        var scrollTop = viewport.scrollTop;
-        var viewHeight = viewport.clientHeight;
-        var firstVisible = Math.floor(scrollTop / ROW_HEIGHT);
-        var lastVisible = Math.ceil((scrollTop + viewHeight) / ROW_HEIGHT);
-        var startIdx = Math.max(0, firstVisible - OVERSCAN);
-        var endIdx = Math.min(totalRows, lastVisible + OVERSCAN);
-
-        rowContainer.style.transform = 'translateY(' + (startIdx * ROW_HEIGHT) + 'px)';
+        var win = computeVisibleWindow(viewport, totalRows);
+        rowContainer.style.transform = 'translateY(' + (win.startIdx * ROW_HEIGHT) + 'px)';
+        ensureRows(rowContainer, win.count, FEED_ROW_TPL);
 
         var now = Date.now();
-        var count = endIdx - startIdx;
-
-        // Reuse existing row elements.
-        while (rowContainer.children.length > count) {
-            rowContainer.removeChild(rowContainer.lastChild);
-        }
-        while (rowContainer.children.length < count) {
-            var row = document.createElement('div');
-            row.className = 'vrow';
-            row.innerHTML =
-                '<span class="col-hash"></span>' +
-                '<span class="col-status"></span>' +
-                '<span class="col-peer"></span>' +
-                '<span class="col-block"></span>' +
-                '<span class="col-age"></span>' +
-                '<span class="col-error"></span>' +
-                '<span class="col-progress"></span>';
-            rowContainer.appendChild(row);
-        }
+        var startIdx = win.startIdx;
+        var endIdx = win.endIdx;
 
         var fetchNeeded = [];
 
@@ -787,44 +809,31 @@
         topViewDirty = false;
     }
 
+    var TOP_ROW_TPL =
+        '<span class="top-col-hash"></span>' +
+        '<span class="top-col-status"></span>' +
+        '<span class="top-col-from"></span>' +
+        '<span class="top-col-nonce"></span>' +
+        '<span class="top-col-value"></span>' +
+        '<span class="top-col-feecap"></span>' +
+        '<span class="top-col-tipcap"></span>' +
+        '<span class="top-col-gas"></span>' +
+        '<span class="top-col-age"></span>' +
+        '<span class="top-col-progress"></span>';
+
     function renderTopViewport() {
         if (topViewDirty) rebuildTopHashes();
 
         var totalRows = topVisibleHashes.length;
         topScrollSpacer.style.height = (totalRows * ROW_HEIGHT) + 'px';
-
-        var scrollTop = topViewport.scrollTop;
-        var viewHeight = topViewport.clientHeight;
-        var firstVisible = Math.floor(scrollTop / ROW_HEIGHT);
-        var lastVisible = Math.ceil((scrollTop + viewHeight) / ROW_HEIGHT);
-        var startIdx = Math.max(0, firstVisible - OVERSCAN);
-        var endIdx = Math.min(totalRows, lastVisible + OVERSCAN);
-
-        topRowContainer.style.transform = 'translateY(' + (startIdx * ROW_HEIGHT) + 'px)';
+        var win = computeVisibleWindow(topViewport, totalRows);
+        topRowContainer.style.transform = 'translateY(' + (win.startIdx * ROW_HEIGHT) + 'px)';
+        ensureRows(topRowContainer, win.count, TOP_ROW_TPL);
 
         var now = Date.now();
-        var count = endIdx - startIdx;
-
-        // Reuse row elements.
-        while (topRowContainer.children.length > count) {
-            topRowContainer.removeChild(topRowContainer.lastChild);
-        }
-        while (topRowContainer.children.length < count) {
-            var row = document.createElement('div');
-            row.className = 'vrow';
-            row.innerHTML =
-                '<span class="top-col-hash"></span>' +
-                '<span class="top-col-status"></span>' +
-                '<span class="top-col-from"></span>' +
-                '<span class="top-col-nonce"></span>' +
-                '<span class="top-col-value"></span>' +
-                '<span class="top-col-feecap"></span>' +
-                '<span class="top-col-tipcap"></span>' +
-                '<span class="top-col-gas"></span>' +
-                '<span class="top-col-age"></span>' +
-                '<span class="top-col-progress"></span>';
-            topRowContainer.appendChild(row);
-        }
+        var startIdx = win.startIdx;
+        var endIdx = win.endIdx;
+        var count = win.count;
 
         // Collect hashes that need fetching.
         var fetchNeeded = [];
@@ -1026,42 +1035,7 @@
     }
 
     function renderDetail(hash, info, container) {
-        var base = parseTS(info.FirstSeen);
-        var fields = [
-            ['Hash', hash],
-            ['Status', info.Status],
-            ['Local', info.Local ? 'yes' : 'no'],
-            ['Type', info.TxType],
-            ['Size', info.TxSize + ' bytes'],
-            ['From', info.From || '-'],
-            ['Nonce', info.Nonce],
-            ['Gas', info.Gas],
-            ['Gas Fee Cap', info.GasFeeCap ? info.GasFeeCap + ' wei' : '-'],
-            ['Gas Tip Cap', info.GasTipCap ? info.GasTipCap + ' wei' : '-'],
-            ['Value', info.Value ? info.Value + ' wei' : '-'],
-            ['To', info.To || '-'],
-            ['First Seen', formatTS(info.FirstSeen, null)],
-            ['Requested', formatTS(info.Requested, base)],
-            ['Requested From', info.RequestedFrom || '-'],
-            ['Received', formatTS(info.Received, base)],
-            ['Pooled', formatTS(info.Pooled, base)],
-            ['Included', formatTS(info.Included, base)],
-            ['Finalized', formatTS(info.Finalized, base)],
-            ['Dropped', formatTS(info.Dropped, base)],
-            ['Drop Reason', info.DropReason || '-'],
-            ['Deliverer', info.Deliverer || '-'],
-            ['Announcers', (info.Announcers || []).join(', ') || '-'],
-            ['Block #', info.BlockNum || '-'],
-            ['Block Hash', info.BlockHash || '-'],
-            ['Reject Error', info.RejectErr || '-'],
-        ];
-
-        var html = '';
-        for (var i = 0; i < fields.length; i++) {
-            html += '<div class="field"><label>' + escapeHtml(fields[i][0]) +
-                    '</label><div class="value">' + escapeHtml(String(fields[i][1])) + '</div></div>';
-        }
-        container.innerHTML = html;
+        txviewHelpers.renderFields(txviewHelpers.buildTxFields(hash, info), container);
     }
 
     // ========================================================================
@@ -1097,18 +1071,6 @@
         }
 
         return '<span class="progress">' + steps.join('<span class="arrow">\u2192</span>') + '</span>';
-    }
-
-    // msDelta formats the millisecond difference between two Date objects.
-    function msDelta(ts, base) {
-        var deltaMs = ts.getTime() - base.getTime();
-        if (deltaMs < 0) deltaMs = 0;
-        var deltaSec = deltaMs / 1000;
-        if (deltaSec < 0.1) return '0s';
-        if (deltaSec < 10) return deltaSec.toFixed(1) + 's';
-        if (deltaSec < 60) return Math.floor(deltaSec) + 's';
-        if (deltaSec < 3600) return Math.floor(deltaSec / 60) + 'm' + Math.floor(deltaSec % 60) + 's';
-        return Math.floor(deltaSec / 3600) + 'h' + Math.floor((deltaSec % 3600) / 60) + 'm';
     }
 
     // ========================================================================
@@ -1202,48 +1164,33 @@
         peersViewDirty = false;
     }
 
+    var PEERS_ROW_TPL =
+        '<span class="peers-col-id"></span>' +
+        '<span class="peers-col-announced"></span>' +
+        '<span class="peers-col-delivered"></span>' +
+        '<span class="peers-col-useful"></span>' +
+        '<span class="peers-col-first"></span>' +
+        '<span class="peers-col-included"></span>' +
+        '<span class="peers-col-finalized"></span>' +
+        '<span class="peers-col-useful-pct"></span>' +
+        '<span class="peers-col-first-pct"></span>' +
+        '<span class="peers-col-included-pct"></span>' +
+        '<span class="peers-col-finalized-pct"></span>' +
+        '<span class="peers-col-included-share"></span>' +
+        '<span class="peers-col-finalized-share"></span>';
+
     function renderPeersViewport() {
         if (peersViewDirty) rebuildPeersSorted();
 
         var totalRows = peersSorted.length;
         peersScrollSpacer.style.height = (totalRows * ROW_HEIGHT) + 'px';
 
-        var scrollTop = peersViewport.scrollTop;
-        var viewHeight = peersViewport.clientHeight;
-        var firstVisible = Math.floor(scrollTop / ROW_HEIGHT);
-        var lastVisible = Math.ceil((scrollTop + viewHeight) / ROW_HEIGHT);
-        var startIdx = Math.max(0, firstVisible - OVERSCAN);
-        var endIdx = Math.min(totalRows, lastVisible + OVERSCAN);
+        var win = computeVisibleWindow(peersViewport, totalRows);
+        peersRowContainer.style.transform = 'translateY(' + (win.startIdx * ROW_HEIGHT) + 'px)';
+        ensureRows(peersRowContainer, win.count, PEERS_ROW_TPL);
 
-        peersRowContainer.style.transform = 'translateY(' + (startIdx * ROW_HEIGHT) + 'px)';
-
-        var count = endIdx - startIdx;
-
-        while (peersRowContainer.children.length > count) {
-            peersRowContainer.removeChild(peersRowContainer.lastChild);
-        }
-        while (peersRowContainer.children.length < count) {
-            var row = document.createElement('div');
-            row.className = 'vrow';
-            row.innerHTML =
-                '<span class="peers-col-id"></span>' +
-                '<span class="peers-col-announced"></span>' +
-                '<span class="peers-col-delivered"></span>' +
-                '<span class="peers-col-useful"></span>' +
-                '<span class="peers-col-first"></span>' +
-                '<span class="peers-col-included"></span>' +
-                '<span class="peers-col-finalized"></span>' +
-                '<span class="peers-col-useful-pct"></span>' +
-                '<span class="peers-col-first-pct"></span>' +
-                '<span class="peers-col-included-pct"></span>' +
-                '<span class="peers-col-finalized-pct"></span>' +
-                '<span class="peers-col-included-share"></span>' +
-                '<span class="peers-col-finalized-share"></span>';
-            peersRowContainer.appendChild(row);
-        }
-
-        for (var i = 0; i < count; i++) {
-            var idx = startIdx + i;
+        for (var i = 0; i < win.count; i++) {
+            var idx = win.startIdx + i;
             var entry = peersSorted[idx];
             var r = peersRowContainer.children[i];
             var s = entry.stats;
@@ -1518,13 +1465,8 @@
 
         // Compute per-second rates from deltas.
         var rates = {};
-        var scalarKeys = ['total', 'announced', 'requested', 'received', 'pooled',
-            'included', 'finalized', 'rejected', 'dropped', 'reqPipeline',
-            'unsolicited', 'reqToReceived', 'received_total', 'toPooled',
-            'nRejected', 'nDropped', 'private', 'nReorged', 'cumRejected',
-            'cumDropped', 'cumFinalized'];
-        for (var i = 0; i < scalarKeys.length; i++) {
-            var k = scalarKeys[i];
+        for (var i = 0; i < SCALAR_KEYS.length; i++) {
+            var k = SCALAR_KEYS[i];
             var delta = (flows[k] || 0) - (prev[k] || 0);
             rates[k] = Math.max(0, delta / dt);
         }
@@ -1539,8 +1481,8 @@
             emaState.ema = rates;
         } else {
             var ema = emaState.ema;
-            for (var j = 0; j < scalarKeys.length; j++) {
-                var sk = scalarKeys[j];
+            for (var j = 0; j < SCALAR_KEYS.length; j++) {
+                var sk = SCALAR_KEYS[j];
                 ema[sk] = rates[sk] * (1 - decay) + (ema[sk] || 0) * decay;
             }
             blendEmaReasonMap(ema.dropReasons, rates.dropReasons, decay);
@@ -1592,13 +1534,8 @@
         if (elapsed <= 0) return null;
 
         var rates = {};
-        var scalarKeys = ['total', 'announced', 'requested', 'received', 'pooled',
-            'included', 'finalized', 'rejected', 'dropped', 'reqPipeline',
-            'unsolicited', 'reqToReceived', 'received_total', 'toPooled',
-            'nRejected', 'nDropped', 'private', 'nReorged', 'cumRejected',
-            'cumDropped', 'cumFinalized'];
-        for (var i = 0; i < scalarKeys.length; i++) {
-            var k = scalarKeys[i];
+        for (var i = 0; i < SCALAR_KEYS.length; i++) {
+            var k = SCALAR_KEYS[i];
             rates[k] = Math.max(0, ((lastFlows[k] || 0) - (firstFlows[k] || 0)) / elapsed);
         }
         rates.dropReasons = computeReasonRates(lastFlows.dropReasons, firstFlows.dropReasons, elapsed);
@@ -1644,7 +1581,45 @@
                 return;
             }
 
-            renderSankeyFromRates(svg, W, H, rates, titleSuffix);
+            // Derive flow values from rates.
+            var nPrivate = rates.private || 0;
+            var nRequested = rates.requested || 0;
+            var reqTotal = rates.reqPipeline || 0;
+            var unsolTotal = rates.unsolicited || 0;
+            var totalRate = rates.total || 0;
+            var announcedTotal = totalRate - nPrivate;
+            var nRejected = rates.nRejected || 0;
+            var nDropped = rates.nDropped || 0;
+            var receivedTotal = rates.received_total || 0;
+            var toPooled = rates.toPooled || 0;
+            var toIncluded = Math.max(0, toPooled - nDropped);
+            var includedTotal = toIncluded + nPrivate;
+            var toFinalized = includedTotal;
+
+            drawSankey(svg, W, H, {
+                total: totalRate, announcedTotal: announcedTotal, reqTotal: reqTotal,
+                unsolTotal: unsolTotal, nRequested: nRequested, nRejected: nRejected,
+                nDropped: nDropped, receivedTotal: receivedTotal, toPooled: toPooled,
+                toIncluded: toIncluded, includedTotal: includedTotal, toFinalized: toFinalized,
+                nPrivate: nPrivate, nReorged: rates.nReorged || 0,
+                rejectReasons: rates.rejectReasons || {}, dropReasons: rates.dropReasons || {},
+                branchLabel: function(v) { return [formatRate(v) + '/s']; },
+                reasonLabel: function(v, name) { return formatRate(v) + '/s ' + name; },
+                mainNodeLabels: function(m) { return [formatRate(m.cum) + '/s']; },
+                mainNodeData: [
+                    { key: 'announced', label: 'Announced', cum: announcedTotal },
+                    { key: 'requested', label: 'Requested', cum: reqTotal },
+                    { key: 'received',  label: 'Received',  cum: receivedTotal },
+                    { key: 'pooled',    label: 'Pooled',    cum: toPooled },
+                    { key: 'included',  label: 'Included',  cum: includedTotal },
+                    { key: 'finalized', label: 'Finalized', cum: toFinalized },
+                ],
+                rejBranchValues: { cum: rates.cumRejected || 0 },
+                dropBranchValues: { cum: rates.cumDropped || 0 },
+                privBranchValue: nPrivate,
+                title: 'Transaction Flow \u2014 ' + formatRate(totalRate) + ' tx/s ' + titleSuffix,
+                pendingFinalization: 0
+            });
             return;
         }
 
@@ -1692,421 +1667,185 @@
         var atIncluded = reqPath.included + unsolPath.included + privatePath.included;
         var toFinalized = includedTotal;  // everything included will finalize (conservation)
 
-        // -----------------------------------------------------------
-        // Layout
-        // -----------------------------------------------------------
-        var PAD = { top: 60, bottom: 72, left: 90, right: 70 };
-        var NODE_W = 16;
-        var availW = W - PAD.left - PAD.right - NODE_W;
-        var availH = H - PAD.top - PAD.bottom - 40;
-        var colGap = availW / 5;  // 6 main columns (0..5)
-        var scale = availH / Math.max(1, announcedTotal || total);
-
-        // Minimum visible height for nonzero flows.
-        function sh(v) { return v > 0 ? Math.max(2, v * scale) : 0; }
-
-        // Column x positions.
-        function colX(c) { return PAD.left + c * colGap; }
-        var yTop = PAD.top;
-
-        // -----------------------------------------------------------
-        // Position main nodes (top-aligned for smooth flow).
-        // -----------------------------------------------------------
-        var annH  = sh(announcedTotal);
-        var reqH  = sh(reqTotal);
-        var rcvH  = sh(receivedTotal);
-        var poolH = sh(toPooled);
-        var inclH = sh(includedTotal);
-        var finH  = sh(toFinalized);
-
-        var annNode  = { x: colX(0), y: yTop, h: annH };
-        var reqNode  = { x: colX(1), y: yTop, h: reqH };
-        var rcvNode  = { x: colX(2), y: yTop, h: rcvH };
-        var poolNode = { x: colX(3), y: yTop, h: poolH };
-        var inclNode = { x: colX(4), y: yTop, h: inclH };
-        var finNode  = { x: colX(5), y: yTop, h: finH };
-
-        // -----------------------------------------------------------
-        // Draw links (back to front).
-        // -----------------------------------------------------------
-        // 1. Announced → Requested (top portion of announced).
-        if (reqTotal > 0) {
-            drawLink(svg, annNode.x + NODE_W, yTop, sh(reqTotal),
-                     reqNode.x, yTop, reqH,
-                     SANKEY_COLORS.requested);
-        }
-
-        // 2. Announced → Received (unsolicited, below requested flow).
-        if (unsolTotal > 0) {
-            var unsolSrcY = yTop + sh(reqTotal);
-            var unsolTgtY = yTop + sh(reqTotal - nRequested); // below requested-path incoming
-            drawLink(svg, annNode.x + NODE_W, unsolSrcY, sh(unsolTotal),
-                     rcvNode.x, unsolTgtY, sh(unsolTotal),
-                     SANKEY_COLORS.unsolicited);
-        }
-
-        // 3. Requested → Received (requested path that reached received).
-        var reqToRcv = reqTotal - nRequested;
-        if (reqToRcv > 0) {
-            drawLink(svg, reqNode.x + NODE_W, yTop, sh(reqToRcv),
-                     rcvNode.x, yTop, sh(reqToRcv),
-                     SANKEY_COLORS.requested);
-        }
-
-        // 4. Received → Pooled.
-        if (toPooled > 0) {
-            drawLink(svg, rcvNode.x + NODE_W, yTop, sh(toPooled),
-                     poolNode.x, yTop, poolH,
-                     SANKEY_COLORS.received);
-        }
-
-        // 5. Pooled → Included.
-        if (toIncluded > 0) {
-            drawLink(svg, poolNode.x + NODE_W, yTop, sh(toIncluded),
-                     inclNode.x, yTop, sh(toIncluded),
-                     SANKEY_COLORS.pooled);
-        }
-
-        // 6. Included → Finalized.
-        if (toFinalized > 0) {
-            drawLink(svg, inclNode.x + NODE_W, yTop, sh(toFinalized),
-                     finNode.x, yTop, finH,
-                     SANKEY_COLORS.included);
-        }
-
-        // 7. Received → Rejected (branch down).
-        if (nRejected > 0) {
-            var rejSrcY = yTop + sh(toPooled);
-            var rejBarH = sh(nRejected);
-            var rejX = colX(2.5);
-            var rejY = Math.max(rcvNode.y + rcvNode.h + 30, yTop + availH * 0.7);
-            if (rejY + rejBarH > H - 30) rejY = H - 30 - rejBarH;
-
-            drawLink(svg, rcvNode.x + NODE_W, rejSrcY, rejBarH,
-                     rejX, rejY, rejBarH,
-                     SANKEY_COLORS.rejected);
-            // Rejected node.
-            drawNode(svg, rejX, rejY, NODE_W, rejBarH, SANKEY_COLORS.rejected);
-            drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 - 6,
-                      'Rejected', 'start', '#e0e0e0');
-            drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 8,
-                      Math.round(snapCumRejected).toLocaleString() + ' total', 'start', '#888', '10');
-            if (Math.round(counts.rejected) !== Math.round(snapCumRejected)) {
-                drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 20,
-                          Math.round(counts.rejected).toLocaleString() + ' now', 'start', '#555', '9');
+        drawSankey(svg, W, H, {
+            total: total, announcedTotal: announcedTotal, reqTotal: reqTotal,
+            unsolTotal: unsolTotal, nRequested: nRequested, nRejected: nRejected,
+            nDropped: nDropped, receivedTotal: receivedTotal, toPooled: toPooled,
+            toIncluded: toIncluded, includedTotal: includedTotal, toFinalized: toFinalized,
+            nPrivate: nPrivate, nReorged: nReorged,
+            rejectReasons: rejectReasons, dropReasons: dropReasons,
+            // Cumulative-specific: branch sub-labels and main node labels.
+            branchLabel: function(cumVal, nowVal) {
+                var lines = [Math.round(cumVal).toLocaleString() + ' total'];
+                if (Math.round(nowVal) !== Math.round(cumVal))
+                    lines.push(Math.round(nowVal).toLocaleString() + ' now');
+                return lines;
+            },
+            reasonLabel: function(v, name) { return Math.round(v) + ' ' + name; },
+            mainNodeLabels: function(m) {
+                var lines = [Math.round(m.now).toLocaleString() + ' now'];
+                if (Math.round(m.cum) !== Math.round(m.now))
+                    lines.push(Math.round(m.cum).toLocaleString() + ' total');
+                return lines;
+            },
+            mainNodeData: [
+                { key: 'announced', label: 'Announced', now: nAnnounced,       cum: announcedTotal },
+                { key: 'requested', label: 'Requested', now: nRequested,        cum: reqTotal },
+                { key: 'received',  label: 'Received',  now: atReceived,        cum: receivedTotal },
+                { key: 'pooled',    label: 'Pooled',    now: atPooled,          cum: toPooled },
+                { key: 'included',  label: 'Included',  now: atIncluded,        cum: includedTotal },
+                { key: 'finalized', label: 'Finalized', now: counts.finalized,  cum: snapCumFinalized },
+            ],
+            rejBranchValues: { cum: snapCumRejected, now: counts.rejected },
+            dropBranchValues: { cum: snapCumDropped, now: counts.dropped },
+            privBranchValue: nPrivate,
+            title: 'Transaction Flow \u2014 ' + Math.round(total).toLocaleString() + ' total',
+            // Cumulative-only: pending finalization.
+            pendingFinalization: atIncluded,
+            pendingBaseY: function(finNode) {
+                return finNode.y + finNode.h + (Math.round(snapCumFinalized) !== Math.round(counts.finalized) ? 38 : 26);
             }
-            // Show reject reason breakdown (one line per reason).
-            var rejReasonKeys = Object.keys(rejectReasons).sort(function(a, b) { return rejectReasons[b] - rejectReasons[a]; });
-            if (rejReasonKeys.length > 0) {
-                var rejBaseY = rejY + rejBarH / 2 + (Math.round(counts.rejected) !== Math.round(snapCumRejected) ? 32 : 20);
-                for (var ri = 0; ri < rejReasonKeys.length; ri++) {
-                    drawLabel(svg, rejX + NODE_W + 6, rejBaseY + ri * 12,
-                              Math.round(rejectReasons[rejReasonKeys[ri]]) + ' ' + rejReasonKeys[ri], 'start', '#777', '9');
-                }
-            }
-        }
-
-        // 8. Pooled → Dropped (branch down).
-        if (nDropped > 0) {
-            var dropSrcY = yTop + sh(toIncluded);
-            var dropBarH = sh(nDropped);
-            var dropX = colX(3.5);
-            var dropY = Math.max(poolNode.y + poolNode.h + 30, yTop + availH * 0.55);
-            if (dropY + dropBarH > H - 30) dropY = H - 30 - dropBarH;
-
-            drawLink(svg, poolNode.x + NODE_W, dropSrcY, dropBarH,
-                     dropX, dropY, dropBarH,
-                     SANKEY_COLORS.dropped);
-            // Dropped node.
-            drawNode(svg, dropX, dropY, NODE_W, dropBarH, SANKEY_COLORS.dropped);
-            drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 - 6,
-                      'Dropped', 'start', '#e0e0e0');
-            drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 8,
-                      Math.round(snapCumDropped).toLocaleString() + ' total', 'start', '#888', '10');
-            if (Math.round(counts.dropped) !== Math.round(snapCumDropped)) {
-                drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 20,
-                          Math.round(counts.dropped).toLocaleString() + ' now', 'start', '#555', '9');
-            }
-            // Show drop reason breakdown (one line per reason).
-            var reasonKeys = Object.keys(dropReasons).sort(function(a, b) { return dropReasons[b] - dropReasons[a]; });
-            if (reasonKeys.length > 0) {
-                var baseY = dropY + dropBarH / 2 + (Math.round(counts.dropped) !== Math.round(snapCumDropped) ? 32 : 20);
-                for (var ri = 0; ri < reasonKeys.length; ri++) {
-                    drawLabel(svg, dropX + NODE_W + 6, baseY + ri * 12,
-                              Math.round(dropReasons[reasonKeys[ri]]) + ' ' + reasonKeys[ri], 'start', '#777', '9');
-                }
-            }
-        }
-
-        // 9. Private → Included (from below-left, feeding into included node).
-        if (nPrivate > 0) {
-            var privBarH = sh(nPrivate);
-            var privX = colX(3.9);
-            var privY = Math.max(inclNode.y + inclNode.h + 30, yTop + availH * 0.7);
-            if (privY + privBarH > H - 30) privY = H - 30 - privBarH;
-
-            var privTgtY = yTop + sh(toIncluded); // enters below pooled-flow at included
-            drawLink(svg, privX + NODE_W, privY, privBarH,
-                     inclNode.x, privTgtY, privBarH,
-                     SANKEY_COLORS.private);
-            // Private node.
-            drawNode(svg, privX, privY, NODE_W, privBarH, SANKEY_COLORS.private);
-            drawLabel(svg, privX - 6, privY + privBarH / 2 - 6,
-                      'Private', 'end', '#e0e0e0');
-            drawLabel(svg, privX - 6, privY + privBarH / 2 + 8,
-                      Math.round(nPrivate).toLocaleString() + ' total', 'end', '#888', '10');
-        }
-
-        // -----------------------------------------------------------
-        // Draw main nodes and labels.
-        // -----------------------------------------------------------
-        // Cumulative = all txs that ever reached this state (current + moved on).
-        var cumAnnounced  = announcedTotal;
-        var cumRequested  = reqTotal;
-        var cumReceived   = receivedTotal;
-        var cumPooled     = toPooled;  // all that entered pooled
-        var cumIncluded   = includedTotal;
-        var mainNodes = [
-            { n: annNode,  key: 'announced',  label: 'Announced',  now: nAnnounced,       cum: cumAnnounced },
-            { n: reqNode,  key: 'requested',  label: 'Requested',  now: nRequested,        cum: cumRequested },
-            { n: rcvNode,  key: 'received',   label: 'Received',   now: atReceived,        cum: cumReceived },
-            { n: poolNode, key: 'pooled',     label: 'Pooled',     now: atPooled,          cum: cumPooled },
-            { n: inclNode, key: 'included',   label: 'Included',   now: atIncluded,        cum: cumIncluded },
-            { n: finNode,  key: 'finalized',  label: 'Finalized',  now: counts.finalized,  cum: snapCumFinalized },
-        ];
-        var pendingFinalization = atIncluded;  // txs at Included waiting for finalization
-
-        for (var i = 0; i < mainNodes.length; i++) {
-            var m = mainNodes[i];
-            if (m.n.h <= 0) continue;
-            drawNode(svg, m.n.x, m.n.y, NODE_W, m.n.h, SANKEY_COLORS[m.key]);
-            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y - 12, m.label, 'middle', '#e0e0e0');
-            // Transit states: show current count as primary label.
-            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
-                      Math.round(m.now).toLocaleString() + ' now', 'middle', '#888', '10');
-            if (Math.round(m.cum) !== Math.round(m.now)) {
-                drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 26,
-                          Math.round(m.cum).toLocaleString() + ' total', 'middle', '#555', '9');
-            }
-        }
-        // Show pending finalization count below the Finalized node.
-        if (pendingFinalization > 0 && finNode.h > 0) {
-            var pendY = finNode.y + finNode.h + (Math.round(snapCumFinalized) !== Math.round(counts.finalized) ? 38 : 26);
-            drawLabel(svg, finNode.x + NODE_W / 2, pendY,
-                      Math.round(pendingFinalization).toLocaleString() + ' pending', 'middle', '#b0860a', '9');
-        }
-
-        // -----------------------------------------------------------
-        // Backward link: Included → Pooled (reorgs).
-        // -----------------------------------------------------------
-        if (nReorged > 0) {
-            var reorgBandH = sh(nReorged);
-            // Arc dips below the lowest element.
-            var maxBottom = Math.max(
-                poolNode.y + poolNode.h,
-                inclNode.y + inclNode.h
-            );
-            var reorgDropY = maxBottom + 40;
-            // Clamp so it doesn't go past canvas.
-            if (reorgDropY + reorgBandH + 20 > H) reorgDropY = H - reorgBandH - 20;
-            drawBackLink(svg, inclNode, poolNode, NODE_W, reorgBandH, reorgDropY, '#ff6f00');
-            // Label at the midpoint of the arc.
-            var reorgMidX = (inclNode.x + poolNode.x + NODE_W) / 2;
-            var reorgLabelY = reorgDropY + reorgBandH / 2 + 8;
-            drawLabel(svg, reorgMidX, reorgLabelY,
-                      nReorged.toLocaleString() + ' reorged', 'middle', '#ff6f00', '10');
-        }
-
-        // -----------------------------------------------------------
-        // Annotation: unsolicited vs requested flow labels.
-        // -----------------------------------------------------------
-        if (reqTotal > 0 && unsolTotal > 0) {
-            // Label on the requested path (above the flow).
-            var midReqX = (annNode.x + NODE_W + reqNode.x) / 2;
-            drawLabel(svg, midReqX, yTop - 4, 'requested', 'middle', '#00838f', '9');
-            // Label on the unsolicited path (below requested label).
-            var unsolLabelY = yTop + sh(reqTotal) + sh(unsolTotal) / 2;
-            drawLabel(svg, midReqX, unsolLabelY, 'unsolicited', 'middle', '#78909c', '9');
-        }
-
-        // Title.
-        drawLabel(svg, W / 2, 20,
-                  'Transaction Flow \u2014 ' + Math.round(total).toLocaleString() + ' total',
-                  'middle', '#888', '13');
+        });
     }
 
-    // Render Sankey diagram from per-second rate values.
-    function renderSankeyFromRates(svg, W, H, rates, titleSuffix) {
-        var totalRate = rates.total || 0;
-        if (totalRate < 1e-6) {
-            drawLabel(svg, W / 2, H / 2, 'No flow detected\u2026', 'middle', '#888', '14');
-            return;
-        }
-
-        var nPrivate = rates.private || 0;
-        var nAnnounced = rates.announced || 0;
-        var nRequested = rates.requested || 0;
-        var reqTotal = rates.reqPipeline || 0;
-        var unsolTotal = rates.unsolicited || 0;
-        var announcedTotal = totalRate - nPrivate;
-
-        var snapCumRejected = rates.cumRejected || 0;
-        var snapCumDropped = rates.cumDropped || 0;
-        var snapCumFinalized = rates.cumFinalized || 0;
-
-        var atReceived = rates.received || 0; // currently at received (not meaningful for rates, use 0)
-        var nRejected = rates.nRejected || 0;
-        var nDropped = rates.nDropped || 0;
-        var receivedTotal = rates.received_total || 0;
-        var toPooled = rates.toPooled || 0;
-        var atPooled = rates.pooled || 0; // currently at pooled
-        var toIncluded = toPooled - nDropped;
-        if (toIncluded < 0) toIncluded = 0;
-        var includedTotal = toIncluded + nPrivate;
-        var atIncluded = rates.included || 0;
-        var toFinalized = includedTotal;
-        var nReorged = rates.nReorged || 0;
-        var dropReasons = rates.dropReasons || {};
-        var rejectReasons = rates.rejectReasons || {};
-
-        // --- Layout (same as cumulative mode) ---
+    // Shared Sankey drawing: layout, links, branches, nodes, labels, title.
+    // p = { total, announcedTotal, reqTotal, unsolTotal, nRequested, nRejected,
+    //        nDropped, receivedTotal, toPooled, toIncluded, includedTotal,
+    //        toFinalized, nPrivate, nReorged, rejectReasons, dropReasons,
+    //        branchLabel(cumVal, nowVal), reasonLabel(v, name),
+    //        mainNodeLabels(m), mainNodeData, rejBranchValues, dropBranchValues,
+    //        privBranchValue, title, pendingFinalization, pendingBaseY? }
+    function drawSankey(svg, W, H, p) {
         var PAD = { top: 60, bottom: 72, left: 90, right: 70 };
         var NODE_W = 16;
         var availW = W - PAD.left - PAD.right - NODE_W;
         var availH = H - PAD.top - PAD.bottom - 40;
         var colGap = availW / 5;
-        var scale = availH / Math.max(1e-6, announcedTotal || totalRate);
+        var scale = availH / Math.max(1, p.announcedTotal || p.total);
         function sh(v) { return v > 0 ? Math.max(2, v * scale) : 0; }
         function colX(c) { return PAD.left + c * colGap; }
         var yTop = PAD.top;
 
-        var annH  = sh(announcedTotal);
-        var reqH  = sh(reqTotal);
-        var rcvH  = sh(receivedTotal);
-        var poolH = sh(toPooled);
-        var inclH = sh(includedTotal);
-        var finH  = sh(toFinalized);
+        // Node positions.
+        var annNode  = { x: colX(0), y: yTop, h: sh(p.announcedTotal) };
+        var reqNode  = { x: colX(1), y: yTop, h: sh(p.reqTotal) };
+        var rcvNode  = { x: colX(2), y: yTop, h: sh(p.receivedTotal) };
+        var poolNode = { x: colX(3), y: yTop, h: sh(p.toPooled) };
+        var inclNode = { x: colX(4), y: yTop, h: sh(p.includedTotal) };
+        var finNode  = { x: colX(5), y: yTop, h: sh(p.toFinalized) };
 
-        var annNode  = { x: colX(0), y: yTop, h: annH };
-        var reqNode  = { x: colX(1), y: yTop, h: reqH };
-        var rcvNode  = { x: colX(2), y: yTop, h: rcvH };
-        var poolNode = { x: colX(3), y: yTop, h: poolH };
-        var inclNode = { x: colX(4), y: yTop, h: inclH };
-        var finNode  = { x: colX(5), y: yTop, h: finH };
-
-        // --- Draw links ---
-        if (reqTotal > 0)
-            drawLink(svg, annNode.x + NODE_W, yTop, sh(reqTotal), reqNode.x, yTop, reqH, SANKEY_COLORS.requested);
-        if (unsolTotal > 0) {
-            var unsolSrcY = yTop + sh(reqTotal);
-            var unsolTgtY = yTop + sh(reqTotal - nRequested);
-            drawLink(svg, annNode.x + NODE_W, unsolSrcY, sh(unsolTotal), rcvNode.x, unsolTgtY, sh(unsolTotal), SANKEY_COLORS.unsolicited);
+        // --- Main flow links ---
+        if (p.reqTotal > 0)
+            drawLink(svg, annNode.x + NODE_W, yTop, sh(p.reqTotal), reqNode.x, yTop, reqNode.h, SANKEY_COLORS.requested);
+        if (p.unsolTotal > 0) {
+            var unsolSrcY = yTop + sh(p.reqTotal);
+            var unsolTgtY = yTop + sh(p.reqTotal - p.nRequested);
+            drawLink(svg, annNode.x + NODE_W, unsolSrcY, sh(p.unsolTotal), rcvNode.x, unsolTgtY, sh(p.unsolTotal), SANKEY_COLORS.unsolicited);
         }
-        var reqToRcv = reqTotal - nRequested;
+        var reqToRcv = p.reqTotal - p.nRequested;
         if (reqToRcv > 0)
             drawLink(svg, reqNode.x + NODE_W, yTop, sh(reqToRcv), rcvNode.x, yTop, sh(reqToRcv), SANKEY_COLORS.requested);
-        if (toPooled > 0)
-            drawLink(svg, rcvNode.x + NODE_W, yTop, sh(toPooled), poolNode.x, yTop, poolH, SANKEY_COLORS.received);
-        if (toIncluded > 0)
-            drawLink(svg, poolNode.x + NODE_W, yTop, sh(toIncluded), inclNode.x, yTop, sh(toIncluded), SANKEY_COLORS.pooled);
-        if (toFinalized > 0)
-            drawLink(svg, inclNode.x + NODE_W, yTop, sh(toFinalized), finNode.x, yTop, finH, SANKEY_COLORS.included);
+        if (p.toPooled > 0)
+            drawLink(svg, rcvNode.x + NODE_W, yTop, sh(p.toPooled), poolNode.x, yTop, poolNode.h, SANKEY_COLORS.received);
+        if (p.toIncluded > 0)
+            drawLink(svg, poolNode.x + NODE_W, yTop, sh(p.toIncluded), inclNode.x, yTop, sh(p.toIncluded), SANKEY_COLORS.pooled);
+        if (p.toFinalized > 0)
+            drawLink(svg, inclNode.x + NODE_W, yTop, sh(p.toFinalized), finNode.x, yTop, finNode.h, SANKEY_COLORS.included);
 
-        // Rejected branch.
-        if (nRejected > 0) {
-            var rejBarH = sh(nRejected);
+        // --- Rejected branch ---
+        if (p.nRejected > 0) {
+            var rejBarH = sh(p.nRejected);
             var rejX = colX(2.5);
             var rejY = Math.max(rcvNode.y + rcvNode.h + 30, yTop + availH * 0.7);
             if (rejY + rejBarH > H - 30) rejY = H - 30 - rejBarH;
-            drawLink(svg, rcvNode.x + NODE_W, yTop + sh(toPooled), rejBarH, rejX, rejY, rejBarH, SANKEY_COLORS.rejected);
+            drawLink(svg, rcvNode.x + NODE_W, yTop + sh(p.toPooled), rejBarH, rejX, rejY, rejBarH, SANKEY_COLORS.rejected);
             drawNode(svg, rejX, rejY, NODE_W, rejBarH, SANKEY_COLORS.rejected);
             drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 - 6, 'Rejected', 'start', '#e0e0e0');
-            drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 8, formatRate(snapCumRejected) + '/s', 'start', '#888', '10');
-            var rejReasonKeys = Object.keys(rejectReasons).sort(function(a, b) { return (rejectReasons[b] || 0) - (rejectReasons[a] || 0); });
+            var rejLines = p.branchLabel(p.rejBranchValues.cum, p.rejBranchValues.now);
+            for (var rl = 0; rl < rejLines.length; rl++)
+                drawLabel(svg, rejX + NODE_W + 6, rejY + rejBarH / 2 + 8 + rl * 12, rejLines[rl], 'start', rl === 0 ? '#888' : '#555', rl === 0 ? '10' : '9');
+            var rejReasonKeys = Object.keys(p.rejectReasons).sort(function(a, b) { return (p.rejectReasons[b] || 0) - (p.rejectReasons[a] || 0); });
             if (rejReasonKeys.length > 0) {
-                var rejBaseY = rejY + rejBarH / 2 + 20;
-                for (var ri = 0; ri < rejReasonKeys.length; ri++) {
-                    drawLabel(svg, rejX + NODE_W + 6, rejBaseY + ri * 12,
-                              formatRate(rejectReasons[rejReasonKeys[ri]]) + '/s ' + rejReasonKeys[ri], 'start', '#777', '9');
-                }
+                var rejBaseY = rejY + rejBarH / 2 + 8 + rejLines.length * 12;
+                for (var ri = 0; ri < rejReasonKeys.length; ri++)
+                    drawLabel(svg, rejX + NODE_W + 6, rejBaseY + ri * 12, p.reasonLabel(p.rejectReasons[rejReasonKeys[ri]], rejReasonKeys[ri]), 'start', '#777', '9');
             }
         }
 
-        // Dropped branch.
-        if (nDropped > 0) {
-            var dropBarH = sh(nDropped);
+        // --- Dropped branch ---
+        if (p.nDropped > 0) {
+            var dropBarH = sh(p.nDropped);
             var dropX = colX(3.5);
             var dropY = Math.max(poolNode.y + poolNode.h + 30, yTop + availH * 0.55);
             if (dropY + dropBarH > H - 30) dropY = H - 30 - dropBarH;
-            drawLink(svg, poolNode.x + NODE_W, yTop + sh(toIncluded), dropBarH, dropX, dropY, dropBarH, SANKEY_COLORS.dropped);
+            drawLink(svg, poolNode.x + NODE_W, yTop + sh(p.toIncluded), dropBarH, dropX, dropY, dropBarH, SANKEY_COLORS.dropped);
             drawNode(svg, dropX, dropY, NODE_W, dropBarH, SANKEY_COLORS.dropped);
             drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 - 6, 'Dropped', 'start', '#e0e0e0');
-            drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 8, formatRate(snapCumDropped) + '/s', 'start', '#888', '10');
-            var reasonKeys = Object.keys(dropReasons).sort(function(a, b) { return (dropReasons[b] || 0) - (dropReasons[a] || 0); });
-            if (reasonKeys.length > 0) {
-                var baseY = dropY + dropBarH / 2 + 20;
-                for (var ri = 0; ri < reasonKeys.length; ri++) {
-                    drawLabel(svg, dropX + NODE_W + 6, baseY + ri * 12,
-                              formatRate(dropReasons[reasonKeys[ri]]) + '/s ' + reasonKeys[ri], 'start', '#777', '9');
-                }
+            var dropLines = p.branchLabel(p.dropBranchValues.cum, p.dropBranchValues.now);
+            for (var dl = 0; dl < dropLines.length; dl++)
+                drawLabel(svg, dropX + NODE_W + 6, dropY + dropBarH / 2 + 8 + dl * 12, dropLines[dl], 'start', dl === 0 ? '#888' : '#555', dl === 0 ? '10' : '9');
+            var dropReasonKeys = Object.keys(p.dropReasons).sort(function(a, b) { return (p.dropReasons[b] || 0) - (p.dropReasons[a] || 0); });
+            if (dropReasonKeys.length > 0) {
+                var dropBaseY = dropY + dropBarH / 2 + 8 + dropLines.length * 12;
+                for (var dri = 0; dri < dropReasonKeys.length; dri++)
+                    drawLabel(svg, dropX + NODE_W + 6, dropBaseY + dri * 12, p.reasonLabel(p.dropReasons[dropReasonKeys[dri]], dropReasonKeys[dri]), 'start', '#777', '9');
             }
         }
 
-        // Private branch.
-        if (nPrivate > 0) {
-            var privBarH = sh(nPrivate);
+        // --- Private branch ---
+        if (p.nPrivate > 0) {
+            var privBarH = sh(p.nPrivate);
             var privX = colX(3.9);
             var privY = Math.max(inclNode.y + inclNode.h + 30, yTop + availH * 0.7);
             if (privY + privBarH > H - 30) privY = H - 30 - privBarH;
-            var privTgtY = yTop + sh(toIncluded);
+            var privTgtY = yTop + sh(p.toIncluded);
             drawLink(svg, privX + NODE_W, privY, privBarH, inclNode.x, privTgtY, privBarH, SANKEY_COLORS.private);
             drawNode(svg, privX, privY, NODE_W, privBarH, SANKEY_COLORS.private);
             drawLabel(svg, privX - 6, privY + privBarH / 2 - 6, 'Private', 'end', '#e0e0e0');
-            drawLabel(svg, privX - 6, privY + privBarH / 2 + 8, formatRate(nPrivate) + '/s', 'end', '#888', '10');
+            var privLines = p.branchLabel(p.privBranchValue);
+            drawLabel(svg, privX - 6, privY + privBarH / 2 + 8, privLines[0], 'end', '#888', '10');
         }
 
-        // --- Main nodes and labels (rate mode) ---
-        var mainNodes = [
-            { n: annNode,  key: 'announced',  label: 'Announced',  rate: announcedTotal },
-            { n: reqNode,  key: 'requested',  label: 'Requested',  rate: reqTotal },
-            { n: rcvNode,  key: 'received',   label: 'Received',   rate: receivedTotal },
-            { n: poolNode, key: 'pooled',     label: 'Pooled',     rate: toPooled },
-            { n: inclNode, key: 'included',   label: 'Included',   rate: includedTotal },
-            { n: finNode,  key: 'finalized',  label: 'Finalized',  rate: toFinalized },
-        ];
-        for (var i = 0; i < mainNodes.length; i++) {
-            var m = mainNodes[i];
-            if (m.n.h <= 0) continue;
-            drawNode(svg, m.n.x, m.n.y, NODE_W, m.n.h, SANKEY_COLORS[m.key]);
-            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y - 12, m.label, 'middle', '#e0e0e0');
-            drawLabel(svg, m.n.x + NODE_W / 2, m.n.y + m.n.h + 14,
-                      formatRate(m.rate) + '/s', 'middle', '#888', '10');
+        // --- Main nodes and labels ---
+        var nodePositions = [annNode, reqNode, rcvNode, poolNode, inclNode, finNode];
+        for (var i = 0; i < p.mainNodeData.length; i++) {
+            var m = p.mainNodeData[i];
+            var n = nodePositions[i];
+            if (n.h <= 0) continue;
+            drawNode(svg, n.x, n.y, NODE_W, n.h, SANKEY_COLORS[m.key]);
+            drawLabel(svg, n.x + NODE_W / 2, n.y - 12, m.label, 'middle', '#e0e0e0');
+            var nodeLines = p.mainNodeLabels(m);
+            for (var nl = 0; nl < nodeLines.length; nl++)
+                drawLabel(svg, n.x + NODE_W / 2, n.y + n.h + 14 + nl * 12, nodeLines[nl], 'middle', nl === 0 ? '#888' : '#555', nl === 0 ? '10' : '9');
         }
 
-        // Reorg backward link.
-        if (nReorged > 0) {
-            var reorgBandH = sh(nReorged);
+        // Pending finalization (cumulative mode only).
+        if (p.pendingFinalization > 0 && finNode.h > 0 && p.pendingBaseY) {
+            drawLabel(svg, finNode.x + NODE_W / 2, p.pendingBaseY(finNode),
+                      Math.round(p.pendingFinalization).toLocaleString() + ' pending', 'middle', '#b0860a', '9');
+        }
+
+        // --- Reorg backward link ---
+        if (p.nReorged > 0) {
+            var reorgBandH = sh(p.nReorged);
             var maxBottom = Math.max(poolNode.y + poolNode.h, inclNode.y + inclNode.h);
             var reorgDropY = maxBottom + 40;
             if (reorgDropY + reorgBandH + 20 > H) reorgDropY = H - reorgBandH - 20;
             drawBackLink(svg, inclNode, poolNode, NODE_W, reorgBandH, reorgDropY, '#ff6f00');
             var reorgMidX = (inclNode.x + poolNode.x + NODE_W) / 2;
-            drawLabel(svg, reorgMidX, reorgDropY + reorgBandH / 2 + 8,
-                      formatRate(nReorged) + '/s reorged', 'middle', '#ff6f00', '10');
+            var reorgLines = p.branchLabel(p.nReorged);
+            drawLabel(svg, reorgMidX, reorgDropY + reorgBandH / 2 + 8, reorgLines[0] + ' reorged', 'middle', '#ff6f00', '10');
         }
 
-        // Unsolicited vs requested labels.
-        if (reqTotal > 0 && unsolTotal > 0) {
+        // --- Unsolicited vs requested flow annotation ---
+        if (p.reqTotal > 0 && p.unsolTotal > 0) {
             var midReqX = (annNode.x + NODE_W + reqNode.x) / 2;
             drawLabel(svg, midReqX, yTop - 4, 'requested', 'middle', '#00838f', '9');
-            var unsolLabelY = yTop + sh(reqTotal) + sh(unsolTotal) / 2;
-            drawLabel(svg, midReqX, unsolLabelY, 'unsolicited', 'middle', '#78909c', '9');
+            drawLabel(svg, midReqX, yTop + sh(p.reqTotal) + sh(p.unsolTotal) / 2, 'unsolicited', 'middle', '#78909c', '9');
         }
 
-        // Title with rate.
-        drawLabel(svg, W / 2, 20,
-                  'Transaction Flow \u2014 ' + formatRate(totalRate) + ' tx/s ' + titleSuffix,
-                  'middle', '#888', '13');
+        // Title.
+        drawLabel(svg, W / 2, 20, p.title, 'middle', '#888', '13');
     }
 
     // Eviction stats — fetched periodically from the tracker.
@@ -2239,24 +1978,6 @@
         return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
     }
 
-    // parseTS parses an RFC3339 timestamp string into a Date, or null if empty/zero.
-    function parseTS(s) {
-        if (!s || s === '0001-01-01T00:00:00Z') return null;
-        var d = new Date(s);
-        return isNaN(d.getTime()) ? null : d;
-    }
-
-    // formatTS formats a timestamp as "HH:MM:SS.mmm (+Xs from base)" or "-".
-    function formatTS(s, base) {
-        var d = parseTS(s);
-        if (!d) return '-';
-        var abs = d.toLocaleTimeString('en-GB', {hour12: false}) + '.' +
-                  String(d.getMilliseconds()).padStart(3, '0');
-        if (base) {
-            abs += ' (+' + msDelta(d, base) + ')';
-        }
-        return abs;
-    }
 
     function formatWei(val) {
         if (!val) return '0';
@@ -2310,7 +2031,4 @@
         } catch(e) { return 0; }
     }
 
-    function escapeHtml(s) {
-        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
 })();

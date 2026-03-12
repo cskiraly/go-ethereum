@@ -588,6 +588,48 @@ Type 0 serves double duty as both "legacy" and "type not yet known" (e.g.,
 announced but metadata not yet received). This is acceptable since legacy
 transactions are genuinely type 0.
 
+## Code Quality: Shared Helpers
+
+### helpers.js
+
+`cmd/txview/internal/ui/helpers.js` contains utility functions shared between
+`app.js` (main dashboard) and `detail.html` (standalone tx detail page):
+
+- `parseTS(s)` — RFC3339 → Date or null
+- `msDelta(ts, base)` — human-readable millisecond delta
+- `formatTS(s, base)` — formatted timestamp with optional relative offset
+- `escapeHtml(s)` — HTML entity escaping
+- `buildTxFields(hash, info)` — canonical field list for tx detail rendering
+- `renderFields(fields, container)` — renders field list into a container element
+
+Both consumers import via `<script src="helpers.js">` and access the
+`txviewHelpers` namespace. This prevents field-list drift (e.g., detail.html
+previously lacked the Drop Reason field that app.js had).
+
+### Viewport Windowing Helpers
+
+`computeVisibleWindow(viewportEl, totalRows)` and `ensureRows(container, count,
+templateHtml)` extract the repeated virtual-scroll math and row-pool
+management shared by all three viewports (Feed, Top, Peers). Row templates
+are hoisted as constants (`FEED_ROW_TPL`, `TOP_ROW_TPL`, `PEERS_ROW_TPL`).
+
+### Sankey Deduplication
+
+`drawSankey(svg, W, H, p)` is a single rendering function that handles both
+cumulative and rate-based Sankey diagrams. The `p` params object carries
+numeric values plus formatting callbacks (`branchLabel`, `reasonLabel`,
+`mainNodeLabels`, `mainNodeData`) so both modes share identical layout and
+link-drawing code.
+
+### Go Deduplication
+
+- `peerStats.toPublic()` eliminates duplicated `PeerStats{}` literal
+  construction in `tracker.go`.
+- `awaitReply[Req, Resp]` generic helper eliminates the repeated quit-aware
+  request/reply double-select in five query methods.
+- `poolAndWait`/`dropAndWait` test helpers and consistent `makeTx()` usage
+  reduce boilerplate in `tracker_test.go`.
+
 ## Future Work
 
 - Use tracker data for peer scoring (bandwidth waste detection)
