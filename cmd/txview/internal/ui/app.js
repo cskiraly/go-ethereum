@@ -29,6 +29,8 @@
     let visibleHashes = [];
     let feedViewDirty = true;
     let renderScheduled = false;
+    let feedPaused = false;      // true when user has scrolled away from top
+    let feedPausedCount = 0;     // new events arrived while paused
 
     // --- Top view state ---
     const topCache = new Map();      // hash -> { info: TxInfo, fetchedAt: ms }
@@ -128,6 +130,24 @@
     const peersDetailPanel = document.getElementById('peers-detail-panel');
     const peersDetailContent = document.getElementById('peers-detail-content');
 
+    // --- Feed "new events" pill ---
+    var feedNewPill = document.createElement('div');
+    feedNewPill.className = 'feed-new-pill';
+    feedNewPill.style.display = 'none';
+    feedNewPill.addEventListener('click', function() {
+        viewport.scrollTop = 0; // triggers scroll listener → unpauses
+    });
+    viewport.style.position = 'relative'; // ensure pill positions relative to viewport
+    viewport.appendChild(feedNewPill);
+
+    function showFeedNewPill() {
+        feedNewPill.textContent = feedPausedCount + ' new \u2014 scroll to top';
+        feedNewPill.style.display = '';
+    }
+    function hideFeedNewPill() {
+        feedNewPill.style.display = 'none';
+    }
+
     // --- Init ---
     fetch('/config')
         .then(function(r) { return r.json(); })
@@ -137,7 +157,17 @@
     // Feed view events.
     filterInput.addEventListener('input', function() { feedViewDirty = true; scheduleRender(); });
     filterStatus.addEventListener('change', function() { feedViewDirty = true; scheduleRender(); });
-    viewport.addEventListener('scroll', scheduleRender);
+    viewport.addEventListener('scroll', function() {
+        var atTop = viewport.scrollTop <= ROW_HEIGHT;
+        if (atTop && feedPaused) {
+            feedPaused = false;
+            feedPausedCount = 0;
+            hideFeedNewPill();
+        } else if (!atTop && !feedPaused) {
+            feedPaused = true;
+        }
+        scheduleRender();
+    });
 
     // Top view events.
     topFilterInput.addEventListener('input', function() { topViewDirty = true; scheduleRender(); });
@@ -577,6 +607,11 @@
         // Invalidate top cache for this tx (status changed).
         topCache.delete(hash);
 
+        if (feedPaused && !old) {
+            feedPausedCount++;
+            showFeedNewPill();
+        }
+
         feedViewDirty = true;
         topViewDirty = true;
         statsViewDirty = true;
@@ -684,7 +719,18 @@
         if (feedViewDirty) rebuildFeedHashes();
 
         var totalRows = visibleHashes.length;
+
+        // When paused, preserve viewport position as new rows prepend.
+        var savedScrollTop = feedPaused ? viewport.scrollTop : -1;
+        var oldSpacerHeight = feedPaused ? parseInt(scrollSpacer.style.height) || 0 : 0;
+
         scrollSpacer.style.height = (totalRows * ROW_HEIGHT) + 'px';
+
+        if (savedScrollTop >= 0) {
+            var delta = (totalRows * ROW_HEIGHT) - oldSpacerHeight;
+            if (delta > 0) viewport.scrollTop = savedScrollTop + delta;
+        }
+
         var win = computeVisibleWindow(viewport, totalRows);
         rowContainer.style.transform = 'translateY(' + (win.startIdx * ROW_HEIGHT) + 'px)';
         ensureRows(rowContainer, win.count, FEED_ROW_TPL);

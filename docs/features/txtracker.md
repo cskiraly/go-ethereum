@@ -266,7 +266,8 @@ state — only events arriving after the WebSocket connects are visible.
 ### Features
 
 - Dark-themed single-page app with no build tooling (embedded via `//go:embed`)
-- **Feed view**: real-time scrollable event stream with virtual scrolling
+- **Feed view**: real-time scrollable event stream with virtual scrolling and
+  auto-pause (see below)
 - **Top view**: sortable table of all tracked txs with on-demand RPC fetch
 - **Stats view**: Sankey diagram showing transaction flow through lifecycle stages,
   with now/total labels per node and backward links for reorgs
@@ -276,6 +277,26 @@ state — only events arriving after the WebSocket connects are visible.
 - Resizable detail panel with drag handle (200–800px)
 - Detachable detail panel: pop out to `/tx/0x...` for side-by-side workflows
 - LRU eviction stats panel below the Sankey diagram
+
+#### Feed Auto-Pause
+
+The Feed view is newest-first: every new event prepends to the list, pushing
+all rows down. Without mitigation, a user examining a specific transaction
+would lose it as new events arrive.
+
+When the user scrolls away from the top (scrollTop > ROW_HEIGHT), the feed
+enters **paused** mode. New events still accumulate in `visibleHashes` and
+`feedViewDirty` is set, but `renderFeedViewport` compensates: it measures the
+spacer height delta from prepended rows and adjusts `viewport.scrollTop` by
+the same amount, keeping the visible rows stationary.
+
+A floating pill ("N new — scroll to top") appears while paused, showing the
+count of new (previously unseen) events. Clicking the pill or scrolling back
+to the top (scrollTop ≤ ROW_HEIGHT) resumes live mode, resets the counter,
+and hides the pill.
+
+This is the standard pattern used by Twitter/X, Discord, and most real-time
+feeds.
 
 #### Sankey Diagram
 

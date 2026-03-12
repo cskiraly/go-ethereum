@@ -151,6 +151,30 @@ header h1 {
     height: calc(100vh - 130px);
 }
 
+/* --- Feed new-events pill --- */
+.feed-new-pill {
+    position: sticky;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    background: rgba(233, 69, 96, 0.9);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 16px;
+    border-radius: 16px;
+    cursor: pointer;
+    pointer-events: auto;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    width: fit-content;
+    margin: 0 auto;
+}
+
+.feed-new-pill:hover {
+    background: rgba(233, 69, 96, 1);
+}
+
 /* --- Virtual scroll table --- */
 
 .table-area {
