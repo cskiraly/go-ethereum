@@ -692,6 +692,7 @@
         var now = Date.now();
         var startIdx = win.startIdx;
         var endIdx = win.endIdx;
+        var count = win.count;
 
         var fetchNeeded = [];
 
