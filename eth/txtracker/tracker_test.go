@@ -84,10 +84,11 @@ func testTracker(maxEntries int) (*Tracker, *mclock.Simulated, *mockChain, *mock
 		maxEntries = defaultMaxEntries
 	}
 	tr := New(Config{
-		MaxEntries: maxEntries,
-		Clock:      clock,
-		Chain:      chain,
-		TxPool:     pool,
+		MaxEntries:      maxEntries,
+		ColdSetDisabled: true,
+		Clock:           clock,
+		Chain:           chain,
+		TxPool:          pool,
 	})
 	tr.Start()
 	<-tr.ready // Wait for the event loop to subscribe to feeds.

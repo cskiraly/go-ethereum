@@ -95,6 +95,9 @@ const (
 	// defaultMaxEntries is the default maximum number of tracked transactions.
 	defaultMaxEntries = 262144
 
+	// defaultMaxColdEntries is the default cold set capacity.
+	defaultMaxColdEntries = 2097152 // 2M entries
+
 	// Channel sizes for the event loop.
 	announceChanSize      = 1024
 	fetchRequestChanSize  = 256
@@ -209,9 +212,11 @@ type PeerStats struct {
 
 // TrackerStats is the public snapshot of tracker-wide statistics.
 type TrackerStats struct {
-	Total    int           `json:"total"`    // Current number of tracked transactions
-	Capacity int           `json:"capacity"` // Maximum tracker capacity
-	Evicted  EvictionStats `json:"evicted"`  // Cumulative per-state eviction counts
+	Total        int           `json:"total"`        // Current number of hot-tracked transactions
+	Capacity     int           `json:"capacity"`     // Maximum hot tracker capacity
+	ColdTotal    int           `json:"coldTotal"`    // Current number of cold set entries
+	ColdCapacity int           `json:"coldCapacity"` // Maximum cold set capacity (0 if disabled)
+	Evicted      EvictionStats `json:"evicted"`      // Cumulative per-state eviction counts
 }
 
 // EvictionStats counts how many records were LRU-evicted from each state.
@@ -285,10 +290,12 @@ type peerStatsQuery struct {
 
 // Config holds the configuration for a Tracker.
 type Config struct {
-	MaxEntries int
-	Clock      mclock.Clock
-	Chain      BlockchainReader
-	TxPool     TxPoolReader
+	MaxEntries      int
+	MaxColdEntries  int  // <=0 means default (2M), positive = that value
+	ColdSetDisabled bool // true disables the cold set entirely
+	Clock           mclock.Clock
+	Chain           BlockchainReader
+	TxPool          TxPoolReader
 }
 
 // Tracker maintains per-transaction lifecycle records from first announcement
@@ -304,6 +311,10 @@ type Tracker struct {
 	maxEntries int
 	evictList  *list.List    // LRU ordered by last update (front = most recent)
 	evicted    EvictionStats // Cumulative per-state eviction counts
+
+	// Cold set for compact long-term retention of evicted transactions.
+	cold      *coldSet    // nil if cold set is disabled
+	peerIndex *peerIntern // peer string→uint16 interning for cold records
 
 	// Last known chain head for reorg detection.
 	lastHeadHash common.Hash
@@ -346,6 +357,17 @@ func New(config Config) *Tracker {
 	if clock == nil {
 		clock = mclock.System{}
 	}
+	// Initialize cold set unless disabled.
+	var cold *coldSet
+	var peerIdx *peerIntern
+	if !config.ColdSetDisabled {
+		maxCold := config.MaxColdEntries
+		if maxCold <= 0 {
+			maxCold = defaultMaxColdEntries
+		}
+		cold = newColdSet(maxCold)
+		peerIdx = newPeerIntern()
+	}
 	return &Tracker{
 		txs:            make(map[common.Hash]*txRecord),
 		peers:          make(map[string]*peerStats),
@@ -354,6 +376,8 @@ func New(config Config) *Tracker {
 		txpool:         config.TxPool,
 		maxEntries:     maxEntries,
 		evictList:      list.New(),
+		cold:           cold,
+		peerIndex:      peerIdx,
 		announceCh:     make(chan *announceEvent, announceChanSize),
 		fetchRequestCh: make(chan *fetchRequestedEvent, fetchRequestChanSize),
 		receiveCh:      make(chan *receiveEvent, receiveChanSize),
@@ -603,6 +627,12 @@ func (t *Tracker) loop() {
 			rec := t.txs[q.hash]
 			if rec != nil {
 				q.resp <- rec.status
+			} else if t.cold != nil {
+				if s, ok := t.cold.get(q.hash); ok {
+					q.resp <- s.status()
+				} else {
+					q.resp <- 0
+				}
 			} else {
 				q.resp <- 0
 			}
@@ -616,11 +646,16 @@ func (t *Tracker) loop() {
 			}
 
 		case resp := <-t.trackerStatsCh:
-			resp <- TrackerStats{
+			stats := TrackerStats{
 				Total:    len(t.txs),
 				Capacity: t.maxEntries,
 				Evicted:  t.evicted,
 			}
+			if t.cold != nil {
+				stats.ColdTotal = t.cold.Len()
+				stats.ColdCapacity = t.cold.maxLen
+			}
+			resp <- stats
 
 		case resp := <-t.allPeerStatsCh:
 			result := make(map[string]PeerStats, len(t.peers))
@@ -922,6 +957,9 @@ func (t *Tracker) handleReorg(newBlockNum uint64) {
 			rec.included = time.Time{}
 			rec.blockNum = 0
 			rec.blockHash = common.Hash{}
+			if rec.reorgCount < 255 {
+				rec.reorgCount++
+			}
 			t.touchLRU(rec)
 			t.emitEvent(hash, TxIncluded, TxPooled, rec, "")
 			txReorgedMeter.Mark(1)
@@ -1027,10 +1065,17 @@ func (t *Tracker) handleNewTxs(ev core.NewTxsEvent) {
 	}
 }
 
-// answerQuery builds a TxInfo from an internal record.
+// answerQuery builds a TxInfo from an internal record. If not in the hot set,
+// checks the cold set and returns a partial TxInfo without promoting.
 func (t *Tracker) answerQuery(hash common.Hash) *TxInfo {
 	rec := t.txs[hash]
 	if rec == nil {
+		// Check cold set (read-only, no promotion).
+		if t.cold != nil {
+			if s, ok := t.cold.get(hash); ok {
+				return summaryToTxInfo(s, t.peerIndex)
+			}
+		}
 		return nil
 	}
 	info := &TxInfo{
@@ -1087,6 +1132,7 @@ func (t *Tracker) touchLRU(rec *txRecord) {
 }
 
 // evictOldest removes the least-recently-updated transaction record.
+// If the cold set is enabled, the evicted record is compacted and stored there.
 func (t *Tracker) evictOldest() {
 	back := t.evictList.Back()
 	if back == nil {
@@ -1096,6 +1142,12 @@ func (t *Tracker) evictOldest() {
 	rec := t.txs[hash]
 	delete(t.txs, hash)
 
+	// Compact and move to cold set if enabled.
+	if rec != nil && t.cold != nil {
+		summary := compactRecord(rec, t.peerIndex)
+		t.cold.insert(hash, summary)
+		txColdSize.Update(int64(t.cold.Len()))
+	}
 	txEvictedMeter.Mark(1)
 	t.evicted.Total++
 	if rec != nil {

@@ -48,4 +48,6 @@ var (
 	txEvictedDroppedMeter        = metrics.NewRegisteredMeter("eth/txtracker/evicted/dropped", nil)
 	txEmitDroppedMeter           = metrics.NewRegisteredMeter("eth/txtracker/emit_dropped", nil)
 	txTrackerSize                = metrics.NewRegisteredGauge("eth/txtracker/size", nil)
+	txColdSize                   = metrics.NewRegisteredGauge("eth/txtracker/cold/size", nil)
+	txColdPromotedMeter          = metrics.NewRegisteredMeter("eth/txtracker/cold/promoted", nil)
 )
