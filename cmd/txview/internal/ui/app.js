@@ -139,8 +139,10 @@
     feedNewPill.addEventListener('click', function() {
         viewport.scrollTop = 0; // triggers scroll listener → unpauses
     });
-    viewport.style.position = 'relative'; // ensure pill positions relative to viewport
-    viewport.insertBefore(feedNewPill, viewport.firstChild);
+    // Place pill in table-area (viewport's parent) so it overlays the
+    // viewport without being part of the scroll flow.
+    viewport.parentNode.style.position = 'relative';
+    viewport.parentNode.appendChild(feedNewPill);
 
     function showFeedNewPill() {
         feedNewPill.textContent = feedPausedCount + ' new \u2014 scroll to top';

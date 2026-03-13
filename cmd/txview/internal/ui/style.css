@@ -153,8 +153,8 @@ header h1 {
 
 /* --- Feed new-events pill --- */
 .feed-new-pill {
-    position: sticky;
-    top: 8px;
+    position: absolute;
+    top: 36px; /* 28px table-header + 8px offset into viewport */
     left: 50%;
     transform: translateX(-50%);
     z-index: 10;
@@ -168,7 +168,6 @@ header h1 {
     pointer-events: auto;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
     width: fit-content;
-    margin: 0 auto;
 }
 
 .feed-new-pill:hover {
