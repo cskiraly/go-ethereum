@@ -687,9 +687,9 @@ func (t *Tracker) handleAnnounce(ev *announceEvent) {
 		ps.announced++
 		txAnnouncedMeter.Mark(1)
 
-		rec := t.txs[hash]
+		rec := t.lookupOrPromote(hash)
 		if rec != nil {
-			// Already tracked: just record additional announcer if not duplicate.
+			// Already tracked (hot or promoted from cold): record announcer.
 			if !slices.Contains(rec.announcers, ev.peer) {
 				rec.announcers = append(rec.announcers, ev.peer)
 			}
@@ -725,7 +725,7 @@ func (t *Tracker) handleFetchRequested(ev *fetchRequestedEvent) {
 	for _, hash := range ev.hashes {
 		txFetchRequestedMeter.Mark(1)
 
-		rec := t.txs[hash]
+		rec := t.lookupOrPromote(hash)
 		if rec == nil {
 			continue
 		}
@@ -751,9 +751,9 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 		ps.delivered++
 		txReceivedMeter.Mark(1)
 
-		rec := t.txs[hash]
+		rec := t.lookupOrPromote(hash)
 		if rec == nil {
-			// No prior announcement; create a record starting at Received.
+			// No prior announcement or cold record; create a new record.
 			rec = &txRecord{
 				status:    TxReceived,
 				firstSeen: now,
@@ -795,7 +795,7 @@ func (t *Tracker) handlePooled(ev *pooledEvent) {
 	for _, hash := range ev.hashes {
 		txPooledMeter.Mark(1)
 
-		rec := t.txs[hash]
+		rec := t.lookupOrPromote(hash)
 		if rec == nil {
 			// Pool accepted a tx we didn't see come in via P2P — should be rare
 			// since the handler calls NotifyReceived first, but handle gracefully.
@@ -837,7 +837,7 @@ func (t *Tracker) handleRejected(ev *rejectedEvent) {
 	for i, hash := range ev.hashes {
 		txRejectedMeter.Mark(1)
 
-		rec := t.txs[hash]
+		rec := t.lookupOrPromote(hash)
 		if rec == nil {
 			rec = &txRecord{
 				status:    TxRejected,
@@ -889,10 +889,12 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 
 		rec := t.txs[hash]
 		if rec == nil && blockNum <= t.lastFinalNum {
-			// Block is already finalized — no point tracking a transaction
-			// we first see at this stage. It didn't come through P2P and
-			// will never provide useful lifecycle data.
+			// Block is already finalized — no point tracking or promoting
+			// a transaction we first see at this stage.
 			continue
+		}
+		if rec == nil {
+			rec = t.lookupOrPromote(hash)
 		}
 		if rec == nil {
 			// Transaction not previously tracked (e.g., from a synced block
@@ -1022,7 +1024,7 @@ func (t *Tracker) checkFinalization() {
 func (t *Tracker) handleRemovedTxs(ev core.RemovedTxsEvent) {
 	now := time.Now()
 	for i, hash := range ev.Hashes {
-		rec := t.txs[hash]
+		rec := t.lookupOrPromote(hash)
 		if rec == nil || rec.status != TxPooled {
 			continue
 		}
@@ -1050,8 +1052,21 @@ func (t *Tracker) handleNewTxs(ev core.NewTxsEvent) {
 		if t.txs[hash] != nil {
 			continue // Already tracked via P2P path.
 		}
+		// Check cold set: a previously evicted tx reappearing as local.
+		rec := t.lookupOrPromote(hash)
+		if rec != nil {
+			oldStatus := rec.status
+			rec.status = TxPooled
+			rec.local = true
+			rec.pooled = now
+			fillTxMeta(rec, tx)
+			t.touchLRU(rec)
+			t.emitEvent(hash, oldStatus, TxPooled, rec, "")
+			txLocalMeter.Mark(1)
+			continue
+		}
 		// New transaction not seen via P2P — treat as locally submitted.
-		rec := &txRecord{
+		rec = &txRecord{
 			status:    TxPooled,
 			local:     true,
 			firstSeen: now,
@@ -1110,6 +1125,30 @@ func (t *Tracker) answerQuery(hash common.Hash) *TxInfo {
 		copy(info.Announcers, rec.announcers)
 	}
 	return info
+}
+
+// lookupOrPromote returns the hot record for hash, or promotes from the cold
+// set if found there. Returns nil if the hash is in neither set.
+func (t *Tracker) lookupOrPromote(hash common.Hash) *txRecord {
+	if rec := t.txs[hash]; rec != nil {
+		return rec
+	}
+	if t.cold == nil {
+		return nil
+	}
+	s, ok := t.cold.delete(hash)
+	if !ok {
+		return nil
+	}
+	rec := promoteRecord(s, t.peerIndex)
+	if rec.returns < 255 {
+		rec.returns++
+	}
+	t.insertRecord(hash, rec)
+	t.emitEvent(hash, 0, rec.status, rec, "")
+	txColdPromotedMeter.Mark(1)
+	txColdSize.Update(int64(t.cold.Len()))
+	return rec
 }
 
 // insertRecord adds a new transaction record and manages eviction.

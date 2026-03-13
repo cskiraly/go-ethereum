@@ -73,6 +73,24 @@ func (m *mockTxPool) sendRemovedWithReasons(hashes []common.Hash, reasons []stri
 	m.removedFeed.Send(core.RemovedTxsEvent{Hashes: hashes, Reasons: reasons})
 }
 
+// testTrackerWithCold creates a tracker with cold set enabled.
+func testTrackerWithCold(maxHot, maxCold int) (*Tracker, *mclock.Simulated, *mockChain, *mockTxPool) {
+	clock := new(mclock.Simulated)
+	chain := &mockChain{}
+	pool := &mockTxPool{}
+
+	tr := New(Config{
+		MaxEntries:     maxHot,
+		MaxColdEntries: maxCold,
+		Clock:          clock,
+		Chain:          chain,
+		TxPool:         pool,
+	})
+	tr.Start()
+	<-tr.ready
+	return tr, clock, chain, pool
+}
+
 // testTracker creates a tracker with a simulated clock and mock dependencies,
 // starts it, and returns all components. The caller must call tracker.Stop().
 func testTracker(maxEntries int) (*Tracker, *mclock.Simulated, *mockChain, *mockTxPool) {
@@ -1370,5 +1388,409 @@ func TestShutdownGetStatsAndAllPeerStats(t *testing.T) {
 	all := tr.GetAllPeerStats()
 	if all != nil {
 		t.Fatalf("expected nil AllPeerStats after Stop, got %+v", all)
+	}
+}
+
+// --- Cold set integration tests ---
+
+func TestColdEviction(t *testing.T) {
+	// Hot cap 3, cold cap 5.
+	tr, _, _, _ := testTrackerWithCold(3, 5)
+	defer tr.Stop()
+
+	// Fill hot set with 3 entries.
+	for i := byte(1); i <= 3; i++ {
+		tr.NotifyAnnounced("peerA", []common.Hash{makeHash(i)}, []byte{0}, []uint32{100})
+		waitStep(t, tr)
+	}
+	// Add 4th → evicts oldest (hash 1) to cold.
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(4)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	// Hash 1 should be gone from hot but visible via Status (cold).
+	if s := tr.Status(makeHash(1)); s != TxAnnounced {
+		t.Fatalf("expected cold status TxAnnounced, got %v", s)
+	}
+
+	stats := tr.GetStats()
+	if stats.Total != 3 {
+		t.Fatalf("hot total: got %d, want 3", stats.Total)
+	}
+	if stats.ColdTotal != 1 {
+		t.Fatalf("cold total: got %d, want 1", stats.ColdTotal)
+	}
+}
+
+func TestColdEvictionFIFO(t *testing.T) {
+	// Hot cap 2, cold cap 3.
+	tr, _, _, _ := testTrackerWithCold(2, 3)
+	defer tr.Stop()
+
+	// Fill hot: 1, 2. Evict 1→cold. Evict 2→cold. Insert 3,4,5 → evict 3→cold.
+	for i := byte(1); i <= 5; i++ {
+		tr.NotifyAnnounced("peerA", []common.Hash{makeHash(i)}, []byte{0}, []uint32{100})
+		waitStep(t, tr)
+	}
+	// Cold should have 3 entries (1, 2, 3). Hot has 4, 5.
+	// Add 6 → evict 4→cold (cold now has 1,2,3,4 but cap=3 → FIFO evicts 1).
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(6)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	// Hash 1 should be gone from cold (FIFO evicted).
+	if s := tr.Status(makeHash(1)); s != 0 {
+		t.Fatalf("expected hash 1 fully evicted, got status %v", s)
+	}
+	// Hash 2 should still be in cold.
+	if s := tr.Status(makeHash(2)); s == 0 {
+		t.Fatal("expected hash 2 in cold")
+	}
+}
+
+func TestColdDisabled(t *testing.T) {
+	tr, _, _, _ := testTracker(3)
+	defer tr.Stop()
+
+	// Fill and overflow.
+	for i := byte(1); i <= 4; i++ {
+		tr.NotifyAnnounced("peerA", []common.Hash{makeHash(i)}, []byte{0}, []uint32{100})
+		waitStep(t, tr)
+	}
+	// Hash 1 evicted, no cold set → gone.
+	if s := tr.Status(makeHash(1)); s != 0 {
+		t.Fatalf("expected status 0 with cold disabled, got %v", s)
+	}
+	stats := tr.GetStats()
+	if stats.ColdTotal != 0 || stats.ColdCapacity != 0 {
+		t.Fatalf("cold stats should be 0 when disabled: total=%d, cap=%d", stats.ColdTotal, stats.ColdCapacity)
+	}
+}
+
+func TestColdPromotion(t *testing.T) {
+	tr, _, _, _ := testTrackerWithCold(3, 10)
+	defer tr.Stop()
+
+	evCh := make(chan TxTrackerEvent, 100)
+	tr.SubscribeEvents(evCh)
+
+	hash := makeHash(1)
+
+	// Announce and pool a transaction.
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{2}, []uint32{200})
+	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+
+	// Fill hot set to force eviction of hash.
+	for i := byte(10); i <= 12; i++ {
+		tr.NotifyAnnounced("peerA", []common.Hash{makeHash(i)}, []byte{0}, []uint32{100})
+		waitStep(t, tr)
+	}
+	// hash is now in cold with status TxPooled.
+	if s := tr.Status(hash); s != TxPooled {
+		t.Fatalf("expected cold TxPooled, got %v", s)
+	}
+
+	// Drain events so far.
+	drainEvents(evCh)
+
+	// Re-announce hash → should promote from cold.
+	tr.NotifyAnnounced("peerB", []common.Hash{hash}, []byte{2}, []uint32{200})
+	waitStep(t, tr)
+
+	// Now in hot set again.
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected promoted tx in hot set")
+	}
+	if info.Status != TxPooled {
+		t.Fatalf("expected TxPooled after promotion, got %v", info.Status)
+	}
+	// firstSeen should be preserved (not reset to now).
+	if info.FirstSeen.IsZero() {
+		t.Fatal("firstSeen should be preserved from cold record")
+	}
+
+	// Check promotion event was emitted.
+	events := drainEvents(evCh)
+	found := false
+	for _, ev := range events {
+		if ev.TxHash == hash && ev.NewStatus == TxPooled && ev.OldStatus == 0 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected promotion event (0 → TxPooled)")
+	}
+}
+
+func TestColdPromotionChainEvent(t *testing.T) {
+	tr, _, chain, _ := testTrackerWithCold(3, 10)
+	defer tr.Stop()
+
+	tx := makeTx(1)
+	hash := tx.Hash()
+
+	// Track via receive + pool.
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
+	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+
+	// Evict to cold by filling hot set.
+	for i := byte(10); i <= 12; i++ {
+		tr.NotifyAnnounced("peerA", []common.Hash{makeHash(i)}, []byte{0}, []uint32{100})
+		waitStep(t, tr)
+	}
+
+	// Include in a block → should promote from cold.
+	header := makeHeader(100, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       header,
+		Transactions: types.Transactions{tx},
+	})
+	waitStep(t, tr)
+
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected tx after chain inclusion from cold")
+	}
+	if info.Status != TxIncluded {
+		t.Fatalf("expected TxIncluded, got %v", info.Status)
+	}
+	if info.BlockNum != 100 {
+		t.Fatalf("expected block 100, got %d", info.BlockNum)
+	}
+}
+
+func TestColdPromotionReEviction(t *testing.T) {
+	tr, _, _, _ := testTrackerWithCold(2, 10)
+	defer tr.Stop()
+
+	hash := makeHash(1)
+
+	// Announce, evict to cold.
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(2)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(3)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	// hash is in cold.
+
+	// Promote by re-announcing.
+	tr.NotifyAnnounced("peerB", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	// Re-evict by filling hot again.
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(4)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(5)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	// hash should be back in cold (re-evicted).
+	if s := tr.Status(hash); s != TxAnnounced {
+		t.Fatalf("expected TxAnnounced in cold after re-eviction, got %v", s)
+	}
+}
+
+func TestColdStatusQuery(t *testing.T) {
+	tr, _, _, _ := testTrackerWithCold(2, 10)
+	defer tr.Stop()
+
+	hash := makeHash(1)
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	// Evict to cold.
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(2)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(3)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	// Status should read from cold without promoting.
+	if s := tr.Status(hash); s != TxAnnounced {
+		t.Fatalf("expected TxAnnounced from cold status, got %v", s)
+	}
+	// Verify it's still in cold (not promoted) by checking hot size.
+	stats := tr.GetStats()
+	if stats.Total != 2 {
+		t.Fatalf("hot total should be 2 (no promotion), got %d", stats.Total)
+	}
+	if stats.ColdTotal != 1 {
+		t.Fatalf("cold total should be 1, got %d", stats.ColdTotal)
+	}
+}
+
+func TestColdGetQuery(t *testing.T) {
+	tr, _, _, _ := testTrackerWithCold(2, 10)
+	defer tr.Stop()
+
+	hash := makeHash(1)
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{2}, []uint32{500})
+	waitStep(t, tr)
+
+	// Evict to cold.
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(2)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(3)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	// Get should return partial TxInfo from cold without promoting.
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected TxInfo from cold set")
+	}
+	if info.Status != TxAnnounced {
+		t.Fatalf("expected TxAnnounced, got %v", info.Status)
+	}
+	if info.TxType != 2 {
+		t.Fatalf("expected txType 2, got %d", info.TxType)
+	}
+	// Verify no promotion occurred.
+	stats := tr.GetStats()
+	if stats.Total != 2 {
+		t.Fatalf("hot total should be 2, got %d", stats.Total)
+	}
+}
+
+func TestColdNewTxsPromotion(t *testing.T) {
+	tr, _, _, pool := testTrackerWithCold(2, 10)
+	defer tr.Stop()
+
+	tx := makeTx(42)
+	hash := tx.Hash()
+
+	// Track via P2P, pool it, then drop it.
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
+	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+	dropAndWait(t, tr, pool, hash)
+
+	// Evict to cold.
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(10)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(11)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	// Verify in cold as TxDropped.
+	if s := tr.Status(hash); s != TxDropped {
+		t.Fatalf("expected TxDropped in cold, got %v", s)
+	}
+
+	// Re-submit as local tx → should promote and advance to TxPooled.
+	pool.sendNewTxs(core.NewTxsEvent{Txs: types.Transactions{tx}})
+	waitStep(t, tr)
+
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected promoted tx")
+	}
+	if info.Status != TxPooled {
+		t.Fatalf("expected TxPooled after local re-submit, got %v", info.Status)
+	}
+	if !info.Local {
+		t.Fatal("expected local=true after NewTxs promotion")
+	}
+}
+
+func TestColdRemovedTxs(t *testing.T) {
+	tr, _, _, pool := testTrackerWithCold(2, 10)
+	defer tr.Stop()
+
+	hash := makeHash(1)
+
+	// Announce + pool.
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+
+	// Evict to cold (status TxPooled).
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(10)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	tr.NotifyAnnounced("peerA", []common.Hash{makeHash(11)}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	if s := tr.Status(hash); s != TxPooled {
+		t.Fatalf("expected TxPooled in cold, got %v", s)
+	}
+
+	// Remove from pool → should promote and mark TxDropped.
+	pool.sendRemovedWithReasons([]common.Hash{hash}, []string{"expired"})
+	waitStep(t, tr)
+
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected promoted tx after removal")
+	}
+	if info.Status != TxDropped {
+		t.Fatalf("expected TxDropped, got %v", info.Status)
+	}
+	if info.DropReason != "expired" {
+		t.Fatalf("expected drop reason 'expired', got '%s'", info.DropReason)
+	}
+}
+
+func TestReorgCount(t *testing.T) {
+	tr, _, chain, _ := testTrackerWithCold(10, 10)
+	defer tr.Stop()
+
+	tx := makeTx(1)
+	hash := tx.Hash()
+
+	// Announce, receive, pool.
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
+	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+
+	// Include in block 10.
+	h10 := makeHeader(10, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       h10,
+		Transactions: types.Transactions{tx},
+	})
+	waitStep(t, tr)
+
+	// Reorg: new block 10 with different parent.
+	h10b := makeHeader(10, common.Hash{0xAA})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       h10b,
+		Transactions: types.Transactions{},
+	})
+	waitStep(t, tr)
+
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected tx after reorg")
+	}
+	if info.Status != TxPooled {
+		t.Fatalf("expected TxPooled after reorg, got %v", info.Status)
+	}
+}
+
+func TestColdStats(t *testing.T) {
+	tr, _, _, _ := testTrackerWithCold(3, 100)
+	defer tr.Stop()
+
+	stats := tr.GetStats()
+	if stats.ColdCapacity != 100 {
+		t.Fatalf("expected cold capacity 100, got %d", stats.ColdCapacity)
+	}
+	if stats.ColdTotal != 0 {
+		t.Fatalf("expected cold total 0, got %d", stats.ColdTotal)
+	}
+
+	// Fill hot and overflow to cold.
+	for i := byte(1); i <= 5; i++ {
+		tr.NotifyAnnounced("peerA", []common.Hash{makeHash(i)}, []byte{0}, []uint32{100})
+		waitStep(t, tr)
+	}
+
+	stats = tr.GetStats()
+	if stats.Total != 3 {
+		t.Fatalf("expected hot total 3, got %d", stats.Total)
+	}
+	if stats.ColdTotal != 2 {
+		t.Fatalf("expected cold total 2, got %d", stats.ColdTotal)
 	}
 }

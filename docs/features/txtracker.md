@@ -77,9 +77,13 @@ Single-goroutine event loop (same pattern as TxFetcher):
 
 ### Files
 
-- `eth/txtracker/tracker.go` — Core types, event loop, state machine
+- `eth/txtracker/tracker.go` — Core types, event loop, state machine, cold integration
+- `eth/txtracker/coldset.go` — Open-addressing hash table with FIFO eviction
+- `eth/txtracker/summary.go` — txSummary compact record, peer interning, conversions
 - `eth/txtracker/metrics.go` — Meter and gauge registrations
-- `eth/txtracker/tracker_test.go` — Unit tests
+- `eth/txtracker/tracker_test.go` — Unit tests (hot + cold integration)
+- `eth/txtracker/coldset_test.go` — Cold set hash table tests
+- `eth/txtracker/summary_test.go` — Summary layer tests
 - `eth/handler.go` — Creates, starts, stops tracker; hooks addTxs and peer drop
 - `eth/handler_eth.go` — Feeds announcement and receive events to tracker
 - `eth/api_txtracker.go` — RPC API (GetTx, GetPeerStats, Events subscription)
@@ -155,14 +159,20 @@ heap, plus special handling for nonce-gapped transactions:
 
 ### Txtracker
 
-**txtracker** (`eth/txtracker/tracker.go`) uses LRU eviction with no
-time-based expiry:
+**txtracker** (`eth/txtracker/tracker.go`) uses a two-tier hot/cold
+architecture:
 
-- Bounded to `maxEntries` (default **65,536**). Each status transition moves
-  the entry to the LRU front. Finalized and rejected txs age out naturally
-  since they receive no further updates.
-- No time-based expiry — a transaction stays tracked as long as it keeps
-  receiving status updates or hasn't been pushed out by newer entries.
+**Hot set** (full `txRecord`): LRU eviction, bounded to `maxEntries`
+(default **262,144**). Each status transition moves the entry to the LRU
+front. Finalized and rejected txs age out naturally since they receive no
+further updates. No time-based expiry — a transaction stays tracked as
+long as it keeps receiving status updates or hasn't been pushed out by
+newer entries.
+
+**Cold set** (`coldSet`): FIFO eviction, bounded to `maxColdEntries`
+(default **2,097,152** = 2M). When a record is evicted from the hot set,
+it is compacted into a 40-byte `txSummary` and stored in the cold set for
+long-term retention. See "Cold Set Architecture" section below for details.
 
 Per-peer statistics (`peerStats`) are created lazily on first announcement
 and **deleted entirely on peer disconnect** (`NotifyPeerDrop`). Fields
@@ -171,7 +181,8 @@ tracked per peer: `announced`, `delivered`, `usefulDelivery`,
 
 Per-transaction peer attribution survives peer disconnect (stored on the tx
 record, not the peer record): `announcers []string`, `requestedFrom string`,
-`deliverer string`. These are evicted with the tx via LRU.
+`deliverer string`. These are evicted with the tx via LRU. Cold records
+retain only the first announcer and deliverer via a peer intern table.
 
 **txview browser** (`cmd/txview/internal/ui/app.js`) has **no eviction**:
 
@@ -193,7 +204,8 @@ record, not the peer record): `announcers []string`, `requestedFrom string`,
 | legacypool (pending) | price-based | 5,120 global | none | n/a |
 | blobpool (gapped) | time-based | 128 global | 1 min | n/a |
 | blobpool (main) | price-based | blob space limits | none | n/a |
-| **txtracker** | **LRU** | **65,536** | **none** | **stats deleted, tx records kept** |
+| **txtracker (hot)** | **LRU** | **262,144** | **none** | **stats deleted, tx records kept** |
+| **txtracker (cold)** | **FIFO** | **2,097,152** | **none** | **peer refs interned** |
 | **txview browser** | **none** | **unbounded** | **page refresh** | **n/a** |
 
 ## txview — Web UI
@@ -709,6 +721,136 @@ if no Chrome binary is found.
 ```bash
 go test -v ./cmd/txview/
 ```
+
+## Cold Set Architecture
+
+The cold set provides long-term retention of transaction lifecycle summaries
+after they are evicted from the hot set. This enables return detection (a
+transaction that reappears after eviction can be correlated with its original
+record) and lightweight queries without consuming the memory of a full
+`txRecord`.
+
+### Two-Tier Design
+
+```
+                 evict (compact)
+  Hot Set ──────────────────────► Cold Set
+  (txRecord)                      (txSummary)
+  262K entries                    2M entries
+  LRU eviction                   FIFO eviction
+  ~550B/entry                    ~107B/entry
+       ◄────────────────────────
+                promote
+```
+
+When the hot set exceeds capacity, the LRU-oldest record is compacted via
+`compactRecord()` into a 40-byte `txSummary` and inserted into the cold set.
+When a handler receives an event for a hash not in the hot set, it calls
+`lookupOrPromote()` which checks the cold set and, on hit, deletes from cold,
+converts back to a full `txRecord` via `promoteRecord()`, increments the
+`returns` counter, and re-inserts into the hot set.
+
+### txSummary (40 bytes)
+
+Compact record preserving the essential lifecycle data:
+
+| Field | Size | Encoding |
+|-------|------|----------|
+| flags | 1B | local(1) + txType(3) + status(4 bits) |
+| returns | 1B | cold→hot promotion count |
+| reorgCount | 1B | included→pooled transitions |
+| nAnnouncers | 1B | distinct announcing peers (clamped 255) |
+| txSize | 2B | size in 64-byte units (max ~4MB) |
+| firstAnnouncer | 2B | peer intern index |
+| deliverer | 2B | peer intern index |
+| dRequestMs | 2B | firstSeen → requested (ms, max 65s) |
+| dReceiveMs | 2B | firstSeen → received (ms, max 65s) |
+| dPoolMs | 2B | firstSeen → pooled (ms, max 65s) |
+| dFinalizeSec | 2B | included → finalized (sec, max 18h) |
+| dDropSec | 2B | firstSeen → dropped (sec, max 18h) |
+| dIncludeSec | 4B | firstSeen → included (sec, max ~136y) |
+| firstSeen | 8B | unix nanos |
+| blockNum | 8B | block number |
+
+Timestamps are delta-encoded from `firstSeen` (or `included` for finalize)
+and clamped to the field's max value. This preserves ms-precision for the
+fast early hops (announce→request→receive→pool) and sec-precision for the
+slower later stages (include, finalize, drop).
+
+Fields NOT preserved in cold: from, nonce, gas, fee caps, value, to,
+blockHash, rejectErr, dropReason, requestedFrom, full announcer list.
+These require the full transaction body which is not stored.
+
+### Open-Addressing Hash Table
+
+The cold set uses a flat open-addressing hash table with linear probing,
+rather than Go's built-in `map`. This reduces per-entry overhead from
+~148B (Go map) to ~107B (80B slot / 0.75 load factor).
+
+```go
+type coldSlot struct {
+    hash    common.Hash  // 32B — zero=empty, 0xFF..=tombstone
+    summary txSummary    // 40B
+    prev    int32        // 4B — DLL prev (-1 = none)
+    next    int32        // 4B — DLL next (-1 = none)
+}
+// 80 bytes per slot, table sized at entries/0.75 → ~107B per live entry
+```
+
+Key design choices:
+
+- **Probe index**: first 8 bytes of `common.Hash` as uint64, masked to table
+  size. Transaction hashes are cryptographic, so no secondary hash needed.
+- **Tombstone deletion**: deleted slots are marked with a sentinel hash
+  (`0xFF...FF`) to preserve probe chains. Insert checks past tombstones
+  for duplicates before reusing a tombstone slot.
+- **Rehash trigger**: when tombstones exceed 25% of table size, the table
+  is rebuilt by walking the old DLL head→tail and re-inserting each live
+  entry, preserving FIFO order.
+
+### Intrusive Doubly-Linked List (FIFO)
+
+FIFO eviction order is maintained by threading `prev`/`next` int32 slot
+indices through the `coldSlot` struct. This avoids a separate ring buffer
+or Go `container/list` (which would add pointer overhead per entry).
+
+Operations:
+- Insert: append to DLL tail (newest)
+- Evict: remove DLL head (oldest)
+- Delete (promotion): unlink from DLL
+- Rehash: walk old DLL head→tail to rebuild in FIFO order
+
+### Peer Interning
+
+Cold records store peer references as uint16 indices into a shared
+`peerIntern` table (`map[string]uint16` + `[]string`). Index 0 is reserved
+for unknown/empty. The table grows monotonically and is never shrunk. If
+more than 65,534 unique peers are seen, new peers overflow to index 0.
+
+Only two peer references are preserved per cold record: the first announcer
+and the deliverer. The full announcer list is lost on compaction (the count
+is preserved in `nAnnouncers`).
+
+### Query Paths
+
+- **Status()**: checks hot set, then reads `status()` from cold summary.
+  No promotion — avoids thrashing from polling clients.
+- **Get()**: checks hot set, then builds a partial `TxInfo` from cold via
+  `summaryToTxInfo()`. No promotion — fields not preserved in cold (from,
+  nonce, gas, fees, etc.) are left at zero values.
+- **Handler events** (announce, receive, pool, reject, chain, remove, newTxs):
+  use `lookupOrPromote()` which promotes from cold to hot on match, allowing
+  the transaction to continue its lifecycle with full fidelity.
+
+### Memory Estimate
+
+At default capacity (2M cold entries):
+- 80B × 2M / 0.75 load = ~213MB for the slot table
+- Peer intern table: negligible (typically <1000 peers)
+- Total: ~214MB for 2M cold entries
+
+Configurable via `Config.MaxColdEntries`. Set `Config.ColdSetDisabled = true`
+to disable entirely (zero memory overhead).
 
 ## Future Work
 
