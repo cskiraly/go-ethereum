@@ -65,32 +65,17 @@ func main() {
 	}
 }
 
-func run(ctx *cli.Context) error {
-	endpoint := ctx.String("rpc")
-	addr := ctx.String("addr")
+// setupMux creates the HTTP handler mux for txview. proxyTarget is the
+// HTTP(S) URL of the geth WebSocket endpoint (already converted from ws/wss).
+func setupMux(proxyTarget *url.URL) (*http.ServeMux, error) {
+	mux := http.NewServeMux()
 
-	// Verify geth connection at startup.
-	client, err := rpc.Dial(endpoint)
-	if err != nil {
-		return fmt.Errorf("failed to connect to geth at %s: %w", endpoint, err)
-	}
-	client.Close()
-
-	// Reverse proxy for /ws so the browser connects same-origin (avoids
-	// geth's WebSocket origin check).
-	httpEndpoint := strings.Replace(strings.Replace(endpoint, "ws://", "http://", 1), "wss://", "https://", 1)
-	target, err := url.Parse(httpEndpoint)
-	if err != nil {
-		return fmt.Errorf("invalid RPC endpoint URL: %w", err)
-	}
+	// Reverse proxy for /ws so the browser connects same-origin.
 	wsProxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetURL(target)
-			// SetURL preserves the incoming path (/ws), but geth serves
-			// WebSocket at the root. Override to the target's path.
-			r.Out.URL.Path = target.Path
+			r.SetURL(proxyTarget)
+			r.Out.URL.Path = proxyTarget.Path
 			r.Out.URL.RawPath = ""
-			// Remove Origin header so geth skips the origin check.
 			r.Out.Header.Del("Origin")
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -98,10 +83,10 @@ func run(ctx *cli.Context) error {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 		},
 	}
-	http.Handle("/ws", wsProxy)
+	mux.Handle("/ws", wsProxy)
 
 	// Config endpoint tells the JS to use the proxied /ws path.
-	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
 		scheme := "ws"
 		if r.TLS != nil {
 			scheme = "wss"
@@ -114,7 +99,7 @@ func run(ctx *cli.Context) error {
 	})
 
 	// Serve standalone transaction detail page for /tx/0x... URLs.
-	http.HandleFunc("/tx/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/tx/", func(w http.ResponseWriter, r *http.Request) {
 		f, err := ui.Assets.Open("detail.html")
 		if err != nil {
 			http.NotFound(w, r)
@@ -128,11 +113,37 @@ func run(ctx *cli.Context) error {
 	// Serve embedded UI assets.
 	assets, err := fs.Sub(ui.Assets, ".")
 	if err != nil {
+		return nil, err
+	}
+	mux.Handle("/", http.FileServerFS(assets))
+
+	return mux, nil
+}
+
+func run(ctx *cli.Context) error {
+	endpoint := ctx.String("rpc")
+	addr := ctx.String("addr")
+
+	// Verify geth connection at startup.
+	client, err := rpc.Dial(endpoint)
+	if err != nil {
+		return fmt.Errorf("failed to connect to geth at %s: %w", endpoint, err)
+	}
+	client.Close()
+
+	// Convert ws(s):// to http(s):// for the reverse proxy target.
+	httpEndpoint := strings.Replace(strings.Replace(endpoint, "ws://", "http://", 1), "wss://", "https://", 1)
+	target, err := url.Parse(httpEndpoint)
+	if err != nil {
+		return fmt.Errorf("invalid RPC endpoint URL: %w", err)
+	}
+
+	mux, err := setupMux(target)
+	if err != nil {
 		return err
 	}
-	http.Handle("/", http.FileServerFS(assets))
 
-	srv := &http.Server{Addr: addr}
+	srv := &http.Server{Addr: addr, Handler: mux}
 
 	fmt.Printf("txview listening on http://%s\n", addr)
 	fmt.Printf("  Geth RPC: %s (proxied at /ws)\n", endpoint)
