@@ -757,7 +757,7 @@ Compact record preserving the essential lifecycle data:
 | Field | Size | Encoding |
 |-------|------|----------|
 | flags | 1B | local(1) + txType(3) + status(4 bits) |
-| returns | 1B | cold→hot promotion count |
+| returns | 1B | terminal→non-terminal return count |
 | reorgCount | 1B | included→pooled transitions |
 | nAnnouncers | 1B | distinct announcing peers (clamped 255) |
 | txSize | 2B | size in 64-byte units (max ~4MB) |
@@ -872,31 +872,31 @@ to disable entirely (zero memory overhead).
 - Filter redundant transaction fetches based on tracker state
 - Add eviction to txview browser (e.g., drop oldest entries past a threshold)
 
-## Returns Visualization
+## Returns
 
-Transactions that are evicted from the hot set to cold storage and later
-re-announced or re-encountered are "returned" (cold→hot promoted). The
-`returns` counter on `TxTrackerEvent` and `TxInfo` tracks how many times
-this has happened. The txview browser UI surfaces returns across all views:
+A transaction is "returned" when it transitions out of a terminal state
+(dropped, rejected, or finalized) back into an active state (requested,
+received, pooled, or included). The `returns` counter on `txRecord`,
+`TxTrackerEvent`, and `TxInfo` tracks how many times this has happened.
+This is a lifecycle concept independent of hot/cold storage tier — the
+cold set preserves the counter but does not itself cause returns.
 
-**Feed view**: Returned transactions show a purple ↩ indicator prepended to
-the lamp strip. Rows with returns get a subtle purple tint (`.returned`
-class). A "Returned" checkbox filter in the filter bar shows only returned
-transactions when enabled.
+Terminal states: `TxDropped`, `TxRejected`, `TxFinalized`.
+The `isTerminal()` method on `TxStatus` identifies these.
 
-**Top view**: A sortable "Ret" column (`top-col-returns`) shows the return
-count. The same returned-only filter checkbox is available.
+Returns are bumped by `bumpReturns(rec)` in the handler that performs
+the transition, before emitting the event. Terminal→terminal transitions
+(e.g. Dropped→Rejected) do NOT bump returns.
 
-**Stats view (Sankey)**: A purple backward arc from the Finalized node to
-the Announced node visualizes returned transaction flow, drawn below any
-reorg arc. The count is tracked as `nReturned` in the snapshot and
-processed through the same EMA smoothing as other scalar keys.
+### Visualization
 
-**Header**: A "Returned" counter badge in the header shows the cumulative
-count of returned transactions seen during the session.
+The txview browser UI surfaces returns across all views:
 
-**Detail panel**: The Returns field in `buildTxFields()` shows the count
-with a "(cold→hot promotions)" label.
+- **Feed**: purple ↩ lamp indicator, subtle row highlight, "Returned" filter
+- **Top**: sortable "Ret" column, same filter checkbox
+- **Sankey**: purple backward arc from Finalized→Announced
+- **Header**: cumulative "Returned" counter badge
+- **Detail panel**: Returns field with count
 
-Event tracking: `ev._returns` is carried forward on subscription events
-so the UI can render return state without additional RPC calls.
+`ev._returns` is carried forward on subscription events so the UI can
+render return state without additional RPC calls.

@@ -1794,3 +1794,159 @@ func TestColdStats(t *testing.T) {
 		t.Fatalf("expected cold total 2, got %d", stats.ColdTotal)
 	}
 }
+
+// TestReturnedFromDropped verifies that a hot-only Pooled→Dropped→Pooled
+// cycle bumps returns to 1.
+func TestReturnedFromDropped(t *testing.T) {
+	tr, _, _, pool := testTracker(10)
+	defer tr.Stop()
+
+	hash := makeHash(1)
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+
+	// Drop.
+	dropAndWait(t, tr, pool, hash)
+	if s := tr.Status(hash); s != TxDropped {
+		t.Fatalf("expected TxDropped, got %v", s)
+	}
+
+	// Re-pool → should bump returns.
+	poolAndWait(t, tr, []common.Hash{hash})
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected tx after re-pool")
+	}
+	if info.Returns != 1 {
+		t.Fatalf("expected returns=1 after Dropped→Pooled, got %d", info.Returns)
+	}
+}
+
+// TestReturnedFromRejected verifies that a Rejected→Included transition
+// via handleChainEvent bumps returns.
+func TestReturnedFromRejected(t *testing.T) {
+	tr, _, chain, _ := testTracker(10)
+	defer tr.Stop()
+
+	tx := makeTx(1)
+	hash := tx.Hash()
+
+	// Receive and reject.
+	tr.NotifyReceived("peerA", []*types.Transaction{tx})
+	waitStep(t, tr)
+	tr.NotifyRejected([]common.Hash{hash}, []error{errors.New("bad")})
+	waitStep(t, tr)
+	if s := tr.Status(hash); s != TxRejected {
+		t.Fatalf("expected TxRejected, got %v", s)
+	}
+
+	// Include in block → returned from terminal.
+	h := makeHeader(10, common.Hash{})
+	chain.sendChainEvent(core.ChainEvent{
+		Header:       h,
+		Transactions: types.Transactions{tx},
+	})
+	waitStep(t, tr)
+
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected tx after inclusion")
+	}
+	if info.Returns != 1 {
+		t.Fatalf("expected returns=1 after Rejected→Included, got %d", info.Returns)
+	}
+}
+
+// TestReturnedTerminalToTerminal verifies that Dropped→Rejected (terminal
+// to terminal) does NOT bump returns.
+func TestReturnedTerminalToTerminal(t *testing.T) {
+	tr, _, _, pool := testTracker(10)
+	defer tr.Stop()
+
+	hash := makeHash(1)
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+
+	// Drop.
+	dropAndWait(t, tr, pool, hash)
+
+	// Reject while dropped — terminal→terminal, returns stays 0.
+	tr.NotifyRejected([]common.Hash{hash}, []error{errors.New("bad")})
+	waitStep(t, tr)
+
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected tx after rejection")
+	}
+	// Dropped→Rejected: handleRejected guard allows TxDropped, but it's
+	// terminal→terminal so returns should not bump.
+	if info.Returns != 0 {
+		t.Fatalf("expected returns=0 for terminal→terminal, got %d", info.Returns)
+	}
+}
+
+// TestColdPromotionNonTerminalNoReturn verifies that promoting a
+// non-terminal (e.g. TxPooled) record from cold does NOT bump returns.
+func TestColdPromotionNonTerminalNoReturn(t *testing.T) {
+	tr, _, _, _ := testTrackerWithCold(3, 10)
+	defer tr.Stop()
+
+	hash := makeHash(1)
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+
+	// Evict to cold by filling hot.
+	for i := byte(10); i <= 12; i++ {
+		tr.NotifyAnnounced("peerA", []common.Hash{makeHash(i)}, []byte{0}, []uint32{100})
+		waitStep(t, tr)
+	}
+
+	// Re-announce → promotes from cold. TxPooled is non-terminal, no return.
+	tr.NotifyAnnounced("peerB", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected promoted tx")
+	}
+	if info.Returns != 0 {
+		t.Fatalf("expected returns=0 for non-terminal cold promotion, got %d", info.Returns)
+	}
+}
+
+// TestColdPromotionTerminalReturn verifies that promoting a terminal
+// (e.g. TxDropped) record from cold and then re-pooling bumps returns.
+func TestColdPromotionTerminalReturn(t *testing.T) {
+	tr, _, _, pool := testTrackerWithCold(3, 10)
+	defer tr.Stop()
+
+	hash := makeHash(1)
+	tr.NotifyAnnounced("peerA", []common.Hash{hash}, []byte{0}, []uint32{100})
+	waitStep(t, tr)
+	poolAndWait(t, tr, []common.Hash{hash})
+	dropAndWait(t, tr, pool, hash)
+
+	// Evict to cold by filling hot.
+	for i := byte(10); i <= 12; i++ {
+		tr.NotifyAnnounced("peerA", []common.Hash{makeHash(i)}, []byte{0}, []uint32{100})
+		waitStep(t, tr)
+	}
+	// hash is now in cold with TxDropped.
+	if s := tr.Status(hash); s != TxDropped {
+		t.Fatalf("expected cold TxDropped, got %v", s)
+	}
+
+	// Re-pool → promotes from cold (no return bump yet, just promotion),
+	// then Dropped→Pooled transition bumps returns.
+	poolAndWait(t, tr, []common.Hash{hash})
+	info := tr.Get(hash)
+	if info == nil {
+		t.Fatal("expected promoted tx")
+	}
+	if info.Returns != 1 {
+		t.Fatalf("expected returns=1 after cold TxDropped→Pooled, got %d", info.Returns)
+	}
+}

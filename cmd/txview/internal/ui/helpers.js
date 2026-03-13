@@ -65,7 +65,7 @@ var txviewHelpers = (function() {
             ['Block #', info.BlockNum || '-'],
             ['Block Hash', info.BlockHash || '-'],
             ['Reject Error', info.RejectErr || '-'],
-            ['Returns', info.Returns ? info.Returns + ' (cold\u2192hot promotions)' : '-'],
+            ['Returns', info.Returns ? info.Returns + ' (terminal\u2192active returns)' : '-'],
         ];
     }
 

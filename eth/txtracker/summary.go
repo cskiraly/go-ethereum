@@ -29,7 +29,7 @@ import (
 // bits 4-7 = terminal status (TxStatus value).
 type txSummary struct {
 	flags       uint8 // local(1 bit) + txType(3 bits) + status(4 bits)
-	returns     uint8 // cold→hot promotion count
+	returns     uint8 // terminal→non-terminal return count
 	reorgCount  uint8 // included→pooled transitions
 	nAnnouncers uint8 // distinct announcing peers
 

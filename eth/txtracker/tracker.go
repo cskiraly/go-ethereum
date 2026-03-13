@@ -71,6 +71,13 @@ func (s TxStatus) String() string {
 	}
 }
 
+// isTerminal reports whether the status is a terminal lifecycle state
+// (dropped, rejected, or finalized). A transition out of a terminal state
+// counts as a "return".
+func (s TxStatus) isTerminal() bool {
+	return s == TxDropped || s == TxRejected || s == TxFinalized
+}
+
 // MarshalJSON serializes TxStatus as a JSON string (e.g., "pooled").
 func (s TxStatus) MarshalJSON() ([]byte, error) {
 	return json.Marshal(s.String())
@@ -146,7 +153,7 @@ type txRecord struct {
 	rejectErr     string      // Rejection reason (when status == TxRejected)
 	dropReason    string      // Drop reason (when status == TxDropped)
 	reorgCount    uint8       // Times included→pooled (reorg count)
-	returns       uint8       // Times promoted from cold→hot
+	returns       uint8       // Times returned from a terminal state
 
 	evictElem *list.Element // Position in eviction list
 }
@@ -735,6 +742,9 @@ func (t *Tracker) handleFetchRequested(ev *fetchRequestedEvent) {
 		// Advance if currently Announced or Dropped (re-fetch cycle).
 		if rec.status == TxAnnounced || rec.status == TxDropped {
 			oldStatus := rec.status
+			if oldStatus.isTerminal() {
+				bumpReturns(rec)
+			}
 			rec.status = TxRequested
 			rec.requested = now
 			rec.requestedFrom = ev.peer
@@ -772,6 +782,9 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 		// Advance if status is before Received or Dropped (re-fetch).
 		if rec.status < TxReceived || rec.status == TxDropped {
 			oldStatus := rec.status
+			if oldStatus.isTerminal() {
+				bumpReturns(rec)
+			}
 			rec.status = TxReceived
 			rec.received = now
 			rec.deliverer = ev.peer
@@ -815,6 +828,9 @@ func (t *Tracker) handlePooled(ev *pooledEvent) {
 		// Advance if not already pooled or beyond, or if re-entering from Dropped.
 		if rec.status < TxPooled || rec.status == TxDropped {
 			oldStatus := rec.status
+			if oldStatus.isTerminal() {
+				bumpReturns(rec)
+			}
 			rec.status = TxPooled
 			rec.pooled = now
 			t.touchLRU(rec)
@@ -920,6 +936,9 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 		}
 		if rec.status != TxFinalized {
 			oldStatus := rec.status
+			if oldStatus.isTerminal() {
+				bumpReturns(rec)
+			}
 			rec.status = TxIncluded
 			rec.included = now
 			rec.blockNum = blockNum
@@ -1059,6 +1078,9 @@ func (t *Tracker) handleNewTxs(ev core.NewTxsEvent) {
 		rec := t.lookupOrPromote(hash)
 		if rec != nil {
 			oldStatus := rec.status
+			if oldStatus.isTerminal() {
+				bumpReturns(rec)
+			}
 			rec.status = TxPooled
 			rec.local = true
 			rec.pooled = now
@@ -1145,14 +1167,20 @@ func (t *Tracker) lookupOrPromote(hash common.Hash) *txRecord {
 		return nil
 	}
 	rec := promoteRecord(s, t.peerIndex)
-	if rec.returns < 255 {
-		rec.returns++
-	}
 	t.insertRecord(hash, rec)
 	t.emitEvent(hash, 0, rec.status, rec, "")
 	txColdPromotedMeter.Mark(1)
 	txColdSize.Update(int64(t.cold.Len()))
 	return rec
+}
+
+// bumpReturns increments the returns counter when a transaction exits a
+// terminal state (dropped/rejected/finalized) back into an active state.
+func bumpReturns(rec *txRecord) {
+	if rec.returns < 255 {
+		rec.returns++
+	}
+	txReturnedMeter.Mark(1)
 }
 
 // insertRecord adds a new transaction record and manages eviction.

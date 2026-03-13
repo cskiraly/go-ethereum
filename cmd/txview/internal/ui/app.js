@@ -75,7 +75,7 @@
     // --- Type filter state (shared across all panes) ---
     let typeFilter = new Set([0, 1, 2, 3, 4]);
     let showPrivate = false;       // hide txs first seen in a block by default
-    let showReturnedOnly = false;  // show only returned (cold→hot promoted) txs
+    let showReturnedOnly = false;  // show only returned txs
 
     // --- DOM refs: shared ---
     const statusDot = document.getElementById('status-dot');
@@ -617,7 +617,7 @@
         incrementCounter(ev.newStatus);
         counters.total.textContent = txs.size;
 
-        // Track returned count (txs with cold→hot promotions).
+        // Track returned count (txs that re-entered from terminal state).
         var wasReturned = old && old._returns > 0;
         var isReturned = ev._returns > 0;
         if (isReturned && !wasReturned) {
@@ -1179,10 +1179,10 @@
             parts.push('<span class="lamp lamp-lit-dropped lamp-current">Dr</span>');
         }
 
-        // Prepend return indicator if tx was promoted from cold set.
+        // Prepend return indicator if tx was returned from terminal state.
         var prefix = '';
         if (ev._returns > 0) {
-            prefix = '<span class="lamp-return" title="Returned from cold set ' + ev._returns + 'x">\u21a9</span>';
+            prefix = '<span class="lamp-return" title="Returned from terminal state ' + ev._returns + 'x">\u21a9</span>';
         }
 
         return '<span class="lamp-strip">' + prefix + parts.join('') + '</span>';
