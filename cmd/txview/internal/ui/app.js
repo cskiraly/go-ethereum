@@ -138,7 +138,7 @@
         viewport.scrollTop = 0; // triggers scroll listener → unpauses
     });
     viewport.style.position = 'relative'; // ensure pill positions relative to viewport
-    viewport.appendChild(feedNewPill);
+    viewport.insertBefore(feedNewPill, viewport.firstChild);
 
     function showFeedNewPill() {
         feedNewPill.textContent = feedPausedCount + ' new \u2014 scroll to top';
