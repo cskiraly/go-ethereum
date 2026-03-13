@@ -716,19 +716,22 @@
         '<span class="col-progress"></span>';
 
     function renderFeedViewport() {
+        // Capture spacer height BEFORE rebuilding hashes so we measure the
+        // delta caused only by new rows added since the last render.
+        var oldSpacerHeight = feedPaused ? parseInt(scrollSpacer.style.height) || 0 : 0;
+
         if (feedViewDirty) rebuildFeedHashes();
 
         var totalRows = visibleHashes.length;
+        var newSpacerHeight = totalRows * ROW_HEIGHT;
 
-        // When paused, preserve viewport position as new rows prepend.
-        var savedScrollTop = feedPaused ? viewport.scrollTop : -1;
-        var oldSpacerHeight = feedPaused ? parseInt(scrollSpacer.style.height) || 0 : 0;
+        scrollSpacer.style.height = newSpacerHeight + 'px';
 
-        scrollSpacer.style.height = (totalRows * ROW_HEIGHT) + 'px';
-
-        if (savedScrollTop >= 0) {
-            var delta = (totalRows * ROW_HEIGHT) - oldSpacerHeight;
-            if (delta > 0) viewport.scrollTop = savedScrollTop + delta;
+        // When paused, adjust scrollTop by the exact height delta so the
+        // same rows stay visible as new rows prepend above.
+        if (feedPaused && oldSpacerHeight > 0) {
+            var delta = newSpacerHeight - oldSpacerHeight;
+            if (delta > 0) viewport.scrollTop += delta;
         }
 
         var win = computeVisibleWindow(viewport, totalRows);

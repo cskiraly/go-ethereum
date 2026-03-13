@@ -564,6 +564,75 @@ func TestFeedScrollPause(t *testing.T) {
 	}
 }
 
+func TestFeedScrollPauseReentry(t *testing.T) {
+	// Regression test: scrolling down a second time after returning to top
+	// should start from the current position, not jump to the end.
+	gethWS, svc := startMockGeth(t)
+	txviewURL := startTxview(t, gethWS)
+	ctx, _ := newBrowser(t)
+
+	if err := chromedp.Run(ctx, chromedp.Navigate(txviewURL)); err != nil {
+		t.Fatalf("navigate failed: %v", err)
+	}
+	waitSubscribed(t, svc)
+
+	// Fill feed.
+	injectEvents(svc, 1, 30, "announced")
+	if err := chromedp.Run(ctx,
+		chromedp.Poll(`
+			(function() {
+				var sp = document.getElementById('scroll-spacer');
+				var vp = document.getElementById('viewport');
+				return sp && vp && parseInt(sp.style.height) > vp.clientHeight;
+			})()
+		`, nil, chromedp.WithPollingInterval(100*time.Millisecond)),
+	); err != nil {
+		t.Fatalf("waiting for scrollable feed: %v", err)
+	}
+
+	// First scroll cycle: scroll down, then back to top.
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.getElementById('viewport').scrollTop = 200`, nil),
+		chromedp.Sleep(300*time.Millisecond),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject events while paused.
+	injectEvents(svc, 100, 5, "announced")
+	time.Sleep(500 * time.Millisecond)
+
+	// Return to top (unpause).
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.getElementById('viewport').scrollTop = 0`, nil),
+		chromedp.Sleep(300*time.Millisecond),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second scroll: scroll down by a small amount (100px).
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.getElementById('viewport').scrollTop = 100`, nil),
+		chromedp.Sleep(300*time.Millisecond),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify scrollTop is near 100, not jumped to the end.
+	var scrollTop float64
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.getElementById('viewport').scrollTop`, &scrollTop),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Allow some tolerance for scroll compensation from events arriving
+	// between unpause and second scroll, but it should not jump far.
+	if scrollTop > 500 {
+		t.Fatalf("second scroll jumped to %f instead of staying near 100", scrollTop)
+	}
+}
+
 func TestFeedScrollPauseCounterAccumulates(t *testing.T) {
 	gethWS, svc := startMockGeth(t)
 	txviewURL := startTxview(t, gethWS)
