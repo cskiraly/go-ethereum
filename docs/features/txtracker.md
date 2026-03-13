@@ -685,6 +685,31 @@ link-drawing code.
   `time.Now()` per iteration.
 - Explicitly discard `json.Encoder.Encode` error in `/config` handler.
 
+## E2E Testing
+
+`cmd/txview/e2e_test.go` contains browser-based functional tests using
+chromedp (headless Chromium). The test infrastructure creates a mock RPC
+backend (`mockTxtrackerService` registered on `rpc.Server`) and starts
+txview with `setupMux` pointing at it via `httptest.NewServer`. Events
+are injected through a channel, with a `subscribedCh` signal preventing
+races between WebSocket connection and subscription readiness.
+
+Test tiers:
+
+- **Endpoint tests** (no browser): `/config`, static assets, `/tx/` detail page
+- **WS proxy test** (no browser): dials `ws://txview/ws`, subscribes, verifies
+  event notifications round-trip through the reverse proxy
+- **Browser tests** (chromedp): feed scroll-pause (pill appears, anchor row
+  stays stable, pill click resumes), counter accumulation (new hashes only,
+  not status updates), status filter, tab switching
+
+Requires Chromium (`apt install chromium-browser`). Tests skip gracefully
+if no Chrome binary is found.
+
+```bash
+go test -v ./cmd/txview/
+```
+
 ## Future Work
 
 - Use tracker data for peer scoring (bandwidth waste detection)
