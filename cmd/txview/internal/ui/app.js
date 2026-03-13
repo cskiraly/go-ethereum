@@ -50,8 +50,8 @@
     const SCALAR_KEYS = ['total', 'announced', 'requested', 'received', 'pooled',
         'included', 'finalized', 'rejected', 'dropped', 'reqPipeline',
         'unsolicited', 'reqToReceived', 'received_total', 'toPooled',
-        'nRejected', 'nDropped', 'private', 'nReorged', 'cumRejected',
-        'cumDropped', 'cumFinalized'];
+        'nRejected', 'nDropped', 'private', 'nReorged', 'nReturned',
+        'cumRejected', 'cumDropped', 'cumFinalized'];
 
     // --- Sankey smoothing state ---
     let sankeySnapshots = [];        // ring buffer of periodic snapshots
@@ -75,6 +75,7 @@
     // --- Type filter state (shared across all panes) ---
     let typeFilter = new Set([0, 1, 2, 3, 4]);
     let showPrivate = false;       // hide txs first seen in a block by default
+    let showReturnedOnly = false;  // show only returned (cold→hot promoted) txs
 
     // --- DOM refs: shared ---
     const statusDot = document.getElementById('status-dot');
@@ -91,6 +92,7 @@
         rejected: document.getElementById('cnt-rejected'),
         dropped: document.getElementById('cnt-dropped'),
     };
+    const cntReturned = document.getElementById('cnt-returned');
 
     // --- DOM refs: feed view ---
     const feedView = document.getElementById('view-feed');
@@ -225,6 +227,18 @@
         });
     }
 
+    // Returned-only toggle (Feed + Top filter bars).
+    var returnedCbs = document.querySelectorAll('.returned-cb');
+    for (var ri = 0; ri < returnedCbs.length; ri++) {
+        returnedCbs[ri].addEventListener('change', function(e) {
+            showReturnedOnly = e.target.checked;
+            for (var j = 0; j < returnedCbs.length; j++) returnedCbs[j].checked = showReturnedOnly;
+            feedViewDirty = true;
+            topViewDirty = true;
+            scheduleRender();
+        });
+    }
+
     // Sortable column headers in top view.
     topTableHeader.addEventListener('click', function(e) {
         var span = e.target.closest('.sortable');
@@ -301,7 +315,7 @@
 
     // Column order arrays — index = CSS order value.
     var feedColOrder = ['col-hash', 'col-status', 'col-peer', 'col-block', 'col-age', 'col-error', 'col-progress'];
-    var topColOrder = ['top-col-hash', 'top-col-status', 'top-col-from', 'top-col-nonce', 'top-col-value', 'top-col-feecap', 'top-col-tipcap', 'top-col-gas', 'top-col-age', 'top-col-progress'];
+    var topColOrder = ['top-col-hash', 'top-col-status', 'top-col-returns', 'top-col-from', 'top-col-nonce', 'top-col-value', 'top-col-feecap', 'top-col-tipcap', 'top-col-gas', 'top-col-age', 'top-col-progress'];
     var peersColOrder = ['peers-col-id', 'peers-col-announced', 'peers-col-delivered', 'peers-col-useful', 'peers-col-first', 'peers-col-included', 'peers-col-finalized', 'peers-col-useful-pct', 'peers-col-first-pct', 'peers-col-included-pct', 'peers-col-finalized-pct', 'peers-col-included-share', 'peers-col-finalized-share'];
 
     // Extract the column class (col-* or top-col-*) from an element.
@@ -582,6 +596,7 @@
             ev.peer = ev.peer || old.peer;
             ev._dropReason = ev.dropReason || old._dropReason;
             ev._rejectErr = ev.rejectErr || old._rejectErr;
+            ev._returns = ev.returns || old._returns || 0;
             // Track backward transition: included → pooled (reorg).
             if (old.newStatus === 'included' && ev.newStatus === 'pooled') {
                 ev._reorgCount++;
@@ -594,10 +609,18 @@
             ev._txType = ev.txType || 0;
             ev._dropReason = ev.dropReason || '';
             ev._rejectErr = ev.rejectErr || '';
+            ev._returns = ev.returns || 0;
         }
         txs.set(hash, ev);
         incrementCounter(ev.newStatus);
         counters.total.textContent = txs.size;
+
+        // Track returned count (txs with cold→hot promotions).
+        var wasReturned = old && old._returns > 0;
+        var isReturned = ev._returns > 0;
+        if (isReturned && !wasReturned) {
+            cntReturned.textContent = parseInt(cntReturned.textContent) + 1;
+        }
 
         // Track cumulative entries into sink states.
         if (ev.newStatus === 'rejected' && (!old || old.newStatus !== 'rejected')) cumRejected++;
@@ -686,6 +709,7 @@
     function matchesFeedFilter(hash, ev) {
         if (!typeFilter.has(ev._txType || 0)) return false;
         if (!showPrivate && isPrivateTx(ev)) return false;
+        if (showReturnedOnly && !(ev._returns > 0)) return false;
         var status = filterStatus.value;
         if (status && ev.newStatus !== status) return false;
         var text = filterInput.value;
@@ -759,6 +783,11 @@
             } else {
                 r.classList.remove('selected');
             }
+            if (ev._returns > 0) {
+                r.classList.add('returned');
+            } else {
+                r.classList.remove('returned');
+            }
 
             var cols = r.children;
             cols[0].textContent = shortHash(hash);
@@ -795,6 +824,7 @@
     function matchesTopFilter(hash, ev) {
         if (!typeFilter.has(ev._txType || 0)) return false;
         if (!showPrivate && isPrivateTx(ev)) return false;
+        if (showReturnedOnly && !(ev._returns > 0)) return false;
         var status = topFilterStatus.value;
         if (status && ev.newStatus !== status) return false;
         var text = topFilterInput.value;
@@ -827,6 +857,9 @@
                     break;
                 case 'status':
                     cmp = statusOrd(ea.newStatus) - statusOrd(eb.newStatus);
+                    break;
+                case 'returns':
+                    cmp = (ea._returns || 0) - (eb._returns || 0);
                     break;
                 default:
                     var ca = topCache.get(a), cb = topCache.get(b);
@@ -862,6 +895,7 @@
     var TOP_ROW_TPL =
         '<span class="top-col-hash"></span>' +
         '<span class="top-col-status"></span>' +
+        '<span class="top-col-returns"></span>' +
         '<span class="top-col-from"></span>' +
         '<span class="top-col-nonce"></span>' +
         '<span class="top-col-value"></span>' +
@@ -903,6 +937,11 @@
             } else {
                 r.classList.remove('selected');
             }
+            if (ev._returns > 0) {
+                r.classList.add('returned');
+            } else {
+                r.classList.remove('returned');
+            }
 
             var cols = r.children;
             cols[0].textContent = shortHash(hash);
@@ -912,27 +951,30 @@
             cols[1].innerHTML = renderLampStrip(ev);
             cols[1].className = 'top-col-status';
 
+            // Returns column.
+            cols[2].textContent = ev._returns > 0 ? ev._returns : '-';
+
             if (cached) {
                 var info = cached.info;
-                cols[2].textContent = shortAddr(info.From);
-                cols[2].title = info.From || '';
-                cols[3].textContent = info.Nonce || '0';
-                cols[4].textContent = formatWei(info.Value);
-                cols[5].textContent = formatGwei(info.GasFeeCap);
-                cols[6].textContent = formatGwei(info.GasTipCap);
-                cols[7].textContent = info.Gas ? formatNumber(info.Gas) : '-';
-                cols[8].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
-                cols[9].innerHTML = renderProgress(info);
+                cols[3].textContent = shortAddr(info.From);
+                cols[3].title = info.From || '';
+                cols[4].textContent = info.Nonce || '0';
+                cols[5].textContent = formatWei(info.Value);
+                cols[6].textContent = formatGwei(info.GasFeeCap);
+                cols[7].textContent = formatGwei(info.GasTipCap);
+                cols[8].textContent = info.Gas ? formatNumber(info.Gas) : '-';
+                cols[9].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
+                cols[10].innerHTML = renderProgress(info);
             } else {
                 // Not yet fetched.
-                cols[2].textContent = '\u2026';
                 cols[3].textContent = '\u2026';
                 cols[4].textContent = '\u2026';
                 cols[5].textContent = '\u2026';
                 cols[6].textContent = '\u2026';
                 cols[7].textContent = '\u2026';
-                cols[8].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
-                cols[9].textContent = '\u2026';
+                cols[8].textContent = '\u2026';
+                cols[9].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
+                cols[10].textContent = '\u2026';
 
                 // Need to fetch.
                 if (!topInflight.has(hash)) {
@@ -1135,7 +1177,13 @@
             parts.push('<span class="lamp lamp-lit-dropped lamp-current">Dr</span>');
         }
 
-        return '<span class="lamp-strip">' + parts.join('') + '</span>';
+        // Prepend return indicator if tx was promoted from cold set.
+        var prefix = '';
+        if (ev._returns > 0) {
+            prefix = '<span class="lamp-return" title="Returned from cold set ' + ev._returns + 'x">\u21a9</span>';
+        }
+
+        return '<span class="lamp-strip">' + prefix + parts.join('') + '</span>';
     }
 
     // ========================================================================
@@ -1421,7 +1469,7 @@
                     reqPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
                     unsolPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
                     privatePath: { included: 0, finalized: 0 },
-                    nReorged: 0, dropReasons: {}, rejectReasons: {},
+                    nReorged: 0, nReturned: 0, dropReasons: {}, rejectReasons: {},
                     cumRejected: 0, cumDropped: 0, cumFinalized: 0
                 };
             }
@@ -1429,6 +1477,7 @@
             var s = ev.newStatus;
             if (b.counts.hasOwnProperty(s)) b.counts[s]++;
             b.nReorged += ev._reorgCount || 0;
+            if (ev._returns > 0) b.nReturned++;
             if (ev._dropReason) {
                 b.dropReasons[ev._dropReason] = (b.dropReasons[ev._dropReason] || 0) + 1;
                 b.cumDropped++;
@@ -1462,7 +1511,7 @@
             reqPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
             unsolPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
             privatePath: { included: 0, finalized: 0 },
-            nReorged: 0, dropReasons: {}, rejectReasons: {},
+            nReorged: 0, nReturned: 0, dropReasons: {}, rejectReasons: {},
             cumRejected: 0, cumDropped: 0, cumFinalized: 0
         };
         for (var key in raw.buckets) {
@@ -1472,6 +1521,7 @@
             var b = raw.buckets[key];
             r.total += b.total;
             r.nReorged += b.nReorged;
+            r.nReturned += b.nReturned || 0;
             r.cumRejected += b.cumRejected;
             r.cumDropped += b.cumDropped;
             r.cumFinalized += b.cumFinalized;
@@ -1514,6 +1564,7 @@
             nDropped: snap.reqPath.dropped + snap.unsolPath.dropped,
             private: snap.privatePath.included + snap.privatePath.finalized,
             nReorged: snap.nReorged,
+            nReturned: snap.nReturned || 0,
             cumRejected: snap.cumRejected,
             cumDropped: snap.cumDropped,
             cumFinalized: snap.cumFinalized,
@@ -1701,7 +1752,7 @@
                 unsolTotal: unsolTotal, nRequested: nRequested, nRejected: nRejected,
                 nDropped: nDropped, receivedTotal: receivedTotal, toPooled: toPooled,
                 toIncluded: toIncluded, includedTotal: includedTotal, toFinalized: toFinalized,
-                nPrivate: nPrivate, nReorged: rates.nReorged || 0,
+                nPrivate: nPrivate, nReorged: rates.nReorged || 0, nReturned: rates.nReturned || 0,
                 rejectReasons: rates.rejectReasons || {}, dropReasons: rates.dropReasons || {},
                 branchLabel: function(v) { return [formatRate(v) + '/s']; },
                 reasonLabel: function(v, name) { return formatRate(v) + '/s ' + name; },
@@ -1799,6 +1850,7 @@
             rejBranchValues: { cum: snapCumRejected, now: counts.rejected },
             dropBranchValues: { cum: snapCumDropped, now: counts.dropped },
             privBranchValue: nPrivate,
+            nReturned: snap.nReturned || 0,
             title: 'Transaction Flow \u2014 ' + Math.round(total).toLocaleString() + ' total',
             // Cumulative-only: pending finalization.
             pendingFinalization: atIncluded,
@@ -1935,6 +1987,20 @@
             var reorgMidX = (inclNode.x + poolNode.x + NODE_W) / 2;
             var reorgLines = p.branchLabel(p.nReorged);
             drawLabel(svg, reorgMidX, reorgDropY + reorgBandH / 2 + 8, reorgLines[0] + ' reorged', 'middle', '#ff6f00', '10');
+        }
+
+        // --- Cold set return backward link ---
+        if (p.nReturned > 0) {
+            var returnBandH = sh(p.nReturned);
+            var returnMaxBottom = Math.max(annNode.y + annNode.h, finNode.y + finNode.h);
+            var returnDropY = returnMaxBottom + 65;
+            if (p.nReorged > 0) returnDropY += sh(p.nReorged) + 25;
+            if (returnDropY + returnBandH + 20 > H) returnDropY = H - returnBandH - 20;
+            drawBackLink(svg, finNode, annNode, NODE_W, returnBandH, returnDropY, '#7c4dff');
+            var returnMidX = (finNode.x + annNode.x + NODE_W) / 2;
+            var returnLines = p.branchLabel(p.nReturned);
+            drawLabel(svg, returnMidX, returnDropY + returnBandH / 2 + 8,
+                      returnLines[0] + ' returned', 'middle', '#7c4dff', '10');
         }
 
         // --- Unsolicited vs requested flow annotation ---

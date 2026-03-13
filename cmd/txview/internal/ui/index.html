@@ -21,6 +21,7 @@
             <span>Finalized: <strong id="cnt-finalized">0</strong></span>
             <span>Rejected: <strong id="cnt-rejected">0</strong></span>
             <span>Dropped: <strong id="cnt-dropped">0</strong></span>
+            <span class="cnt-returned-wrap">Returned: <strong id="cnt-returned">0</strong></span>
         </div>
     </header>
     <nav class="tab-bar">
@@ -54,6 +55,7 @@
                 <label title="SetCode (type 4)"><input type="checkbox" value="4" checked>4</label>
             </div>
             <label class="private-toggle" title="Show transactions first seen in a block (not via mempool)"><input type="checkbox" class="private-cb">Private</label>
+            <label class="returned-toggle" title="Show only returned (cold&#x2192;hot promoted) transactions"><input type="checkbox" class="returned-cb">Returned</label>
         </div>
         <div class="main-area">
             <div class="table-area">
@@ -103,12 +105,14 @@
                 <label title="SetCode (type 4)"><input type="checkbox" value="4" checked>4</label>
             </div>
             <label class="private-toggle" title="Show transactions first seen in a block (not via mempool)"><input type="checkbox" class="private-cb">Private</label>
+            <label class="returned-toggle" title="Show only returned (cold&#x2192;hot promoted) transactions"><input type="checkbox" class="returned-cb">Returned</label>
         </div>
         <div class="main-area">
             <div class="table-area">
                 <div class="table-header" id="top-table-header">
                     <span class="top-col-hash">Hash</span>
                     <span class="top-col-status sortable" data-sort="status">Status</span>
+                    <span class="top-col-returns sortable" data-sort="returns" title="Cold&#x2192;hot promotion count">Ret</span>
                     <span class="top-col-from">From</span>
                     <span class="top-col-nonce sortable" data-sort="nonce">Nonce</span>
                     <span class="top-col-value sortable" data-sort="value" title="Transaction value in adaptive units: ETH if ≥0.001, Gwei (suffixed G) if ≥1 Gwei, otherwise raw wei">Value</span>

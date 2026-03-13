@@ -244,6 +244,7 @@ func summaryToTxInfo(s txSummary, peers *peerIntern) *TxInfo {
 		TxSize:    uint32(s.txSize) * 64,
 		FirstSeen: fs,
 		BlockNum:  s.blockNum,
+		Returns:   s.returns,
 	}
 	if s.dRequestMs > 0 {
 		info.Requested = fs.Add(time.Duration(s.dRequestMs) * time.Millisecond)

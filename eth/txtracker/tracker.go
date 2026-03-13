@@ -89,6 +89,7 @@ type TxTrackerEvent struct {
 	DropReason string         `json:"dropReason,omitempty"`
 	Local      bool           `json:"local,omitempty"`
 	TxType     uint8          `json:"txType"`
+	Returns    uint8          `json:"returns,omitempty"`
 }
 
 const (
@@ -198,6 +199,7 @@ type TxInfo struct {
 	BlockHash     common.Hash
 	RejectErr     string
 	DropReason    string
+	Returns       uint8
 }
 
 // PeerStats is the public view of a peer's transaction contribution.
@@ -525,6 +527,7 @@ func (t *Tracker) emitEvent(hash common.Hash, oldStatus, newStatus TxStatus, rec
 		DropReason: rec.dropReason,
 		Local:      rec.local,
 		TxType:     rec.txType,
+		Returns:    rec.returns,
 	}
 	select {
 	case t.emitCh <- ev:
@@ -1118,6 +1121,7 @@ func (t *Tracker) answerQuery(hash common.Hash) *TxInfo {
 		BlockHash:     rec.blockHash,
 		RejectErr:     rec.rejectErr,
 		DropReason:    rec.dropReason,
+		Returns:       rec.returns,
 	}
 	// Copy announcers to avoid data races.
 	if len(rec.announcers) > 0 {

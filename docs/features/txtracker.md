@@ -871,3 +871,32 @@ to disable entirely (zero memory overhead).
   are most affected across the full 2M entry retention window.
 - Filter redundant transaction fetches based on tracker state
 - Add eviction to txview browser (e.g., drop oldest entries past a threshold)
+
+## Returns Visualization
+
+Transactions that are evicted from the hot set to cold storage and later
+re-announced or re-encountered are "returned" (cold→hot promoted). The
+`returns` counter on `TxTrackerEvent` and `TxInfo` tracks how many times
+this has happened. The txview browser UI surfaces returns across all views:
+
+**Feed view**: Returned transactions show a purple ↩ indicator prepended to
+the lamp strip. Rows with returns get a subtle purple tint (`.returned`
+class). A "Returned" checkbox filter in the filter bar shows only returned
+transactions when enabled.
+
+**Top view**: A sortable "Ret" column (`top-col-returns`) shows the return
+count. The same returned-only filter checkbox is available.
+
+**Stats view (Sankey)**: A purple backward arc from the Finalized node to
+the Announced node visualizes returned transaction flow, drawn below any
+reorg arc. The count is tracked as `nReturned` in the snapshot and
+processed through the same EMA smoothing as other scalar keys.
+
+**Header**: A "Returned" counter badge in the header shows the cumulative
+count of returned transactions seen during the session.
+
+**Detail panel**: The Returns field in `buildTxFields()` shows the count
+with a "(cold→hot promotions)" label.
+
+Event tracking: `ev._returns` is carried forward on subscription events
+so the UI can render return state without additional RPC calls.

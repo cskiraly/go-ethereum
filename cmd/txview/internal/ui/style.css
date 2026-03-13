@@ -611,3 +611,38 @@ header h1 {
 .detail-standalone .back-link:hover {
     text-decoration: underline;
 }
+
+/* --- Returned (cold→hot promoted) transactions --- */
+.returned { background: rgba(124, 77, 255, 0.08); }
+.returned:hover { background: rgba(124, 77, 255, 0.15); }
+
+.lamp-return {
+    display: inline-block;
+    font-size: 11px;
+    color: #7c4dff;
+    margin-right: 2px;
+    cursor: help;
+}
+
+.returned-toggle {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    color: #aaa;
+    cursor: pointer;
+    margin-left: 6px;
+}
+.returned-toggle:hover { color: #e0e0e0; }
+.returned-toggle input[type="checkbox"] {
+    accent-color: #7c4dff;
+    width: 12px;
+    height: 12px;
+    margin: 0;
+}
+
+.cnt-returned-wrap {
+    color: #b388ff;
+}
+
+.top-col-returns { width: 45px; flex-shrink: 0; text-align: right; }
