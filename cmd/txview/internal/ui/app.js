@@ -74,7 +74,7 @@
 
     // --- Type filter state (shared across all panes) ---
     let typeFilter = new Set([0, 1, 2, 3, 4]);
-    let showPrivate = true;        // show txs first seen in a block
+    let showPrivate = false;       // hide txs first seen in a block by default
 
     // --- DOM refs: shared ---
     const statusDot = document.getElementById('status-dot');
