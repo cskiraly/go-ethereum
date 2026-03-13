@@ -854,6 +854,20 @@ to disable entirely (zero memory overhead).
 
 ## Future Work
 
-- Use tracker data for peer scoring (bandwidth waste detection)
+- **Peer scoring with cold set data**: Use the 2M-entry cold set to
+  correlate peer contribution over much longer time horizons than the hot
+  set alone. Cold records retain `firstAnnouncer` and `deliverer`, enabling
+  analysis of which peers consistently deliver transactions that end up
+  included vs. rejected/dropped — bandwidth waste detection with a
+  statistically meaningful sample.
+- **Analytics over longer time horizons**: The cold set retains lifecycle
+  timestamps (announce→request→receive→pool→include→finalize deltas) for
+  up to 2M transactions. This enables computing latency distributions
+  (median time-to-inclusion, announce-to-pool percentiles), inclusion
+  rates, and drop reason breakdowns over hours of operation rather than
+  just the most recent ~262K hot entries.
+- **Reorg frequency analysis**: The `reorgCount` field survives cold
+  round-trips, enabling tracking of reorg frequency and which transactions
+  are most affected across the full 2M entry retention window.
 - Filter redundant transaction fetches based on tracker state
 - Add eviction to txview browser (e.g., drop oldest entries past a threshold)
