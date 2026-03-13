@@ -141,6 +141,8 @@ type txRecord struct {
 	blockHash     common.Hash // Block hash (when included)
 	rejectErr     string      // Rejection reason (when status == TxRejected)
 	dropReason    string      // Drop reason (when status == TxDropped)
+	reorgCount    uint8       // Times included→pooled (reorg count)
+	returns       uint8       // Times promoted from cold→hot
 
 	evictElem *list.Element // Position in eviction list
 }
