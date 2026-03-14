@@ -23,6 +23,10 @@ Local path:  (local submit) → Pooled → Included → Finalized
                               Dropped ────┘
 ```
 
+See [txtracker-transitions.md](txtracker-transitions.md) for the
+complete state transition reference with handler guards and
+feasibility analysis.
+
 ## Architecture
 
 ### Event Loop
