@@ -52,16 +52,23 @@ Terminal states: Dropped, Rejected, Finalized.
 
 ## Terminal → non-terminal (returns bumped)
 
+Note: hot/cold is internal to the tracker and does not affect which
+transitions are possible. The rest of the system (eth handler, pool)
+is unaware of the tracker's storage tier. `NotifyReceived` always
+precedes `NotifyPooled`/`NotifyRejected`, so any path through the
+pool goes through Received first.
+
 | From → To | Handler | Possible? | Reason |
 |---|---|---|---|
 | Dropped → Requested | handleFetchRequested | **Yes** | Re-fetch cycle |
-| Dropped → Received | handleReceive | **Yes** | Peer re-sends body |
-| Dropped → Pooled | handlePooled | **Yes** | Re-enters pool |
-| Dropped → Pooled | handleNewTxs (cold) | **Yes** | Cold dropped tx re-submitted locally |
+| Dropped → Received | handleReceive | **Yes** | Peer re-sends body; main return entry point |
+| Dropped → Pooled | handlePooled | **No** | NotifyReceived precedes NotifyPooled; status already Received |
+| Dropped → Pooled | handleNewTxs | **No** | NewTxsEvent fires after pool.Add; NotifyReceived already ran |
 | Dropped → Included | handleChainEvent | **Yes** | Miner included it anyway |
 | Rejected → Included | handleChainEvent | **Yes** | We rejected, miner accepted |
-| Rejected → Pooled | handleNewTxs (cold) | **Rare** | Cold rejected tx re-submitted locally |
-| Finalized → Pooled | handleNewTxs (cold) | **No** | Re-submitting finalized tx is nonsensical |
+| Rejected → Pooled | handlePooled | **No** | Same: NotifyReceived precedes NotifyPooled |
+| Rejected → Pooled | handleNewTxs | **No** | Same: NewTxsEvent fires after NotifyReceived |
+| Finalized → Pooled | handleNewTxs | **No** | Re-submitting finalized tx is nonsensical |
 
 ## Terminal → terminal (returns NOT bumped)
 
