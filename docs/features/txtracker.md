@@ -894,7 +894,9 @@ The txview browser UI surfaces returns across all views:
 
 - **Feed**: purple ↩ lamp indicator, subtle row highlight, "Returned" filter
 - **Top**: sortable "Ret" column, same filter checkbox
-- **Sankey**: purple backward arc from Finalized→Announced
+- **Sankey**: two backward arcs by destination — `nRetToReq` (dark purple,
+  drop box→Requested) and `nRetToPool` (light purple, drop box→Pooled).
+  Returns to announced are counted but not visualized.
 - **Header**: cumulative "Returned" counter badge
 - **Detail panel**: Returns field with count
 

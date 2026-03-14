@@ -50,7 +50,7 @@
     const SCALAR_KEYS = ['total', 'announced', 'requested', 'received', 'pooled',
         'included', 'finalized', 'rejected', 'dropped', 'reqPipeline',
         'unsolicited', 'reqToReceived', 'received_total', 'toPooled',
-        'nRejected', 'nDropped', 'private', 'nReorged', 'nReturned',
+        'nRejected', 'nDropped', 'private', 'nReorged', 'nReturned', 'nRetToReq', 'nRetToPool',
         'cumRejected', 'cumDropped', 'cumFinalized'];
 
     // --- Sankey smoothing state ---
@@ -599,6 +599,12 @@
             ev._dropReason = ev.dropReason || old._dropReason;
             ev._rejectErr = ev.rejectErr || old._rejectErr;
             ev._returns = ev.returns || old._returns || 0;
+            // Track return destination when returns counter increases.
+            if (ev._returns > (old._returns || 0)) {
+                ev._returnedTo = ev.newStatus;
+            } else {
+                ev._returnedTo = old._returnedTo || null;
+            }
             // Track backward transition: included → pooled (reorg).
             if (old.newStatus === 'included' && ev.newStatus === 'pooled') {
                 ev._reorgCount++;
@@ -612,6 +618,7 @@
             ev._dropReason = ev.dropReason || '';
             ev._rejectErr = ev.rejectErr || '';
             ev._returns = ev.returns || 0;
+            ev._returnedTo = (ev._returns > 0) ? ev.newStatus : null;
         }
         txs.set(hash, ev);
         incrementCounter(ev.newStatus);
@@ -1471,7 +1478,7 @@
                     reqPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
                     unsolPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
                     privatePath: { included: 0, finalized: 0 },
-                    nReorged: 0, nReturned: 0, dropReasons: {}, rejectReasons: {},
+                    nReorged: 0, nReturned: 0, nRetToReq: 0, nRetToPool: 0, dropReasons: {}, rejectReasons: {},
                     cumRejected: 0, cumDropped: 0, cumFinalized: 0
                 };
             }
@@ -1480,6 +1487,8 @@
             if (b.counts.hasOwnProperty(s)) b.counts[s]++;
             b.nReorged += ev._reorgCount || 0;
             if (ev._returns > 0) b.nReturned++;
+            if (ev._returnedTo === 'requested') b.nRetToReq++;
+            else if (ev._returnedTo === 'pooled') b.nRetToPool++;
             if (ev._dropReason) {
                 b.dropReasons[ev._dropReason] = (b.dropReasons[ev._dropReason] || 0) + 1;
                 b.cumDropped++;
@@ -1513,7 +1522,7 @@
             reqPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
             unsolPath: { received: 0, pooled: 0, included: 0, finalized: 0, rejected: 0, dropped: 0 },
             privatePath: { included: 0, finalized: 0 },
-            nReorged: 0, nReturned: 0, dropReasons: {}, rejectReasons: {},
+            nReorged: 0, nReturned: 0, nRetToReq: 0, nRetToPool: 0, dropReasons: {}, rejectReasons: {},
             cumRejected: 0, cumDropped: 0, cumFinalized: 0
         };
         for (var key in raw.buckets) {
@@ -1524,6 +1533,8 @@
             r.total += b.total;
             r.nReorged += b.nReorged;
             r.nReturned += b.nReturned || 0;
+            r.nRetToReq += b.nRetToReq || 0;
+            r.nRetToPool += b.nRetToPool || 0;
             r.cumRejected += b.cumRejected;
             r.cumDropped += b.cumDropped;
             r.cumFinalized += b.cumFinalized;
@@ -1567,6 +1578,8 @@
             private: snap.privatePath.included + snap.privatePath.finalized,
             nReorged: snap.nReorged,
             nReturned: snap.nReturned || 0,
+            nRetToReq: snap.nRetToReq || 0,
+            nRetToPool: snap.nRetToPool || 0,
             cumRejected: snap.cumRejected,
             cumDropped: snap.cumDropped,
             cumFinalized: snap.cumFinalized,
@@ -1853,6 +1866,8 @@
             dropBranchValues: { cum: snapCumDropped, now: counts.dropped },
             privBranchValue: nPrivate,
             nReturned: snap.nReturned || 0,
+            nRetToReq: snap.nRetToReq || 0,
+            nRetToPool: snap.nRetToPool || 0,
             title: 'Transaction Flow \u2014 ' + Math.round(total).toLocaleString() + ' total',
             // Cumulative-only: pending finalization.
             pendingFinalization: atIncluded,
@@ -1991,18 +2006,34 @@
             drawLabel(svg, reorgMidX, reorgDropY + reorgBandH / 2 + 8, reorgLines[0] + ' reorged', 'middle', '#ff6f00', '10');
         }
 
-        // --- Cold set return backward link ---
-        if (p.nReturned > 0) {
-            var returnBandH = sh(p.nReturned);
-            var returnMaxBottom = Math.max(annNode.y + annNode.h, finNode.y + finNode.h);
-            var returnDropY = returnMaxBottom + 65;
-            if (p.nReorged > 0) returnDropY += sh(p.nReorged) + 25;
-            if (returnDropY + returnBandH + 20 > H) returnDropY = H - returnBandH - 20;
-            drawBackLink(svg, finNode, annNode, NODE_W, returnBandH, returnDropY, '#7c4dff');
-            var returnMidX = (finNode.x + annNode.x + NODE_W) / 2;
-            var returnLines = p.branchLabel(p.nReturned);
-            drawLabel(svg, returnMidX, returnDropY + returnBandH / 2 + 8,
-                      returnLines[0] + ' returned', 'middle', '#7c4dff', '10');
+        // --- Return backward links (terminal → requested / pooled) ---
+        // Source: dropped branch box if visible, otherwise inclNode.
+        var retSrcNode = (p.nDropped > 0)
+            ? { x: colX(3.5), y: Math.max(poolNode.y + poolNode.h + 30, yTop + availH * 0.55), h: sh(p.nDropped) }
+            : inclNode;
+        var retBaseY = Math.max(retSrcNode.y + retSrcNode.h, reqNode.y + reqNode.h, poolNode.y + poolNode.h) + 50;
+        if (p.nReorged > 0) retBaseY += sh(p.nReorged) + 25;
+
+        if (p.nRetToReq > 0) {
+            var retReqH = sh(p.nRetToReq);
+            var retReqDropY = retBaseY;
+            if (retReqDropY + retReqH + 20 > H) retReqDropY = H - retReqH - 20;
+            drawBackLink(svg, retSrcNode, reqNode, NODE_W, retReqH, retReqDropY, '#7c4dff');
+            var retReqMidX = (retSrcNode.x + reqNode.x + NODE_W) / 2;
+            var retReqLines = p.branchLabel(p.nRetToReq);
+            drawLabel(svg, retReqMidX, retReqDropY + retReqH / 2 + 8,
+                      retReqLines[0] + ' ret\u2192req', 'middle', '#7c4dff', '10');
+            retBaseY = retReqDropY + retReqH + 20;
+        }
+        if (p.nRetToPool > 0) {
+            var retPoolH = sh(p.nRetToPool);
+            var retPoolDropY = retBaseY;
+            if (retPoolDropY + retPoolH + 20 > H) retPoolDropY = H - retPoolH - 20;
+            drawBackLink(svg, retSrcNode, poolNode, NODE_W, retPoolH, retPoolDropY, '#b388ff');
+            var retPoolMidX = (retSrcNode.x + poolNode.x + NODE_W) / 2;
+            var retPoolLines = p.branchLabel(p.nRetToPool);
+            drawLabel(svg, retPoolMidX, retPoolDropY + retPoolH / 2 + 8,
+                      retPoolLines[0] + ' ret\u2192pool', 'middle', '#b388ff', '10');
         }
 
         // --- Unsolicited vs requested flow annotation ---
