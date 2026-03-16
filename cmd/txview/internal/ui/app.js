@@ -1134,14 +1134,14 @@
     // ========================================================================
     // Lamp strip (lifecycle state indicators, from event data only)
     // ========================================================================
-    // Lamp definitions: [abbreviation, status key, ordinal, TxInfo timestamp field].
+    // Lamp definitions: [abbreviation, status key, ordinal, TxInfo timestamp field, abbr CSS class].
     var LAMP_DEFS = [
-        ['A',  'announced', 1, 'FirstSeen'],
-        ['Rq', 'requested', 2, 'Requested'],
-        ['Rv', 'received',  3, 'Received'],
-        ['P',  'pooled',    4, 'Pooled'],
-        ['I',  'included',  5, 'Included'],
-        ['F',  'finalized', 6, 'Finalized']
+        ['A',  'announced', 1, 'FirstSeen',  'lamp-abbr'],
+        ['Rq', 'requested', 2, 'Requested',  'lamp-abbr lamp-abbr-wide'],
+        ['Rv', 'received',  3, 'Received',   'lamp-abbr lamp-abbr-wide'],
+        ['P',  'pooled',    4, 'Pooled',     'lamp-abbr'],
+        ['I',  'included',  5, 'Included',   'lamp-abbr'],
+        ['F',  'finalized', 6, 'Finalized',  'lamp-abbr']
     ];
 
     // Renders a combined lamp strip with embedded timing deltas.
@@ -1190,25 +1190,26 @@
                 if (key === current) cls += ' lamp-current';
             }
 
-            var content = abbr;
+            var abbrCls = LAMP_DEFS[i][4];
+            var timing = '';
             if (lit && ts && base && tsField !== 'FirstSeen') {
-                content += '<span class="lamp-timing">+' + msDelta(ts, base) + '</span>';
+                timing = '<span class="lamp-timing">+' + msDelta(ts, base) + '</span>';
             }
-            parts.push('<span class="' + cls + '">' + content + '</span>');
+            parts.push('<span class="' + cls + '"><span class="' + abbrCls + '">' + abbr + '</span>' + timing + '</span>');
         }
 
         // Append terminal lamp.
         if (current === 'rejected') {
-            parts.push('<span class="lamp lamp-lit-rejected lamp-current">Rej</span>');
+            parts.push('<span class="lamp lamp-lit-rejected lamp-current"><span class="lamp-abbr lamp-abbr-term">Rej</span></span>');
         } else if (current === 'dropped') {
-            var dropContent = 'Dr';
+            var dropTiming = '';
             if (info) {
                 var dropTs = parseTS(info.Dropped);
                 if (dropTs && base) {
-                    dropContent += '<span class="lamp-timing">+' + msDelta(dropTs, base) + '</span>';
+                    dropTiming = '<span class="lamp-timing">+' + msDelta(dropTs, base) + '</span>';
                 }
             }
-            parts.push('<span class="lamp lamp-lit-dropped lamp-current">' + dropContent + '</span>');
+            parts.push('<span class="lamp lamp-lit-dropped lamp-current"><span class="lamp-abbr lamp-abbr-wide">Dr</span>' + dropTiming + '</span>');
         }
 
         // Return indicator.
