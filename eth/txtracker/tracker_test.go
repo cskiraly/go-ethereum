@@ -1687,9 +1687,9 @@ func TestColdNewTxsPromotion(t *testing.T) {
 	if info.Status != TxPooled {
 		t.Fatalf("expected TxPooled after local re-submit, got %v", info.Status)
 	}
-	if !info.Local {
-		t.Fatal("expected local=true after NewTxs promotion")
-	}
+	// local flag is NOT set: NewTxsEvent fires for all promoted txs (P2P
+	// and local), so handleNewTxs cannot distinguish the origin. The
+	// record retains its original local flag from when it was first tracked.
 }
 
 func TestColdRemovedTxs(t *testing.T) {

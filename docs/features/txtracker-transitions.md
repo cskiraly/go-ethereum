@@ -63,11 +63,11 @@ pool goes through Received first.
 | Dropped → Requested | handleFetchRequested | **Yes** | Re-fetch cycle |
 | Dropped → Received | handleReceive | **Yes** | Peer re-sends body; main return entry point |
 | Dropped → Pooled | handlePooled | **No** | NotifyReceived precedes NotifyPooled; status already Received |
-| Dropped → Pooled | handleNewTxs | **No** | NewTxsEvent fires after pool.Add; NotifyReceived already ran |
+| Dropped → Pooled | handleNewTxs | **Yes** | NewTxsEvent fires for all promoted txs; handleNewTxs acts on terminal records |
 | Dropped → Included | handleChainEvent | **Yes** | Miner included it anyway |
 | Rejected → Included | handleChainEvent | **Yes** | We rejected, miner accepted |
 | Rejected → Pooled | handlePooled | **No** | Same: NotifyReceived precedes NotifyPooled |
-| Rejected → Pooled | handleNewTxs | **No** | Same: NewTxsEvent fires after NotifyReceived |
+| Rejected → Pooled | handleNewTxs | **Rare** | Same mechanism; requires rejected tx re-entering the pool |
 | Finalized → Pooled | handleNewTxs | **No** | Re-submitting finalized tx is nonsensical |
 
 ## Terminal → terminal (returns NOT bumped)

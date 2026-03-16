@@ -1071,18 +1071,18 @@ func (t *Tracker) handleNewTxs(ev core.NewTxsEvent) {
 
 	for _, tx := range ev.Txs {
 		hash := tx.Hash()
-		if t.txs[hash] != nil {
-			continue // Already tracked via P2P path.
-		}
-		// Check cold set: a previously evicted tx reappearing as local.
 		rec := t.lookupOrPromote(hash)
 		if rec != nil {
-			oldStatus := rec.status
-			if oldStatus.isTerminal() {
-				bumpReturns(rec)
+			// Only act on terminal records (Dropped/Rejected/Finalized).
+			// Non-terminal records are progressing through the normal
+			// pipeline (P2P or pool) and should not be touched —
+			// NewTxsEvent fires for all promoted txs, not just local.
+			if !rec.status.isTerminal() {
+				continue
 			}
+			oldStatus := rec.status
+			bumpReturns(rec)
 			rec.status = TxPooled
-			rec.local = true
 			rec.pooled = now
 			fillTxMeta(rec, tx)
 			t.touchLRU(rec)
