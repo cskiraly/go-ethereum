@@ -607,10 +607,11 @@ header h1 {
 
 .lamp-return {
     display: inline-block;
+    width: 12px;
     font-size: 11px;
     color: #7c4dff;
-    margin-right: 2px;
-    cursor: help;
+    text-align: center;
+    flex-shrink: 0;
 }
 
 .returned-toggle {

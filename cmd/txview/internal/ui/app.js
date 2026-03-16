@@ -1191,32 +1191,29 @@
             }
 
             var abbrCls = LAMP_DEFS[i][4];
-            var timing = '';
+            var timingText = '';
             if (lit && ts && base && tsField !== 'FirstSeen') {
-                timing = '<span class="lamp-timing">+' + msDelta(ts, base) + '</span>';
+                timingText = '+' + msDelta(ts, base);
             }
-            parts.push('<span class="' + cls + '"><span class="' + abbrCls + '">' + abbr + '</span>' + timing + '</span>');
+            parts.push('<span class="' + cls + '"><span class="' + abbrCls + '">' + abbr + '</span><span class="lamp-timing">' + timingText + '</span></span>');
         }
 
         // Append terminal lamp.
         if (current === 'rejected') {
-            parts.push('<span class="lamp lamp-lit-rejected lamp-current"><span class="lamp-abbr lamp-abbr-term">Rej</span></span>');
+            parts.push('<span class="lamp lamp-lit-rejected lamp-current"><span class="lamp-abbr lamp-abbr-term">Rej</span><span class="lamp-timing"></span></span>');
         } else if (current === 'dropped') {
-            var dropTiming = '';
+            var dropText = '';
             if (info) {
                 var dropTs = parseTS(info.Dropped);
-                if (dropTs && base) {
-                    dropTiming = '<span class="lamp-timing">+' + msDelta(dropTs, base) + '</span>';
-                }
+                if (dropTs && base) dropText = '+' + msDelta(dropTs, base);
             }
-            parts.push('<span class="lamp lamp-lit-dropped lamp-current"><span class="lamp-abbr lamp-abbr-wide">Dr</span>' + dropTiming + '</span>');
+            parts.push('<span class="lamp lamp-lit-dropped lamp-current"><span class="lamp-abbr lamp-abbr-wide">Dr</span><span class="lamp-timing">' + dropText + '</span></span>');
         }
 
-        // Return indicator.
-        var prefix = '';
-        if (ev._returns > 0) {
-            prefix = '<span class="lamp-return" title="Returned from terminal state ' + ev._returns + 'x">\u21a9</span>';
-        }
+        // Return indicator — always present (fixed width) for alignment.
+        var retTitle = ev._returns > 0 ? ' title="Returned from terminal state ' + ev._returns + 'x"' : '';
+        var retText = ev._returns > 0 ? '\u21a9' : '';
+        var prefix = '<span class="lamp-return"' + retTitle + '>' + retText + '</span>';
 
         return '<span class="lamp-strip">' + prefix + parts.join('') + '</span>';
     }
