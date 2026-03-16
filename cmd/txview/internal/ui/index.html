@@ -165,18 +165,24 @@
             <div class="table-area">
                 <div class="table-header" id="peers-table-header">
                     <span class="peers-col-id" title="Peer node ID">Peer</span>
-                    <span class="peers-col-announced sortable active-sort sort-desc" data-sort="announced" title="Transaction hashes announced via NewPooledTransactionHashes (excludes unsolicited broadcasts)">Announced</span>
-                    <span class="peers-col-delivered sortable" data-sort="delivered" title="Transaction bodies received from this peer (solicited PooledTransactions responses and unsolicited Transactions broadcasts)">Delivered</span>
-                    <span class="peers-col-useful sortable" data-sort="useful" title="Deliveries accepted into the transaction pool (not duplicates or already-known)">Useful</span>
-                    <span class="peers-col-first sortable" data-sort="first" title="Times this peer was the first to announce a transaction before any other peer">1st Announce</span>
-                    <span class="peers-col-included sortable" data-sort="included" title="Delivered transactions that were included on chain">Included</span>
-                    <span class="peers-col-finalized sortable" data-sort="finalized" title="Delivered transactions that were finalized on chain">Finalized</span>
-                    <span class="peers-col-useful-pct sortable" data-sort="useful-pct" title="Useful / Delivered — what fraction of deliveries were novel and accepted">Useful %</span>
-                    <span class="peers-col-first-pct sortable" data-sort="first-pct" title="1st Announce / Announced — what fraction of announcements were first-seen from this peer">1st %</span>
-                    <span class="peers-col-included-pct sortable" data-sort="included-pct" title="Included / Delivered — what fraction of deliveries ended up on chain">Included %</span>
-                    <span class="peers-col-finalized-pct sortable" data-sort="finalized-pct" title="Finalized / Delivered — what fraction of deliveries were finalized on chain">Finalized %</span>
-                    <span class="peers-col-included-share sortable" data-sort="included-share" title="This peer's included txs as a share of all peers' included txs">Incl Share</span>
-                    <span class="peers-col-finalized-share sortable" data-sort="finalized-share" title="This peer's finalized txs as a share of all peers' finalized txs">Final Share</span>
+                    <span class="peers-col-client sortable" data-sort="client" title="Client software name and version">Client</span>
+                    <span class="peers-col-addr" title="Remote IP address and port">Address</span>
+                    <span class="peers-col-dir" title="Connection direction: inbound or outbound">Dir</span>
+                    <span class="peers-col-announced sortable active-sort sort-desc" data-sort="announced" title="Transaction hashes announced via NewPooledTransactionHashes">Announced</span>
+                    <span class="peers-col-delivered sortable" data-sort="delivered" title="Transaction bodies received from this peer">Delivered</span>
+                    <span class="peers-col-useful sortable" data-sort="useful" title="Deliveries accepted into the transaction pool">Useful</span>
+                    <span class="peers-col-first sortable" data-sort="first" title="Times this peer was the first to announce a transaction">1st Ann</span>
+                    <span class="peers-col-included sortable" data-sort="included" title="Delivered transactions included on chain">Included</span>
+                    <span class="peers-col-finalized sortable" data-sort="finalized" title="Delivered transactions finalized on chain">Finalized</span>
+                    <span class="peers-col-latency sortable" data-sort="latency" title="Average request-to-delivery latency (only for txs requested from and delivered by this peer)">Latency</span>
+                    <span class="peers-col-useful-pct sortable" data-sort="useful-pct" title="Useful / Delivered">Useful %</span>
+                    <span class="peers-col-first-pct sortable" data-sort="first-pct" title="1st Announce / Announced">1st %</span>
+                    <span class="peers-col-included-pct sortable" data-sort="included-pct" title="Included / Delivered">Incl %</span>
+                    <span class="peers-col-finalized-pct sortable" data-sort="finalized-pct" title="Finalized / Delivered">Final %</span>
+                    <span class="peers-col-rejected-pct sortable" data-sort="rejected-pct" title="Rejected / Delivered — pool rejected this peer's deliveries">Rej %</span>
+                    <span class="peers-col-dropped-pct sortable" data-sort="dropped-pct" title="Dropped / Delivered — this peer's deliveries later dropped from pool">Drop %</span>
+                    <span class="peers-col-included-share sortable" data-sort="included-share" title="This peer's share of all included txs">Incl Share</span>
+                    <span class="peers-col-finalized-share sortable" data-sort="finalized-share" title="This peer's share of all finalized txs">Final Share</span>
                 </div>
                 <div class="viewport" id="peers-viewport">
                     <div id="peers-scroll-spacer"></div>

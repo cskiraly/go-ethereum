@@ -166,16 +166,31 @@ type peerStats struct {
 	firstAnnouncer int64 // Times this peer was the first to announce a tx
 	included       int64 // Delivered txs that were included on chain
 	finalized      int64 // Delivered txs that were finalized on chain
+	rejected       int64 // Delivered txs that were rejected by the pool
+	dropped        int64 // Delivered txs that were dropped from the pool
+
+	// Request→delivery latency tracking (only for txs requested from AND
+	// delivered by this peer).
+	reqLatencySum  time.Duration // Sum of request→receive durations
+	reqDeliveries  int64         // Count of such deliveries
 }
 
 func (ps *peerStats) toPublic() PeerStats {
+	var avgLatencyMs int64
+	if ps.reqDeliveries > 0 {
+		avgLatencyMs = ps.reqLatencySum.Milliseconds() / ps.reqDeliveries
+	}
 	return PeerStats{
-		Announced:      ps.announced,
-		Delivered:      ps.delivered,
-		UsefulDelivery: ps.usefulDelivery,
-		FirstAnnouncer: ps.firstAnnouncer,
-		Included:       ps.included,
-		Finalized:      ps.finalized,
+		Announced:        ps.announced,
+		Delivered:        ps.delivered,
+		UsefulDelivery:   ps.usefulDelivery,
+		FirstAnnouncer:   ps.firstAnnouncer,
+		Included:         ps.included,
+		Finalized:        ps.finalized,
+		Rejected:         ps.rejected,
+		Dropped:          ps.dropped,
+		AvgLatencyMs:     avgLatencyMs,
+		LatencySamples:   ps.reqDeliveries,
 	}
 }
 
@@ -217,6 +232,10 @@ type PeerStats struct {
 	FirstAnnouncer int64
 	Included       int64
 	Finalized      int64
+	Rejected       int64
+	Dropped        int64
+	AvgLatencyMs   int64 // Average request→delivery latency in ms (0 if no samples)
+	LatencySamples int64 // Number of request→delivery measurements
 }
 
 // TrackerStats is the public snapshot of tracker-wide statistics.
@@ -788,6 +807,14 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 			rec.status = TxReceived
 			rec.received = now
 			rec.deliverer = ev.peer
+			// Track request→delivery latency when the delivering peer is
+			// the same peer we requested from.
+			if rec.requestedFrom == ev.peer && !rec.requested.IsZero() {
+				if ps := t.peers[ev.peer]; ps != nil {
+					ps.reqLatencySum += now.Sub(rec.requested)
+					ps.reqDeliveries++
+				}
+			}
 			fillTxMeta(rec, tx)
 			t.touchLRU(rec)
 			t.emitEvent(hash, oldStatus, TxReceived, rec, ev.peer)
@@ -876,6 +903,12 @@ func (t *Tracker) handleRejected(ev *rejectedEvent) {
 			rec.status = TxRejected
 			if i < len(ev.errs) && ev.errs[i] != nil {
 				rec.rejectErr = ev.errs[i].Error()
+			}
+			// Credit rejection to the delivering peer.
+			if rec.deliverer != "" {
+				if ps := t.peers[rec.deliverer]; ps != nil {
+					ps.rejected++
+				}
 			}
 			t.touchLRU(rec)
 			t.emitEvent(hash, oldStatus, TxRejected, rec, "")
@@ -1057,6 +1090,12 @@ func (t *Tracker) handleRemovedTxs(ev core.RemovedTxsEvent) {
 		rec.status = TxDropped
 		rec.dropped = now
 		rec.dropReason = reason
+		// Credit drop to the delivering peer.
+		if rec.deliverer != "" {
+			if ps := t.peers[rec.deliverer]; ps != nil {
+				ps.dropped++
+			}
+		}
 		t.touchLRU(rec)
 		t.emitEvent(hash, TxPooled, TxDropped, rec, "")
 		txDroppedMeter.Mark(1)

@@ -318,7 +318,7 @@
     // Column order arrays — index = CSS order value.
     var feedColOrder = ['col-hash', 'col-status', 'col-peer', 'col-block', 'col-age', 'col-error'];
     var topColOrder = ['top-col-hash', 'top-col-status', 'top-col-returns', 'top-col-from', 'top-col-nonce', 'top-col-value', 'top-col-feecap', 'top-col-tipcap', 'top-col-gas', 'top-col-age'];
-    var peersColOrder = ['peers-col-id', 'peers-col-announced', 'peers-col-delivered', 'peers-col-useful', 'peers-col-first', 'peers-col-included', 'peers-col-finalized', 'peers-col-useful-pct', 'peers-col-first-pct', 'peers-col-included-pct', 'peers-col-finalized-pct', 'peers-col-included-share', 'peers-col-finalized-share'];
+    var peersColOrder = ['peers-col-id', 'peers-col-client', 'peers-col-addr', 'peers-col-dir', 'peers-col-announced', 'peers-col-delivered', 'peers-col-useful', 'peers-col-first', 'peers-col-included', 'peers-col-finalized', 'peers-col-latency', 'peers-col-useful-pct', 'peers-col-first-pct', 'peers-col-included-pct', 'peers-col-finalized-pct', 'peers-col-rejected-pct', 'peers-col-dropped-pct', 'peers-col-included-share', 'peers-col-finalized-share'];
 
     // Extract the column class (col-* or top-col-*) from an element.
     function getColClass(el) {
@@ -1102,19 +1102,30 @@
         var first = s.FirstAnnouncer || 0;
         var included = s.Included || 0;
         var finalized = s.Finalized || 0;
+        var rejected = s.Rejected || 0;
+        var dropped = s.Dropped || 0;
+        var p2p = peersP2PInfo[peer];
 
         var fields = [
             ['Peer ID', peer],
+            ['Client', p2p ? p2p.name : '-'],
+            ['Address', p2p ? p2p.remoteAddress : '-'],
+            ['Direction', p2p ? (p2p.inbound ? 'Inbound' : 'Outbound') : '-'],
             ['Announced', formatNumber(announced)],
             ['Delivered', formatNumber(delivered)],
             ['Useful Deliveries', formatNumber(useful)],
             ['First Announcements', formatNumber(first)],
             ['Included', formatNumber(included)],
             ['Finalized', formatNumber(finalized)],
+            ['Rejected', formatNumber(rejected)],
+            ['Dropped', formatNumber(dropped)],
+            ['Avg Latency', s.AvgLatencyMs > 0 ? s.AvgLatencyMs + 'ms (' + s.LatencySamples + ' samples)' : '-'],
             ['Useful %', delivered ? (useful / delivered * 100).toFixed(1) + '%' : '-'],
             ['1st Announce %', announced ? (first / announced * 100).toFixed(1) + '%' : '-'],
             ['Included %', delivered ? (included / delivered * 100).toFixed(1) + '%' : '-'],
             ['Finalized %', delivered ? (finalized / delivered * 100).toFixed(1) + '%' : '-'],
+            ['Rejected %', delivered ? (rejected / delivered * 100).toFixed(1) + '%' : '-'],
+            ['Dropped %', delivered ? (dropped / delivered * 100).toFixed(1) + '%' : '-'],
             ['Included Share', peersTotalIncluded ? (included / peersTotalIncluded * 100).toFixed(1) + '%' : '-'],
             ['Finalized Share', peersTotalFinalized ? (finalized / peersTotalFinalized * 100).toFixed(1) + '%' : '-'],
         ];
@@ -1221,6 +1232,15 @@
     // ========================================================================
     // Peers view
     // ========================================================================
+    var peersP2PInfo = {}; // peerID → { name, remoteAddress, inbound, caps }
+
+    function shortClientName(name) {
+        if (!name) return '';
+        var parts = name.split('/');
+        if (parts.length >= 2) return parts[0] + '/' + parts[1];
+        return parts[0];
+    }
+
     function fetchPeersData() {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         rpcCall('txtracker_getAllPeerStats', [], function(result, err) {
@@ -1231,6 +1251,25 @@
             if (selectedPeer && peersData[selectedPeer]) {
                 renderPeerDetail(selectedPeer, peersData[selectedPeer], peersDetailContent);
             }
+            scheduleRender();
+        });
+        // Fetch P2P identity info from admin_peers.
+        rpcCall('admin_peers', [], function(result, err) {
+            if (err || !result) return;
+            var map = {};
+            for (var i = 0; i < result.length; i++) {
+                var p = result[i];
+                if (p.id) {
+                    map[p.id] = {
+                        name: p.name || '',
+                        remoteAddress: p.network ? p.network.remoteAddress || '' : '',
+                        inbound: p.network ? !!p.network.inbound : false,
+                        caps: p.caps || []
+                    };
+                }
+            }
+            peersP2PInfo = map;
+            peersViewDirty = true;
             scheduleRender();
         });
     }
@@ -1302,6 +1341,24 @@
                     var fsb = peersTotalFinalized ? (sb.Finalized || 0) / peersTotalFinalized : 0;
                     cmp = fsa - fsb;
                     break;
+                case 'latency':
+                    cmp = (sa.AvgLatencyMs || 0) - (sb.AvgLatencyMs || 0);
+                    break;
+                case 'rejected-pct':
+                    var rja = sa.Delivered ? (sa.Rejected || 0) / sa.Delivered : 0;
+                    var rjb = sb.Delivered ? (sb.Rejected || 0) / sb.Delivered : 0;
+                    cmp = rja - rjb;
+                    break;
+                case 'dropped-pct':
+                    var dra = sa.Delivered ? (sa.Dropped || 0) / sa.Delivered : 0;
+                    var drb = sb.Delivered ? (sb.Dropped || 0) / sb.Delivered : 0;
+                    cmp = dra - drb;
+                    break;
+                case 'client':
+                    var ca = peersP2PInfo[a.peer] ? peersP2PInfo[a.peer].name : '';
+                    var cb = peersP2PInfo[b.peer] ? peersP2PInfo[b.peer].name : '';
+                    cmp = ca.localeCompare(cb);
+                    break;
             }
             return peersSortAsc ? cmp : -cmp;
         });
@@ -1311,16 +1368,22 @@
 
     var PEERS_ROW_TPL =
         '<span class="peers-col-id"></span>' +
+        '<span class="peers-col-client"></span>' +
+        '<span class="peers-col-addr"></span>' +
+        '<span class="peers-col-dir"></span>' +
         '<span class="peers-col-announced"></span>' +
         '<span class="peers-col-delivered"></span>' +
         '<span class="peers-col-useful"></span>' +
         '<span class="peers-col-first"></span>' +
         '<span class="peers-col-included"></span>' +
         '<span class="peers-col-finalized"></span>' +
+        '<span class="peers-col-latency"></span>' +
         '<span class="peers-col-useful-pct"></span>' +
         '<span class="peers-col-first-pct"></span>' +
         '<span class="peers-col-included-pct"></span>' +
         '<span class="peers-col-finalized-pct"></span>' +
+        '<span class="peers-col-rejected-pct"></span>' +
+        '<span class="peers-col-dropped-pct"></span>' +
         '<span class="peers-col-included-share"></span>' +
         '<span class="peers-col-finalized-share"></span>';
 
@@ -1340,21 +1403,29 @@
             var r = peersRowContainer.children[i];
             var s = entry.stats;
 
+            var p2p = peersP2PInfo[entry.peer];
             var cols = r.children;
-            cols[0].textContent = entry.peer;
+            cols[0].textContent = entry.peer.substring(0, 16) + '\u2026';
             cols[0].title = entry.peer;
-            cols[1].textContent = formatNumber(s.Announced || 0);
-            cols[2].textContent = formatNumber(s.Delivered || 0);
-            cols[3].textContent = formatNumber(s.UsefulDelivery || 0);
-            cols[4].textContent = formatNumber(s.FirstAnnouncer || 0);
-            cols[5].textContent = formatNumber(s.Included || 0);
-            cols[6].textContent = formatNumber(s.Finalized || 0);
-            cols[7].textContent = s.Delivered ? ((s.UsefulDelivery || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
-            cols[8].textContent = s.Announced ? ((s.FirstAnnouncer || 0) / s.Announced * 100).toFixed(1) + '%' : '-';
-            cols[9].textContent = s.Delivered ? ((s.Included || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
-            cols[10].textContent = s.Delivered ? ((s.Finalized || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
-            cols[11].textContent = peersTotalIncluded ? ((s.Included || 0) / peersTotalIncluded * 100).toFixed(1) + '%' : '-';
-            cols[12].textContent = peersTotalFinalized ? ((s.Finalized || 0) / peersTotalFinalized * 100).toFixed(1) + '%' : '-';
+            cols[1].textContent = p2p ? shortClientName(p2p.name) : '-';
+            cols[1].title = p2p ? p2p.name : '';
+            cols[2].textContent = p2p ? p2p.remoteAddress : '-';
+            cols[3].textContent = p2p ? (p2p.inbound ? '\u2190in' : 'out\u2192') : '-';
+            cols[4].textContent = formatNumber(s.Announced || 0);
+            cols[5].textContent = formatNumber(s.Delivered || 0);
+            cols[6].textContent = formatNumber(s.UsefulDelivery || 0);
+            cols[7].textContent = formatNumber(s.FirstAnnouncer || 0);
+            cols[8].textContent = formatNumber(s.Included || 0);
+            cols[9].textContent = formatNumber(s.Finalized || 0);
+            cols[10].textContent = s.AvgLatencyMs > 0 ? s.AvgLatencyMs + 'ms' : '-';
+            cols[11].textContent = s.Delivered ? ((s.UsefulDelivery || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
+            cols[12].textContent = s.Announced ? ((s.FirstAnnouncer || 0) / s.Announced * 100).toFixed(1) + '%' : '-';
+            cols[13].textContent = s.Delivered ? ((s.Included || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
+            cols[14].textContent = s.Delivered ? ((s.Finalized || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
+            cols[15].textContent = s.Delivered ? ((s.Rejected || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
+            cols[16].textContent = s.Delivered ? ((s.Dropped || 0) / s.Delivered * 100).toFixed(1) + '%' : '-';
+            cols[17].textContent = peersTotalIncluded ? ((s.Included || 0) / peersTotalIncluded * 100).toFixed(1) + '%' : '-';
+            cols[18].textContent = peersTotalFinalized ? ((s.Finalized || 0) / peersTotalFinalized * 100).toFixed(1) + '%' : '-';
 
             r.onclick = (function(p) { return function() { selectPeer(p); }; })(entry.peer);
             if (entry.peer === selectedPeer) {
