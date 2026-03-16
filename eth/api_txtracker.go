@@ -21,17 +21,19 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/eth/txtracker"
+	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // TxTrackerAPI provides RPC access to the transaction lifecycle tracker.
 type TxTrackerAPI struct {
 	tracker *txtracker.Tracker
+	server  *p2p.Server
 }
 
 // NewTxTrackerAPI creates a new TxTrackerAPI.
-func NewTxTrackerAPI(tracker *txtracker.Tracker) *TxTrackerAPI {
-	return &TxTrackerAPI{tracker: tracker}
+func NewTxTrackerAPI(tracker *txtracker.Tracker, server *p2p.Server) *TxTrackerAPI {
+	return &TxTrackerAPI{tracker: tracker, server: server}
 }
 
 // GetTx returns lifecycle info for a tracked transaction.
@@ -52,6 +54,34 @@ func (api *TxTrackerAPI) GetStats() txtracker.TrackerStats {
 // GetAllPeerStats returns contribution statistics for all connected peers.
 func (api *TxTrackerAPI) GetAllPeerStats() map[string]txtracker.PeerStats {
 	return api.tracker.GetAllPeerStats()
+}
+
+// PeerFullInfo combines tracker statistics with P2P identity for a peer.
+type PeerFullInfo struct {
+	txtracker.PeerStats
+	Name    string `json:"name,omitempty"`
+	Address string `json:"address,omitempty"`
+	Inbound bool   `json:"inbound,omitempty"`
+}
+
+// GetAllPeerInfo returns tracker stats merged with P2P identity for all peers.
+func (api *TxTrackerAPI) GetAllPeerInfo() map[string]*PeerFullInfo {
+	stats := api.tracker.GetAllPeerStats()
+	result := make(map[string]*PeerFullInfo, len(stats))
+	for id, s := range stats {
+		result[id] = &PeerFullInfo{PeerStats: s}
+	}
+	// Merge P2P identity from connected peers.
+	if api.server != nil {
+		for _, p := range api.server.PeersInfo() {
+			if fi, ok := result[p.ID]; ok {
+				fi.Name = p.Name
+				fi.Address = p.Network.RemoteAddress
+				fi.Inbound = p.Network.Inbound
+			}
+		}
+	}
+	return result
 }
 
 // Events creates a subscription for live state transition events.

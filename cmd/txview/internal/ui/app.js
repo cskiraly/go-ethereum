@@ -1243,33 +1243,29 @@
 
     function fetchPeersData() {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        rpcCall('txtracker_getAllPeerStats', [], function(result, err) {
+        rpcCall('txtracker_getAllPeerInfo', [], function(result, err) {
             if (err || !result) return;
             peersData = result;
+            // Extract P2P identity from the merged response.
+            var p2p = {};
+            for (var id in result) {
+                if (result.hasOwnProperty(id)) {
+                    var r = result[id];
+                    if (r.name || r.address) {
+                        p2p[id] = {
+                            name: r.name || '',
+                            remoteAddress: r.address || '',
+                            inbound: !!r.inbound
+                        };
+                    }
+                }
+            }
+            peersP2PInfo = p2p;
             peersLastFetch = Date.now();
             peersViewDirty = true;
             if (selectedPeer && peersData[selectedPeer]) {
                 renderPeerDetail(selectedPeer, peersData[selectedPeer], peersDetailContent);
             }
-            scheduleRender();
-        });
-        // Fetch P2P identity info from admin_peers.
-        rpcCall('admin_peers', [], function(result, err) {
-            if (err || !result) return;
-            var map = {};
-            for (var i = 0; i < result.length; i++) {
-                var p = result[i];
-                if (p.id) {
-                    map[p.id] = {
-                        name: p.name || '',
-                        remoteAddress: p.network ? p.network.remoteAddress || '' : '',
-                        inbound: p.network ? !!p.network.inbound : false,
-                        caps: p.caps || []
-                    };
-                }
-            }
-            peersP2PInfo = map;
-            peersViewDirty = true;
             scheduleRender();
         });
     }
