@@ -316,8 +316,8 @@
     var colWidths = {};  // className -> width in px
 
     // Column order arrays — index = CSS order value.
-    var feedColOrder = ['col-hash', 'col-status', 'col-peer', 'col-block', 'col-age', 'col-error', 'col-progress'];
-    var topColOrder = ['top-col-hash', 'top-col-status', 'top-col-returns', 'top-col-from', 'top-col-nonce', 'top-col-value', 'top-col-feecap', 'top-col-tipcap', 'top-col-gas', 'top-col-age', 'top-col-progress'];
+    var feedColOrder = ['col-hash', 'col-status', 'col-peer', 'col-block', 'col-age', 'col-error'];
+    var topColOrder = ['top-col-hash', 'top-col-status', 'top-col-returns', 'top-col-from', 'top-col-nonce', 'top-col-value', 'top-col-feecap', 'top-col-tipcap', 'top-col-gas', 'top-col-age'];
     var peersColOrder = ['peers-col-id', 'peers-col-announced', 'peers-col-delivered', 'peers-col-useful', 'peers-col-first', 'peers-col-included', 'peers-col-finalized', 'peers-col-useful-pct', 'peers-col-first-pct', 'peers-col-included-pct', 'peers-col-finalized-pct', 'peers-col-included-share', 'peers-col-finalized-share'];
 
     // Extract the column class (col-* or top-col-*) from an element.
@@ -745,8 +745,7 @@
         '<span class="col-peer"></span>' +
         '<span class="col-block"></span>' +
         '<span class="col-age"></span>' +
-        '<span class="col-error"></span>' +
-        '<span class="col-progress"></span>';
+        '<span class="col-error"></span>';
 
     function renderFeedViewport() {
         // Capture spacer height BEFORE rebuilding hashes so we measure the
@@ -801,23 +800,19 @@
             var cols = r.children;
             cols[0].textContent = shortHash(hash);
             cols[0].title = hash;
-            cols[1].innerHTML = renderLampStrip(ev);
+            var cached = topCache.get(hash);
+            var info = cached ? cached.info : null;
+            cols[1].innerHTML = renderLampProgress(ev, info);
             cols[1].className = 'col-status';
             cols[2].textContent = ev.peer || '-';
             cols[3].textContent = ev.blockNum || '-';
             cols[4].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
             cols[5].textContent = ev.rejectErr || ev._dropReason || '';
 
-            var cached = topCache.get(hash);
-            if (cached) {
-                cols[6].innerHTML = renderProgress(cached.info);
-            } else {
-                cols[6].textContent = '\u2026';
-                if (!topInflight.has(hash)) {
-                    var entry = topCache.get(hash);
-                    if (!entry || (now - entry.fetchedAt) > CACHE_STALE_MS) {
-                        fetchNeeded.push(hash);
-                    }
+            if (!cached && !topInflight.has(hash)) {
+                var entry = topCache.get(hash);
+                if (!entry || (now - entry.fetchedAt) > CACHE_STALE_MS) {
+                    fetchNeeded.push(hash);
                 }
             }
         }
@@ -911,8 +906,7 @@
         '<span class="top-col-feecap"></span>' +
         '<span class="top-col-tipcap"></span>' +
         '<span class="top-col-gas"></span>' +
-        '<span class="top-col-age"></span>' +
-        '<span class="top-col-progress"></span>';
+        '<span class="top-col-age"></span>';
 
     function renderTopViewport() {
         if (topViewDirty) rebuildTopHashes();
@@ -956,15 +950,15 @@
             cols[0].textContent = shortHash(hash);
             cols[0].title = hash;
 
-            // Status lamp strip from event (always available).
-            cols[1].innerHTML = renderLampStrip(ev);
+            // Status + progress merged lamp strip.
+            var info = cached ? cached.info : null;
+            cols[1].innerHTML = renderLampProgress(ev, info);
             cols[1].className = 'top-col-status';
 
             // Returns column.
             cols[2].textContent = ev._returns > 0 ? ev._returns : '-';
 
             if (cached) {
-                var info = cached.info;
                 cols[3].textContent = shortAddr(info.From);
                 cols[3].title = info.From || '';
                 cols[4].textContent = info.Nonce || '0';
@@ -973,7 +967,6 @@
                 cols[7].textContent = formatGwei(info.GasTipCap);
                 cols[8].textContent = info.Gas ? formatNumber(info.Gas) : '-';
                 cols[9].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
-                cols[10].innerHTML = renderProgress(info);
             } else {
                 // Not yet fetched.
                 cols[3].textContent = '\u2026';
@@ -983,7 +976,6 @@
                 cols[7].textContent = '\u2026';
                 cols[8].textContent = '\u2026';
                 cols[9].textContent = ev._receivedAt ? timeSince(now - ev._receivedAt) : '-';
-                cols[10].textContent = '\u2026';
 
                 // Need to fetch.
                 if (!topInflight.has(hash)) {
@@ -1142,92 +1134,88 @@
     // ========================================================================
     // Lamp strip (lifecycle state indicators, from event data only)
     // ========================================================================
+    // Lamp definitions: [abbreviation, status key, ordinal, TxInfo timestamp field].
     var LAMP_DEFS = [
-        ['A',  'announced', 1],
-        ['Rq', 'requested', 2],
-        ['Rv', 'received',  3],
-        ['P',  'pooled',    4],
-        ['I',  'included',  5],
-        ['F',  'finalized', 6]
+        ['A',  'announced', 1, 'FirstSeen'],
+        ['Rq', 'requested', 2, 'Requested'],
+        ['Rv', 'received',  3, 'Received'],
+        ['P',  'pooled',    4, 'Pooled'],
+        ['I',  'included',  5, 'Included'],
+        ['F',  'finalized', 6, 'Finalized']
     ];
 
-    function renderLampStrip(ev) {
+    // Renders a combined lamp strip with embedded timing deltas.
+    // ev is always available (event data); info is nullable (RPC TxInfo).
+    // When info is available, lamps are lit based on actual timestamps
+    // (fixing late-connection / cold-promotion inaccuracies). Lit lamps
+    // with a timestamp show a small +Ns timing suffix.
+    function renderLampProgress(ev, info) {
         var current = ev.newStatus;
+        var base = info ? parseTS(info.FirstSeen) : null;
+
+        // Determine which lamps are lit.
+        // With info: light a lamp if its timestamp field is non-zero.
+        // Without info: infer from ordinal range (existing heuristic).
         var currentOrd = statusOrd(current);
         var firstOrd = statusOrd(ev._firstStatus) || currentOrd;
-
-        // For terminal states, determine the highest happy-path state reached.
         var happyOrd = currentOrd;
-        if (current === 'rejected') happyOrd = 3; // branched after received
-        if (current === 'dropped')  happyOrd = 4; // branched after pooled
+        if (current === 'rejected') happyOrd = 3;
+        if (current === 'dropped')  happyOrd = 4;
 
         var parts = [];
         for (var i = 0; i < LAMP_DEFS.length; i++) {
             var abbr = LAMP_DEFS[i][0];
             var key  = LAMP_DEFS[i][1];
             var ord  = LAMP_DEFS[i][2];
+            var tsField = LAMP_DEFS[i][3];
 
-            var lit = (ord >= firstOrd && ord <= happyOrd);
-            // Requested lamp only lights if the tx actually passed through it.
-            if (key === 'requested' && !ev._wasRequested) lit = false;
+            var lit, ts = null;
+            if (info) {
+                ts = parseTS(info[tsField]);
+                lit = !!ts;
+            } else {
+                lit = (ord >= firstOrd && ord <= happyOrd);
+                if (key === 'requested' && !ev._wasRequested) lit = false;
+            }
 
             var cls = 'lamp';
             if (lit) {
                 cls += ' lamp-lit-' + key;
                 if (key === current) cls += ' lamp-current';
             }
-            parts.push('<span class="' + cls + '">' + abbr + '</span>');
+
+            var content = abbr;
+            if (lit && ts && base && tsField !== 'FirstSeen') {
+                content += '<span class="lamp-timing">+' + msDelta(ts, base) + '</span>';
+            }
+            parts.push('<span class="' + cls + '">' + content + '</span>');
         }
 
-        // Append terminal lamp if in a terminal state.
+        // Append terminal lamp.
         if (current === 'rejected') {
-            parts.push('<span class="lamp lamp-lit-rejected lamp-current">Rej</span>');
+            var rejContent = 'Rej';
+            if (info && info.RejectErr) {
+                rejContent += '<span class="lamp-timing">' + escapeHtml(info.RejectErr).substring(0, 20) + '</span>';
+            }
+            parts.push('<span class="lamp lamp-lit-rejected lamp-current">' + rejContent + '</span>');
         } else if (current === 'dropped') {
-            parts.push('<span class="lamp lamp-lit-dropped lamp-current">Dr</span>');
+            var dropContent = 'Dr';
+            if (info) {
+                var dropTs = parseTS(info.Dropped);
+                if (dropTs && base) {
+                    dropContent += '<span class="lamp-timing">+' + msDelta(dropTs, base) + '</span>';
+                }
+            }
+            parts.push('<span class="lamp lamp-lit-dropped lamp-current">' + dropContent + '</span>');
         }
 
-        // Prepend return indicator if tx was returned from terminal state.
+        // Return indicator.
         var prefix = '';
         if (ev._returns > 0) {
             prefix = '<span class="lamp-return" title="Returned from terminal state ' + ev._returns + 'x">\u21a9</span>';
         }
 
         return '<span class="lamp-strip">' + prefix + parts.join('') + '</span>';
-    }
-
-    // ========================================================================
-    // Progress rendering (shared by Feed and Top views)
-    // ========================================================================
-    function renderProgress(info) {
-        var base = parseTS(info.FirstSeen);
-        if (!base) return '<span class="top-loading">-</span>';
-        var steps = [];
-
-        steps.push('<span class="step step-announced">seen</span>');
-
-        if (parseTS(info.Requested)) {
-            steps.push('<span class="step step-requested">+' + msDelta(parseTS(info.Requested), base) + ' req</span>');
-        }
-        if (parseTS(info.Received)) {
-            steps.push('<span class="step step-received">+' + msDelta(parseTS(info.Received), base) + ' rcv</span>');
-        }
-        if (parseTS(info.Pooled)) {
-            steps.push('<span class="step step-pooled">+' + msDelta(parseTS(info.Pooled), base) + ' pool</span>');
-        }
-        if (parseTS(info.Included)) {
-            steps.push('<span class="step step-included">+' + msDelta(parseTS(info.Included), base) + ' incl</span>');
-        }
-        if (parseTS(info.Finalized)) {
-            steps.push('<span class="step step-finalized">+' + msDelta(parseTS(info.Finalized), base) + ' final</span>');
-        }
-        if (parseTS(info.Dropped)) {
-            steps.push('<span class="step step-dropped">+' + msDelta(parseTS(info.Dropped), base) + ' drop</span>');
-        }
-        if (info.RejectErr) {
-            steps.push('<span class="step step-rejected">rej</span>');
-        }
-
-        return '<span class="progress">' + steps.join('<span class="arrow">\u2192</span>') + '</span>';
     }
 
     // ========================================================================
