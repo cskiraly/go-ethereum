@@ -1146,21 +1146,23 @@
 
     // Renders a combined lamp strip with embedded timing deltas.
     // ev is always available (event data); info is nullable (RPC TxInfo).
-    // When info is available, lamps are lit based on actual timestamps
-    // (fixing late-connection / cold-promotion inaccuracies). Lit lamps
-    // with a timestamp show a small +Ns timing suffix.
+    // When info is available, timestamps determine timing text and refine
+    // which lamps light (e.g. Requested only lights if it has a timestamp).
+    // The set of lit lamps is capped at the happy-path branch point for
+    // terminal states so that a Pooled→Dropped→Rejected tx doesn't
+    // confusingly show the Pooled lamp.
     function renderLampProgress(ev, info) {
         var current = ev.newStatus;
         var base = info ? parseTS(info.FirstSeen) : null;
 
-        // Determine which lamps are lit.
-        // With info: light a lamp if its timestamp field is non-zero.
-        // Without info: infer from ordinal range (existing heuristic).
+        // Determine the highest happy-path ordinal to show.
         var currentOrd = statusOrd(current);
-        var firstOrd = statusOrd(ev._firstStatus) || currentOrd;
         var happyOrd = currentOrd;
-        if (current === 'rejected') happyOrd = 3;
-        if (current === 'dropped')  happyOrd = 4;
+        if (current === 'rejected') happyOrd = 3; // branched after received
+        if (current === 'dropped')  happyOrd = 4; // branched after pooled
+
+        // Without info, infer first ordinal from event data.
+        var firstOrd = info ? 1 : (statusOrd(ev._firstStatus) || currentOrd);
 
         var parts = [];
         for (var i = 0; i < LAMP_DEFS.length; i++) {
@@ -1169,10 +1171,14 @@
             var ord  = LAMP_DEFS[i][2];
             var tsField = LAMP_DEFS[i][3];
 
-            var lit, ts = null;
+            var ts = info ? parseTS(info[tsField]) : null;
+
+            // Lamp lights if within the happy-path range AND has evidence.
+            // With info: the timestamp must be non-zero.
+            // Without info: ordinal range heuristic.
+            var lit;
             if (info) {
-                ts = parseTS(info[tsField]);
-                lit = !!ts;
+                lit = !!ts && ord <= happyOrd;
             } else {
                 lit = (ord >= firstOrd && ord <= happyOrd);
                 if (key === 'requested' && !ev._wasRequested) lit = false;
@@ -1193,11 +1199,7 @@
 
         // Append terminal lamp.
         if (current === 'rejected') {
-            var rejContent = 'Rej';
-            if (info && info.RejectErr) {
-                rejContent += '<span class="lamp-timing">' + escapeHtml(info.RejectErr).substring(0, 20) + '</span>';
-            }
-            parts.push('<span class="lamp lamp-lit-rejected lamp-current">' + rejContent + '</span>');
+            parts.push('<span class="lamp lamp-lit-rejected lamp-current">Rej</span>');
         } else if (current === 'dropped') {
             var dropContent = 'Dr';
             if (info) {
