@@ -1223,11 +1223,19 @@ func (t *Tracker) bumpReturns(hash common.Hash, rec *txRecord, newStatus TxStatu
 	txReturnedMeter.Mark(1)
 
 	// Compute how long the transaction was in the terminal state.
+	// For rejected txs there is no dedicated timestamp; use received
+	// time as proxy (rejection follows receiving almost immediately).
 	var terminalAge time.Duration
 	switch rec.status {
 	case TxDropped:
 		if !rec.dropped.IsZero() {
 			terminalAge = time.Since(rec.dropped)
+		}
+	case TxRejected:
+		if !rec.received.IsZero() {
+			terminalAge = time.Since(rec.received)
+		} else if !rec.firstSeen.IsZero() {
+			terminalAge = time.Since(rec.firstSeen)
 		}
 	case TxFinalized:
 		if !rec.finalized.IsZero() {
