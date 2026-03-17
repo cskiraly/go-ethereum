@@ -71,14 +71,18 @@ func (api *TxTrackerAPI) GetAllPeerInfo() map[string]*PeerFullInfo {
 	for id, s := range stats {
 		result[id] = &PeerFullInfo{PeerStats: s}
 	}
-	// Merge P2P identity from connected peers.
+	// Merge P2P identity from connected peers. Also include peers that
+	// have no tracker stats yet (just connected, or no tx activity).
 	if api.server != nil {
 		for _, p := range api.server.PeersInfo() {
-			if fi, ok := result[p.ID]; ok {
-				fi.Name = p.Name
-				fi.Address = p.Network.RemoteAddress
-				fi.Inbound = p.Network.Inbound
+			fi, ok := result[p.ID]
+			if !ok {
+				fi = &PeerFullInfo{}
+				result[p.ID] = fi
 			}
+			fi.Name = p.Name
+			fi.Address = p.Network.RemoteAddress
+			fi.Inbound = p.Network.Inbound
 		}
 	}
 	return result
