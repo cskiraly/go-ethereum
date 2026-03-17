@@ -162,6 +162,7 @@
     filterInput.addEventListener('input', function() { feedViewDirty = true; scheduleRender(); });
     filterStatus.addEventListener('change', function() { feedViewDirty = true; scheduleRender(); });
     viewport.addEventListener('scroll', function() {
+        feedHeader.scrollLeft = viewport.scrollLeft;
         var atTop = viewport.scrollTop <= ROW_HEIGHT;
         if (atTop && feedPaused) {
             feedPaused = false;
@@ -176,10 +177,16 @@
     // Top view events.
     topFilterInput.addEventListener('input', function() { topViewDirty = true; scheduleRender(); });
     topFilterStatus.addEventListener('change', function() { topViewDirty = true; scheduleRender(); });
-    topViewport.addEventListener('scroll', scheduleRender);
+    topViewport.addEventListener('scroll', function() {
+        topTableHeader.scrollLeft = topViewport.scrollLeft;
+        scheduleRender();
+    });
 
     // Peers view events.
-    peersViewport.addEventListener('scroll', scheduleRender);
+    peersViewport.addEventListener('scroll', function() {
+        peersTableHeader.scrollLeft = peersViewport.scrollLeft;
+        scheduleRender();
+    });
 
     // Type filter helpers and events.
     function getCheckedTypes(containerId) {

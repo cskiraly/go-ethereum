@@ -195,11 +195,14 @@ header h1 {
     height: 28px;
     align-items: center;
     flex-shrink: 0;
+    overflow-x: hidden;
+    min-width: max-content;
 }
 
 .viewport {
     flex: 1;
     overflow-y: auto;
+    overflow-x: auto;
     position: relative;
 }
 
@@ -317,6 +320,7 @@ header h1 {
     padding: 0 10px;
     cursor: pointer;
     border-bottom: 1px solid rgba(15, 52, 96, 0.5);
+    min-width: max-content;
 }
 
 .vrow:hover { background: #16213e; }
