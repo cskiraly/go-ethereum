@@ -314,8 +314,22 @@ func (f *TxFetcher) Enqueue(peer string, txs []*types.Transaction, direct bool) 
 	// Keep track of all the propagated transactions
 	inMeter.Mark(int64(len(txs)))
 
-	// Push all the transactions into the pool, tracking underpriced ones to avoid
-	// re-requesting them and dropping the peer in case of malicious transfers.
+	// Pre-filter transactions known to still be underpriced, skipping the
+	// expensive pool.Add (signature recovery, state checks) for them.
+	var skippedUnderpriced int64
+	if f.underpricedFilter != nil {
+		n := 0
+		for _, tx := range txs {
+			if f.underpricedFilter.IsUnderpriced(tx.Hash()) {
+				skippedUnderpriced++
+			} else {
+				txs[n] = tx
+				n++
+			}
+		}
+		txs = txs[:n]
+	}
+	// Push the remaining transactions into the pool.
 	var (
 		added = make([]common.Hash, 0, len(txs))
 		metas = make([]txMetadata, 0, len(txs))
@@ -377,6 +391,9 @@ func (f *TxFetcher) Enqueue(peer string, txs []*types.Transaction, direct bool) 
 		if violation != nil {
 			break
 		}
+	}
+	if skippedUnderpriced > 0 {
+		underpricedMeter.Mark(skippedUnderpriced)
 	}
 	select {
 	case f.cleanup <- &txDelivery{origin: peer, hashes: added, metas: metas, direct: direct, violation: violation}:
