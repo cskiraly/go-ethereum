@@ -196,7 +196,6 @@ header h1 {
     align-items: center;
     flex-shrink: 0;
     overflow-x: hidden;
-    min-width: max-content;
 }
 
 .viewport {
