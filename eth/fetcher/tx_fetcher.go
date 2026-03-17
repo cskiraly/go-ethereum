@@ -54,13 +54,6 @@ const (
 	// a connection between two peers.
 	maxTxRetrievalSize = 128 * 1024
 
-	// maxTxUnderpricedSetSize is the size of the underpriced transaction set that
-	// is used to track recent transactions that have been dropped so we don't
-	// re-request them.
-	maxTxUnderpricedSetSize = 32768
-
-	// maxTxUnderpricedTimeout is the max time a transaction should be stuck in the underpriced set.
-	maxTxUnderpricedTimeout = 5 * time.Minute
 
 	// txArriveTimeout is the time allowance before an announced transaction is
 	// explicitly requested.
@@ -149,14 +142,20 @@ type txDrop struct {
 //   - Each peer that announced transactions may be scheduled retrievals, but
 //     only ever one concurrently. This ensures we can immediately know what is
 //     missing from a reply and reschedule it.
+// UnderpricedFilter reports whether a transaction is known to be underpriced
+// given current gas conditions. Implementations must be safe for concurrent use.
+type UnderpricedFilter interface {
+	IsUnderpriced(common.Hash) bool
+}
+
 type TxFetcher struct {
 	notify  chan *txAnnounce
 	cleanup chan *txDelivery
 	drop    chan *txDrop
 	quit    chan struct{}
 
-	txSeq       uint64                             // Unique transaction sequence number
-	underpriced *lru.Cache[common.Hash, time.Time] // Transactions discarded as too cheap (don't re-fetch)
+	txSeq              uint64             // Unique transaction sequence number
+	underpricedFilter  UnderpricedFilter  // Smart underpriced check (nil = disabled)
 
 	chain          *core.BlockChain                  // Blockchain interface for on-chain checks
 	txOnChainCache *lru.Cache[common.Hash, struct{}] // Cache to avoid fetching once the tx gets on chain
@@ -194,15 +193,15 @@ type TxFetcher struct {
 // NewTxFetcher creates a transaction fetcher to retrieve transaction
 // based on hash announcements.
 // Chain can be nil to disable on-chain checks.
-func NewTxFetcher(chain *core.BlockChain, validateMeta func(common.Hash, byte) error, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string)) *TxFetcher {
-	return NewTxFetcherForTests(chain, validateMeta, addTxs, fetchTxs, dropPeer, mclock.System{}, time.Now, nil)
+func NewTxFetcher(chain *core.BlockChain, underpricedFilter UnderpricedFilter, validateMeta func(common.Hash, byte) error, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string)) *TxFetcher {
+	return NewTxFetcherForTests(chain, underpricedFilter, validateMeta, addTxs, fetchTxs, dropPeer, mclock.System{}, time.Now, nil)
 }
 
 // NewTxFetcherForTests is a testing method to mock out the realtime clock with
 // a simulated version and the internal randomness with a deterministic one.
 // Chain can be nil to disable on-chain checks.
 func NewTxFetcherForTests(
-	chain *core.BlockChain, validateMeta func(common.Hash, byte) error, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string),
+	chain *core.BlockChain, underpricedFilter UnderpricedFilter, validateMeta func(common.Hash, byte) error, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string),
 	clock mclock.Clock, realTime func() time.Time, rand *mrand.Rand) *TxFetcher {
 	return &TxFetcher{
 		notify:         make(chan *txAnnounce),
@@ -216,9 +215,9 @@ func NewTxFetcherForTests(
 		announced:      make(map[common.Hash]map[string]struct{}),
 		fetching:       make(map[common.Hash]string),
 		requests:       make(map[string]*txRequest),
-		alternates:     make(map[common.Hash]map[string]struct{}),
-		underpriced:    lru.NewCache[common.Hash, time.Time](maxTxUnderpricedSetSize),
-		txOnChainCache: lru.NewCache[common.Hash, struct{}](txOnChainCacheLimit),
+		alternates:        make(map[common.Hash]map[string]struct{}),
+		underpricedFilter: underpricedFilter,
+		txOnChainCache:    lru.NewCache[common.Hash, struct{}](txOnChainCacheLimit),
 		chain:          chain,
 		validateMeta:   validateMeta,
 		addTxs:         addTxs,
@@ -265,7 +264,7 @@ func (f *TxFetcher) Notify(peer string, types []byte, sizes []uint32, hashes []c
 			continue
 		}
 
-		if f.isKnownUnderpriced(hash) {
+		if f.underpricedFilter != nil && f.underpricedFilter.IsUnderpriced(hash) {
 			underpriced++
 			continue
 		}
@@ -292,16 +291,6 @@ func (f *TxFetcher) Notify(peer string, types []byte, sizes []uint32, hashes []c
 	case <-f.quit:
 		return errTerminated
 	}
-}
-
-// isKnownUnderpriced reports whether a transaction hash was recently found to be underpriced.
-func (f *TxFetcher) isKnownUnderpriced(hash common.Hash) bool {
-	prevTime, ok := f.underpriced.Peek(hash)
-	if ok && prevTime.Before(f.realTime().Add(-maxTxUnderpricedTimeout)) {
-		f.underpriced.Remove(hash)
-		return false
-	}
-	return ok
 }
 
 // Enqueue imports a batch of received transaction into the transaction pool
@@ -345,12 +334,6 @@ func (f *TxFetcher) Enqueue(peer string, txs []*types.Transaction, direct bool) 
 		batch := txs[i:end]
 
 		for j, err := range f.addTxs(batch) {
-			// Track the transaction hash if the price is too low for us.
-			// Avoid re-request this transaction when we receive another
-			// announcement.
-			if errors.Is(err, txpool.ErrUnderpriced) || errors.Is(err, txpool.ErrReplaceUnderpriced) || errors.Is(err, txpool.ErrTxGasPriceTooLow) {
-				f.underpriced.Add(batch[j].Hash(), batch[j].Time())
-			}
 			// Track a few interesting failure types
 			switch {
 			case err == nil: // Noop, but need to handle to not count these

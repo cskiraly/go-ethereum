@@ -212,11 +212,11 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		}
 		return nil
 	}
-	h.txFetcher = fetcher.NewTxFetcher(h.chain, validateMeta, addTxs, fetchTx, h.removePeer)
 	h.txTracker = txtracker.New(txtracker.Config{
 		Chain:  config.Chain,
 		TxPool: h.txpool,
 	})
+	h.txFetcher = fetcher.NewTxFetcher(h.chain, h.txTracker, validateMeta, addTxs, fetchTx, h.removePeer)
 	return h, nil
 }
 

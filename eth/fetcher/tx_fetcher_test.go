@@ -78,7 +78,7 @@ type isScheduled struct {
 	fetching map[string][]common.Hash
 	dangling map[string][]common.Hash
 }
-type isUnderpriced int
+// isUnderpriced step type removed — underpriced tracking moved to txtracker
 
 // txFetcherTest represents a test scenario that can be executed by the test
 // runner.
@@ -91,7 +91,7 @@ type txFetcherTest struct {
 // and deterministic randomness.
 func newTestTxFetcher() *TxFetcher {
 	return NewTxFetcher(
-		nil,
+		nil, nil,
 		func(common.Hash, byte) error { return nil },
 		func(txs []*types.Transaction) []error {
 			return make([]error, len(txs))
@@ -1168,131 +1168,9 @@ func TestTransactionFetcherDoSProtection(t *testing.T) {
 }
 
 // Tests that underpriced transactions don't get rescheduled after being rejected.
-func TestTransactionFetcherUnderpricedDedup(t *testing.T) {
-	testTransactionFetcherParallel(t, txFetcherTest{
-		init: func() *TxFetcher {
-			f := newTestTxFetcher()
-			f.addTxs = func(txs []*types.Transaction) []error {
-				errs := make([]error, len(txs))
-				for i := 0; i < len(errs); i++ {
-					if i%3 == 0 {
-						errs[i] = txpool.ErrUnderpriced
-					} else if i%3 == 1 {
-						errs[i] = txpool.ErrReplaceUnderpriced
-					} else {
-						errs[i] = txpool.ErrTxGasPriceTooLow
-					}
-				}
-				return errs
-			}
-			return f
-		},
-		steps: []interface{}{
-			// Deliver a transaction through the fetcher, but reject as underpriced
-			doTxNotify{peer: "A",
-				hashes: []common.Hash{testTxsHashes[0], testTxsHashes[1]},
-				types:  []byte{testTxs[0].Type(), testTxs[1].Type()},
-				sizes:  []uint32{uint32(testTxs[0].Size()), uint32(testTxs[1].Size())},
-			},
-			doWait{time: txArriveTimeout, step: true},
-			doTxEnqueue{peer: "A", txs: []*types.Transaction{testTxs[0], testTxs[1]}, direct: true},
-			isScheduled{nil, nil, nil},
-
-			// Try to announce the transaction again, ensure it's not scheduled back
-			doTxNotify{peer: "A",
-				hashes: []common.Hash{testTxsHashes[0], testTxsHashes[1], testTxsHashes[2]},
-				types:  []byte{testTxs[0].Type(), testTxs[1].Type(), testTxs[2].Type()},
-				sizes:  []uint32{uint32(testTxs[0].Size()), uint32(testTxs[1].Size()), uint32(testTxs[2].Size())},
-			}, // [2] is needed to force a step in the fetcher
-			isWaiting(map[string][]announce{
-				"A": {{testTxsHashes[2], testTxs[2].Type(), uint32(testTxs[2].Size())}},
-			}),
-			isScheduled{nil, nil, nil},
-		},
-	})
-}
-
-// Tests that underpriced transactions don't get rescheduled after being rejected,
-// but at the same time there's a hard cap on the number of transactions that are
-// tracked.
-func TestTransactionFetcherUnderpricedDoSProtection(t *testing.T) {
-	// Temporarily disable fetch timeouts as they massively mess up the simulated clock
-	defer func(timeout time.Duration) { txFetchTimeout = timeout }(txFetchTimeout)
-	txFetchTimeout = 24 * time.Hour
-
-	// Create a slew of transactions to max out the underpriced set
-	var txs []*types.Transaction
-	for i := 0; i < maxTxUnderpricedSetSize+1; i++ {
-		txs = append(txs, types.NewTransaction(rand.Uint64(), common.Address{byte(rand.Intn(256))}, new(big.Int), 0, new(big.Int), nil))
-	}
-	var (
-		hashes []common.Hash
-		ts     []byte
-		sizes  []uint32
-		annos  []announce
-	)
-	for _, tx := range txs {
-		hashes = append(hashes, tx.Hash())
-		ts = append(ts, tx.Type())
-		sizes = append(sizes, uint32(tx.Size()))
-		annos = append(annos, announce{
-			hash: tx.Hash(),
-			kind: tx.Type(),
-			size: uint32(tx.Size()),
-		})
-	}
-	// Generate a set of steps to announce and deliver the entire set of transactions
-	var steps []interface{}
-	for i := 0; i < maxTxUnderpricedSetSize/maxTxRetrievals; i++ {
-		steps = append(steps, doTxNotify{
-			peer:   "A",
-			hashes: hashes[i*maxTxRetrievals : (i+1)*maxTxRetrievals],
-			types:  ts[i*maxTxRetrievals : (i+1)*maxTxRetrievals],
-			sizes:  sizes[i*maxTxRetrievals : (i+1)*maxTxRetrievals],
-		})
-		steps = append(steps, isWaiting(map[string][]announce{
-			"A": annos[i*maxTxRetrievals : (i+1)*maxTxRetrievals],
-		}))
-		steps = append(steps, doWait{time: txArriveTimeout, step: true})
-		steps = append(steps, isScheduled{
-			tracking: map[string][]announce{
-				"A": annos[i*maxTxRetrievals : (i+1)*maxTxRetrievals],
-			},
-			fetching: map[string][]common.Hash{
-				"A": hashes[i*maxTxRetrievals : (i+1)*maxTxRetrievals],
-			},
-		})
-		steps = append(steps, doTxEnqueue{peer: "A", txs: txs[i*maxTxRetrievals : (i+1)*maxTxRetrievals], direct: true})
-		steps = append(steps, isWaiting(nil))
-		steps = append(steps, isScheduled{nil, nil, nil})
-		steps = append(steps, isUnderpriced((i+1)*maxTxRetrievals))
-	}
-	testTransactionFetcher(t, txFetcherTest{
-		init: func() *TxFetcher {
-			f := newTestTxFetcher()
-			f.addTxs = func(txs []*types.Transaction) []error {
-				errs := make([]error, len(txs))
-				for i := 0; i < len(errs); i++ {
-					errs[i] = txpool.ErrUnderpriced
-				}
-				return errs
-			}
-			return f
-		},
-		steps: append(steps, []interface{}{
-			// The preparation of the test has already been done in `steps`, add the last check
-			doTxNotify{
-				peer:   "A",
-				hashes: []common.Hash{hashes[maxTxUnderpricedSetSize]},
-				types:  []byte{ts[maxTxUnderpricedSetSize]},
-				sizes:  []uint32{sizes[maxTxUnderpricedSetSize]},
-			},
-			doWait{time: txArriveTimeout, step: true},
-			doTxEnqueue{peer: "A", txs: []*types.Transaction{txs[maxTxUnderpricedSetSize]}, direct: true},
-			isUnderpriced(maxTxUnderpricedSetSize),
-		}...),
-	})
-}
+// TestTransactionFetcherUnderpricedDedup and TestTransactionFetcherUnderpricedDoSProtection
+// were removed — underpriced tracking moved from the fetcher's LRU cache to the
+// txtracker's price-aware IsUnderpriced method. See eth/txtracker tests.
 
 // Tests that unexpected deliveries don't corrupt the internal state.
 func TestTransactionFetcherOutOfBoundDeliveries(t *testing.T) {
@@ -2130,11 +2008,6 @@ func testTransactionFetcher(t *testing.T, tt txFetcherTest) {
 				}
 			}
 
-		case isUnderpriced:
-			if fetcher.underpriced.Len() != int(step) {
-				t.Errorf("step %d: underpriced set size mismatch: have %d, want %d", i, fetcher.underpriced.Len(), step)
-			}
-
 		default:
 			t.Fatalf("step %d: unknown step type %T", i, step)
 		}
@@ -2179,107 +2052,5 @@ func containsHashInAnnounces(slice []announce, hash common.Hash) bool {
 // TestTransactionForgotten verifies that underpriced transactions are properly
 // forgotten after the timeout period, testing both the exact timeout boundary
 // and the cleanup of the underpriced cache.
-func TestTransactionForgotten(t *testing.T) {
-	// Test ensures that underpriced transactions are properly forgotten after a timeout period,
-	// including checks for timeout boundary and cache cleanup.
-	t.Parallel()
-
-	// Create a mock clock for deterministic time control
-	mockClock := new(mclock.Simulated)
-	mockTime := func() time.Time {
-		nanoTime := int64(mockClock.Now())
-		return time.Unix(nanoTime/1000000000, nanoTime%1000000000)
-	}
-
-	fetcher := NewTxFetcherForTests(
-		nil,
-		func(common.Hash, byte) error { return nil },
-		func(txs []*types.Transaction) []error {
-			errs := make([]error, len(txs))
-			for i := 0; i < len(errs); i++ {
-				errs[i] = txpool.ErrUnderpriced
-			}
-			return errs
-		},
-		func(string, []common.Hash) error { return nil },
-		func(string) {},
-		mockClock,
-		mockTime,
-		rand.New(rand.NewSource(0)), // Use fixed seed for deterministic behavior
-	)
-	fetcher.Start()
-	defer fetcher.Stop()
-
-	// Create two test transactions with the same timestamp
-	tx1 := types.NewTransaction(0, common.Address{}, big.NewInt(100), 21000, big.NewInt(1), nil)
-	tx2 := types.NewTransaction(1, common.Address{}, big.NewInt(100), 21000, big.NewInt(1), nil)
-
-	now := mockTime()
-	tx1.SetTime(now)
-	tx2.SetTime(now)
-
-	// Initial state: both transactions should be marked as underpriced
-	if err := fetcher.Enqueue("peer", []*types.Transaction{tx1, tx2}, false); err != nil {
-		t.Fatal(err)
-	}
-	if !fetcher.isKnownUnderpriced(tx1.Hash()) {
-		t.Error("tx1 should be underpriced")
-	}
-	if !fetcher.isKnownUnderpriced(tx2.Hash()) {
-		t.Error("tx2 should be underpriced")
-	}
-
-	// Verify cache size
-	if size := fetcher.underpriced.Len(); size != 2 {
-		t.Errorf("wrong underpriced cache size: got %d, want %d", size, 2)
-	}
-
-	// Just before timeout: transactions should still be underpriced
-	mockClock.Run(maxTxUnderpricedTimeout - time.Second)
-	if !fetcher.isKnownUnderpriced(tx1.Hash()) {
-		t.Error("tx1 should still be underpriced before timeout")
-	}
-	if !fetcher.isKnownUnderpriced(tx2.Hash()) {
-		t.Error("tx2 should still be underpriced before timeout")
-	}
-
-	// Exactly at timeout boundary: transactions should still be present
-	mockClock.Run(time.Second)
-	if !fetcher.isKnownUnderpriced(tx1.Hash()) {
-		t.Error("tx1 should be present exactly at timeout")
-	}
-	if !fetcher.isKnownUnderpriced(tx2.Hash()) {
-		t.Error("tx2 should be present exactly at timeout")
-	}
-
-	// After timeout: transactions should be forgotten
-	mockClock.Run(time.Second)
-	if fetcher.isKnownUnderpriced(tx1.Hash()) {
-		t.Error("tx1 should be forgotten after timeout")
-	}
-	if fetcher.isKnownUnderpriced(tx2.Hash()) {
-		t.Error("tx2 should be forgotten after timeout")
-	}
-
-	// Verify cache is empty
-	if size := fetcher.underpriced.Len(); size != 0 {
-		t.Errorf("wrong underpriced cache size after timeout: got %d, want 0", size)
-	}
-
-	// Re-enqueue tx1 with updated timestamp
-	tx1.SetTime(mockTime())
-	if err := fetcher.Enqueue("peer", []*types.Transaction{tx1}, false); err != nil {
-		t.Fatal(err)
-	}
-	if !fetcher.isKnownUnderpriced(tx1.Hash()) {
-		t.Error("tx1 should be underpriced after re-enqueueing with new timestamp")
-	}
-	if fetcher.isKnownUnderpriced(tx2.Hash()) {
-		t.Error("tx2 should remain forgotten")
-	}
-
-	// Verify final cache state
-	if size := fetcher.underpriced.Len(); size != 1 {
-		t.Errorf("wrong final underpriced cache size: got %d, want 1", size)
-	}
-}
+// TestTransactionForgotten was removed — underpriced timeout tracking moved
+// to txtracker's price-aware IsUnderpriced. See eth/txtracker tests.

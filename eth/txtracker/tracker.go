@@ -23,6 +23,9 @@ import (
 	"encoding/json"
 	"math/big"
 	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -31,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/holiman/uint256"
 )
 
 // TxStatus represents the lifecycle state of a tracked transaction.
@@ -316,11 +320,20 @@ type peerStatsQuery struct {
 	resp chan PeerStats
 }
 
+// underpricedEntry stores the pricing metadata of a transaction that was
+// dropped or rejected as underpriced, for smart re-evaluation against
+// current gas conditions.
+type underpricedEntry struct {
+	feeCap *uint256.Int
+	tipCap *uint256.Int
+}
+
 // Config holds the configuration for a Tracker.
 type Config struct {
 	MaxEntries      int
 	MaxColdEntries  int  // <=0 means default (2M), positive = that value
 	ColdSetDisabled bool // true disables the cold set entirely
+	MinTip          *big.Int     // Minimum gas tip for underpriced filtering (nil = 1 gwei)
 	Clock           mclock.Clock
 	Chain           BlockchainReader
 	TxPool          TxPoolReader
@@ -366,6 +379,13 @@ type Tracker struct {
 	trackerStatsCh chan chan TrackerStats
 	allPeerStatsCh chan chan map[string]PeerStats
 
+	// Two-stage underpriced filtering. Txs dropped/rejected as underpriced
+	// are stored with their pricing so the TxFetcher can re-evaluate against
+	// current gas conditions without re-fetching.
+	underpriced sync.Map              // common.Hash → underpricedEntry
+	baseFee     atomic.Pointer[uint256.Int] // updated from chain events
+	minTip      *uint256.Int          // from config, set at init
+
 	// Event feed for state transition notifications.
 	eventFeed event.Feed
 	emitCh    chan TxTrackerEvent // buffered; drained by emitLoop
@@ -388,6 +408,10 @@ func New(config Config) *Tracker {
 	// Initialize cold set unless disabled.
 	var cold *coldSet
 	var peerIdx *peerIntern
+	minTip := uint256.NewInt(1_000_000_000) // default 1 gwei
+	if config.MinTip != nil {
+		minTip, _ = uint256.FromBig(config.MinTip)
+	}
 	if !config.ColdSetDisabled {
 		maxCold := config.MaxColdEntries
 		if maxCold <= 0 {
@@ -406,6 +430,7 @@ func New(config Config) *Tracker {
 		evictList:      list.New(),
 		cold:           cold,
 		peerIndex:      peerIdx,
+		minTip:         minTip,
 		announceCh:     make(chan *announceEvent, announceChanSize),
 		fetchRequestCh: make(chan *fetchRequestedEvent, fetchRequestChanSize),
 		receiveCh:      make(chan *receiveEvent, receiveChanSize),
@@ -512,6 +537,29 @@ func (t *Tracker) Get(hash common.Hash) *TxInfo {
 func (t *Tracker) Status(hash common.Hash) TxStatus {
 	resp := make(chan TxStatus, 1)
 	return awaitReply(t.statusCh, &statusQuery{hash: hash, resp: resp}, resp, t.quit, 0)
+}
+
+// IsUnderpriced reports whether a transaction hash was recently dropped or
+// rejected as underpriced and is still too cheap given the current base fee
+// and minimum tip. This method is safe to call from any goroutine (lock-free)
+// and is designed for use by TxFetcher.Notify to skip re-fetching.
+func (t *Tracker) IsUnderpriced(hash common.Hash) bool {
+	e, ok := t.underpriced.Load(hash)
+	if !ok {
+		return false
+	}
+	entry := e.(underpricedEntry)
+	baseFee := t.baseFee.Load()
+	if baseFee == nil {
+		return false // no base fee known yet, allow fetch
+	}
+	// Tip too low for the node's configured minimum.
+	if entry.tipCap.Cmp(t.minTip) < 0 {
+		return true
+	}
+	// Fee cap too low for the current base fee + minimum tip.
+	threshold := new(uint256.Int).Add(baseFee, t.minTip)
+	return entry.feeCap.Cmp(threshold) < 0
 }
 
 // GetPeerStats returns the transaction contribution statistics for a peer.
@@ -894,6 +942,9 @@ func (t *Tracker) handleRejected(ev *rejectedEvent) {
 			}
 			t.insertRecord(hash, rec)
 			t.emitEvent(hash, 0, TxRejected, rec, "")
+			if strings.Contains(rec.rejectErr, "underpriced") {
+				t.markUnderpriced(hash, rec)
+			}
 			txTrackedMeter.Mark(1)
 			continue
 		}
@@ -912,6 +963,9 @@ func (t *Tracker) handleRejected(ev *rejectedEvent) {
 			}
 			t.touchLRU(rec)
 			t.emitEvent(hash, oldStatus, TxRejected, rec, "")
+			if strings.Contains(rec.rejectErr, "underpriced") {
+				t.markUnderpriced(hash, rec)
+			}
 		}
 	}
 }
@@ -923,6 +977,14 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 	blockNum := ev.Header.Number.Uint64()
 	blockHash := ev.Header.Hash()
 	parentHash := ev.Header.ParentHash
+
+	// Update base fee for underpriced filtering.
+	if ev.Header.BaseFee != nil {
+		bf, _ := uint256.FromBig(ev.Header.BaseFee)
+		if bf != nil {
+			t.baseFee.Store(bf)
+		}
+	}
 
 	// Detect reorg: if the parent of this block doesn't match our last head.
 	if t.lastHeadHash != (common.Hash{}) && parentHash != t.lastHeadHash {
@@ -1098,6 +1160,9 @@ func (t *Tracker) handleRemovedTxs(ev core.RemovedTxsEvent) {
 		}
 		t.touchLRU(rec)
 		t.emitEvent(hash, TxPooled, TxDropped, rec, "")
+		if strings.Contains(reason, "underpriced") {
+			t.markUnderpriced(hash, rec)
+		}
 		txDroppedMeter.Mark(1)
 	}
 }
@@ -1221,6 +1286,7 @@ func (t *Tracker) bumpReturns(hash common.Hash, rec *txRecord, newStatus TxStatu
 		rec.returns++
 	}
 	txReturnedMeter.Mark(1)
+	t.underpriced.Delete(hash) // no longer underpriced — re-entered active state
 
 	// Compute how long the transaction was in the terminal state.
 	// For rejected txs there is no dedicated timestamp; use received
@@ -1262,6 +1328,18 @@ func (t *Tracker) bumpReturns(hash common.Hash, rec *txRecord, newStatus TxStatu
 	)
 }
 
+// markUnderpriced adds a transaction to the underpriced set if it has pricing
+// data. Called when a tx is dropped or rejected as underpriced.
+func (t *Tracker) markUnderpriced(hash common.Hash, rec *txRecord) {
+	if rec.gasFeeCap != nil && rec.gasTipCap != nil {
+		feeCap, _ := uint256.FromBig(rec.gasFeeCap)
+		tipCap, _ := uint256.FromBig(rec.gasTipCap)
+		if feeCap != nil && tipCap != nil {
+			t.underpriced.Store(hash, underpricedEntry{feeCap: feeCap, tipCap: tipCap})
+		}
+	}
+}
+
 // insertRecord adds a new transaction record and manages eviction.
 func (t *Tracker) insertRecord(hash common.Hash, rec *txRecord) {
 	rec.evictElem = t.evictList.PushFront(hash)
@@ -1291,6 +1369,7 @@ func (t *Tracker) evictOldest() {
 	hash := t.evictList.Remove(back).(common.Hash)
 	rec := t.txs[hash]
 	delete(t.txs, hash)
+	t.underpriced.Delete(hash) // clean up if present
 
 	// Compact and move to cold set if enabled.
 	if rec != nil && t.cold != nil {
