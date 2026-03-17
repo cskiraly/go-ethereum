@@ -762,7 +762,7 @@ func (t *Tracker) handleFetchRequested(ev *fetchRequestedEvent) {
 		if rec.status == TxAnnounced || rec.status == TxDropped {
 			oldStatus := rec.status
 			if oldStatus.isTerminal() {
-				bumpReturns(rec)
+				t.bumpReturns(hash, rec, TxRequested, ev.peer)
 			}
 			rec.status = TxRequested
 			rec.requested = now
@@ -802,7 +802,7 @@ func (t *Tracker) handleReceive(ev *receiveEvent) {
 		if rec.status < TxReceived || rec.status == TxDropped {
 			oldStatus := rec.status
 			if oldStatus.isTerminal() {
-				bumpReturns(rec)
+				t.bumpReturns(hash, rec, TxReceived, ev.peer)
 			}
 			rec.status = TxReceived
 			rec.received = now
@@ -856,7 +856,7 @@ func (t *Tracker) handlePooled(ev *pooledEvent) {
 		if rec.status < TxPooled || rec.status == TxDropped {
 			oldStatus := rec.status
 			if oldStatus.isTerminal() {
-				bumpReturns(rec)
+				t.bumpReturns(hash, rec, TxPooled, "")
 			}
 			rec.status = TxPooled
 			rec.pooled = now
@@ -970,7 +970,7 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 		if rec.status != TxFinalized {
 			oldStatus := rec.status
 			if oldStatus.isTerminal() {
-				bumpReturns(rec)
+				t.bumpReturns(hash, rec, TxIncluded, "")
 			}
 			rec.status = TxIncluded
 			rec.included = now
@@ -1120,7 +1120,7 @@ func (t *Tracker) handleNewTxs(ev core.NewTxsEvent) {
 				continue
 			}
 			oldStatus := rec.status
-			bumpReturns(rec)
+			t.bumpReturns(hash, rec, TxPooled, "")
 			rec.status = TxPooled
 			rec.pooled = now
 			fillTxMeta(rec, tx)
@@ -1214,12 +1214,44 @@ func (t *Tracker) lookupOrPromote(hash common.Hash) *txRecord {
 }
 
 // bumpReturns increments the returns counter when a transaction exits a
-// terminal state (dropped/rejected/finalized) back into an active state.
-func bumpReturns(rec *txRecord) {
+// terminal state (dropped/rejected/finalized) back into an active state,
+// and emits a detailed trace log.
+func (t *Tracker) bumpReturns(hash common.Hash, rec *txRecord, newStatus TxStatus, peer string) {
 	if rec.returns < 255 {
 		rec.returns++
 	}
 	txReturnedMeter.Mark(1)
+
+	// Compute how long the transaction was in the terminal state.
+	var terminalAge time.Duration
+	switch rec.status {
+	case TxDropped:
+		if !rec.dropped.IsZero() {
+			terminalAge = time.Since(rec.dropped)
+		}
+	case TxFinalized:
+		if !rec.finalized.IsZero() {
+			terminalAge = time.Since(rec.finalized)
+		}
+	}
+	var reason string
+	switch rec.status {
+	case TxDropped:
+		reason = rec.dropReason
+	case TxRejected:
+		reason = rec.rejectErr
+	}
+	log.Trace("Transaction returned from terminal state",
+		"tx", hash,
+		"from", rec.status,
+		"to", newStatus,
+		"returns", rec.returns,
+		"peer", peer,
+		"terminalAge", terminalAge,
+		"reason", reason,
+		"deliverer", rec.deliverer,
+		"firstSeen", rec.firstSeen,
+	)
 }
 
 // insertRecord adds a new transaction record and manages eviction.
