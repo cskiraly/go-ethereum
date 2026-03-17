@@ -22,6 +22,7 @@ import (
 	"errors"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -100,6 +101,10 @@ type txPool interface {
 
 	// FilterType returns whether the given tx type is supported by the txPool.
 	FilterType(kind byte) bool
+
+	// WouldBeUnderpriced reports whether a tx with the given pricing would
+	// be rejected as underpriced (pool full and worse than the worst tx).
+	WouldBeUnderpriced(feeCap, tipCap *big.Int) bool
 }
 
 // handlerConfig is the collection of initialization parameters to create a full

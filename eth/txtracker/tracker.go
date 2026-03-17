@@ -25,7 +25,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -276,6 +275,7 @@ type BlockchainReader interface {
 type TxPoolReader interface {
 	SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) event.Subscription
 	SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription
+	WouldBeUnderpriced(feeCap, tipCap *big.Int) bool
 }
 
 // Internal event types for the single-goroutine event loop.
@@ -333,7 +333,6 @@ type Config struct {
 	MaxEntries      int
 	MaxColdEntries  int  // <=0 means default (2M), positive = that value
 	ColdSetDisabled bool // true disables the cold set entirely
-	MinTip          *big.Int     // Minimum gas tip for underpriced filtering (nil = 1 gwei)
 	Clock           mclock.Clock
 	Chain           BlockchainReader
 	TxPool          TxPoolReader
@@ -381,10 +380,8 @@ type Tracker struct {
 
 	// Two-stage underpriced filtering. Txs dropped/rejected as underpriced
 	// are stored with their pricing so the TxFetcher can re-evaluate against
-	// current gas conditions without re-fetching.
-	underpriced sync.Map              // common.Hash → underpricedEntry
-	baseFee     atomic.Pointer[uint256.Int] // updated from chain events
-	minTip      *uint256.Int          // from config, set at init
+	// current gas conditions by delegating to the pool's pricing logic.
+	underpriced sync.Map // common.Hash → underpricedEntry
 
 	// Event feed for state transition notifications.
 	eventFeed event.Feed
@@ -408,10 +405,6 @@ func New(config Config) *Tracker {
 	// Initialize cold set unless disabled.
 	var cold *coldSet
 	var peerIdx *peerIntern
-	minTip := uint256.NewInt(1_000_000_000) // default 1 gwei
-	if config.MinTip != nil {
-		minTip, _ = uint256.FromBig(config.MinTip)
-	}
 	if !config.ColdSetDisabled {
 		maxCold := config.MaxColdEntries
 		if maxCold <= 0 {
@@ -430,7 +423,6 @@ func New(config Config) *Tracker {
 		evictList:      list.New(),
 		cold:           cold,
 		peerIndex:      peerIdx,
-		minTip:         minTip,
 		announceCh:     make(chan *announceEvent, announceChanSize),
 		fetchRequestCh: make(chan *fetchRequestedEvent, fetchRequestChanSize),
 		receiveCh:      make(chan *receiveEvent, receiveChanSize),
@@ -549,22 +541,17 @@ func (t *Tracker) IsUnderpriced(hash common.Hash) bool {
 		return false
 	}
 	entry := e.(underpricedEntry)
-	baseFee := t.baseFee.Load()
-	if baseFee == nil {
-		return false // no base fee known yet, allow fetch
+	if t.txpool == nil {
+		return false
 	}
-	// Tip too low for the node's configured minimum.
-	if entry.tipCap.Cmp(t.minTip) < 0 {
+	// Delegate to the pool's actual underpriced logic: checks whether
+	// the pool is full and the pricing is worse than the worst tx in
+	// both price heaps.
+	if t.txpool.WouldBeUnderpriced(entry.feeCap.ToBig(), entry.tipCap.ToBig()) {
 		txUnderpricedFilteredMeter.Mark(1)
 		return true
 	}
-	// Fee cap too low for the current base fee + minimum tip.
-	threshold := new(uint256.Int).Add(baseFee, t.minTip)
-	if entry.feeCap.Cmp(threshold) < 0 {
-		txUnderpricedFilteredMeter.Mark(1)
-		return true
-	}
-	// Conditions changed — tx is no longer underpriced. Clean up.
+	// Pool is no longer full or conditions changed. Clean up.
 	t.underpriced.Delete(hash)
 	txUnderpricedClearedMeter.Mark(1)
 	txUnderpricedSize.Dec(1)
@@ -986,14 +973,6 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 	blockNum := ev.Header.Number.Uint64()
 	blockHash := ev.Header.Hash()
 	parentHash := ev.Header.ParentHash
-
-	// Update base fee for underpriced filtering.
-	if ev.Header.BaseFee != nil {
-		bf, _ := uint256.FromBig(ev.Header.BaseFee)
-		if bf != nil {
-			t.baseFee.Store(bf)
-		}
-	}
 
 	// Detect reorg: if the parent of this block doesn't match our last head.
 	if t.lastHeadHash != (common.Hash{}) && parentHash != t.lastHeadHash {

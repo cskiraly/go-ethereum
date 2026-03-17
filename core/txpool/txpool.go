@@ -510,3 +510,22 @@ func (p *TxPool) FilterType(kind byte) bool {
 	}
 	return false
 }
+
+// underpricedChecker is an optional interface that subpools may implement
+// to support pre-filtering of underpriced transactions.
+type underpricedChecker interface {
+	WouldBeUnderpriced(feeCap, tipCap *big.Int) bool
+}
+
+// WouldBeUnderpriced reports whether a transaction with the given gas pricing
+// would be rejected as underpriced by any subpool.
+func (p *TxPool) WouldBeUnderpriced(feeCap, tipCap *big.Int) bool {
+	for _, subpool := range p.subpools {
+		if uc, ok := subpool.(underpricedChecker); ok {
+			if uc.WouldBeUnderpriced(feeCap, tipCap) {
+				return true
+			}
+		}
+	}
+	return false
+}

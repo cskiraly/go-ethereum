@@ -61,6 +61,10 @@ func (m *mockTxPool) SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent
 	return m.removedFeed.Subscribe(ch)
 }
 
+func (m *mockTxPool) WouldBeUnderpriced(feeCap, tipCap *big.Int) bool {
+	return false // pool never full in tests
+}
+
 func (m *mockTxPool) sendNewTxs(ev core.NewTxsEvent) {
 	m.txsFeed.Send(ev)
 }

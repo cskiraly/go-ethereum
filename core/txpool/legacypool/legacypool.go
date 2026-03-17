@@ -1074,6 +1074,26 @@ func (pool *LegacyPool) Has(hash common.Hash) bool {
 	return pool.all.Get(hash) != nil
 }
 
+// WouldBeUnderpriced reports whether a transaction with the given gas pricing
+// would be rejected as underpriced by the pool. This performs the same check as
+// the add() function: the pool must be full AND the pricing must be worse than
+// the worst transaction in both price heaps.
+func (pool *LegacyPool) WouldBeUnderpriced(feeCap, tipCap *big.Int) bool {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+
+	// Pool not full → nothing is underpriced.
+	if uint64(pool.all.Slots()) <= pool.config.GlobalSlots+pool.config.GlobalQueue {
+		return false
+	}
+	// Create a minimal tx for the price comparison.
+	tx := types.NewTx(&types.DynamicFeeTx{
+		GasFeeCap: feeCap,
+		GasTipCap: tipCap,
+	})
+	return pool.priced.Underpriced(tx)
+}
+
 // removeTx removes a single transaction from the queue, moving all subsequent
 // transactions back to the future queue.
 //
