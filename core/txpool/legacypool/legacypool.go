@@ -381,8 +381,14 @@ func (pool *LegacyPool) loop() {
 			for _, hash := range pool.queue.evictList() {
 				pool.removeTx(hash, true, true, "expired")
 			}
+			removed := pool.removed
+			removedReasons := pool.removedReasons
+			pool.removed = nil
+			pool.removedReasons = nil
 			pool.mu.Unlock()
-			pool.flushRemoved()
+			if len(removed) > 0 {
+				pool.removedFeed.Send(core.RemovedTxsEvent{Hashes: removed, Reasons: removedReasons})
+			}
 		}
 	}
 }
@@ -426,19 +432,6 @@ func (pool *LegacyPool) trackRemoved(hash common.Hash, reason string) {
 	pool.removedReasons = append(pool.removedReasons, reason)
 }
 
-// flushRemoved sends a RemovedTxsEvent for all accumulated removals and
-// resets the accumulator. Must be called WITHOUT pool.mu held (event.Feed.Send
-// blocks on subscribers).
-func (pool *LegacyPool) flushRemoved() {
-	if len(pool.removed) > 0 {
-		hashes := pool.removed
-		reasons := pool.removedReasons
-		pool.removed = nil
-		pool.removedReasons = nil
-		pool.removedFeed.Send(core.RemovedTxsEvent{Hashes: hashes, Reasons: reasons})
-	}
-}
-
 // SetGasTip updates the minimum gas tip required by the transaction pool for a
 // new transaction, and drops all transactions below this threshold.
 func (pool *LegacyPool) SetGasTip(tip *big.Int) {
@@ -458,9 +451,15 @@ func (pool *LegacyPool) SetGasTip(tip *big.Int) {
 		}
 		pool.priced.Removed(len(drop))
 	}
+	removed := pool.removed
+	removedReasons := pool.removedReasons
+	pool.removed = nil
+	pool.removedReasons = nil
 	pool.mu.Unlock()
 
-	pool.flushRemoved()
+	if len(removed) > 0 {
+		pool.removedFeed.Send(core.RemovedTxsEvent{Hashes: removed, Reasons: removedReasons})
+	}
 	log.Info("Legacy pool tip threshold updated", "tip", newTip)
 }
 
@@ -1313,6 +1312,12 @@ func (pool *LegacyPool) runReorg(done chan struct{}, reset *txpoolResetRequest, 
 
 	dropBetweenReorgHistogram.Update(int64(pool.changesSinceReorg))
 	pool.changesSinceReorg = 0 // Reset change counter
+	// Swap out removed accumulator under the lock to avoid racing with
+	// trackRemoved calls from concurrent Add operations.
+	removed := pool.removed
+	removedReasons := pool.removedReasons
+	pool.removed = nil
+	pool.removedReasons = nil
 	pool.mu.Unlock()
 
 	// Notify subsystems for newly added transactions
@@ -1330,7 +1335,9 @@ func (pool *LegacyPool) runReorg(done chan struct{}, reset *txpoolResetRequest, 
 		}
 		pool.txFeed.Send(core.NewTxsEvent{Txs: txs})
 	}
-	pool.flushRemoved()
+	if len(removed) > 0 {
+		pool.removedFeed.Send(core.RemovedTxsEvent{Hashes: removed, Reasons: removedReasons})
+	}
 }
 
 // reset retrieves the current state of the blockchain and ensures the content
