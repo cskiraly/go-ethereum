@@ -51,4 +51,8 @@ var (
 	txColdSize                   = metrics.NewRegisteredGauge("eth/txtracker/cold/size", nil)
 	txColdPromotedMeter          = metrics.NewRegisteredMeter("eth/txtracker/cold/promoted", nil)
 	txReturnedMeter              = metrics.NewRegisteredMeter("eth/txtracker/returned", nil)
+	txUnderpricedSize            = metrics.NewRegisteredGauge("eth/txtracker/underpriced/size", nil)
+	txUnderpricedAddedMeter      = metrics.NewRegisteredMeter("eth/txtracker/underpriced/added", nil)
+	txUnderpricedClearedMeter    = metrics.NewRegisteredMeter("eth/txtracker/underpriced/cleared", nil)
+	txUnderpricedFilteredMeter   = metrics.NewRegisteredMeter("eth/txtracker/underpriced/filtered", nil)
 )

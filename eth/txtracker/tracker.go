@@ -555,11 +555,20 @@ func (t *Tracker) IsUnderpriced(hash common.Hash) bool {
 	}
 	// Tip too low for the node's configured minimum.
 	if entry.tipCap.Cmp(t.minTip) < 0 {
+		txUnderpricedFilteredMeter.Mark(1)
 		return true
 	}
 	// Fee cap too low for the current base fee + minimum tip.
 	threshold := new(uint256.Int).Add(baseFee, t.minTip)
-	return entry.feeCap.Cmp(threshold) < 0
+	if entry.feeCap.Cmp(threshold) < 0 {
+		txUnderpricedFilteredMeter.Mark(1)
+		return true
+	}
+	// Conditions changed — tx is no longer underpriced. Clean up.
+	t.underpriced.Delete(hash)
+	txUnderpricedClearedMeter.Mark(1)
+	txUnderpricedSize.Dec(1)
+	return false
 }
 
 // GetPeerStats returns the transaction contribution statistics for a peer.
@@ -1286,7 +1295,10 @@ func (t *Tracker) bumpReturns(hash common.Hash, rec *txRecord, newStatus TxStatu
 		rec.returns++
 	}
 	txReturnedMeter.Mark(1)
-	t.underpriced.Delete(hash) // no longer underpriced — re-entered active state
+	if _, loaded := t.underpriced.LoadAndDelete(hash); loaded {
+		txUnderpricedClearedMeter.Mark(1)
+		txUnderpricedSize.Dec(1)
+	}
 
 	// Compute how long the transaction was in the terminal state.
 	// For rejected txs there is no dedicated timestamp; use received
@@ -1336,6 +1348,8 @@ func (t *Tracker) markUnderpriced(hash common.Hash, rec *txRecord) {
 		tipCap, _ := uint256.FromBig(rec.gasTipCap)
 		if feeCap != nil && tipCap != nil {
 			t.underpriced.Store(hash, underpricedEntry{feeCap: feeCap, tipCap: tipCap})
+			txUnderpricedAddedMeter.Mark(1)
+			txUnderpricedSize.Inc(1)
 		}
 	}
 }
@@ -1369,7 +1383,10 @@ func (t *Tracker) evictOldest() {
 	hash := t.evictList.Remove(back).(common.Hash)
 	rec := t.txs[hash]
 	delete(t.txs, hash)
-	t.underpriced.Delete(hash) // clean up if present
+	if _, loaded := t.underpriced.LoadAndDelete(hash); loaded {
+		txUnderpricedClearedMeter.Mark(1)
+		txUnderpricedSize.Dec(1)
+	}
 
 	// Compact and move to cold set if enabled.
 	if rec != nil && t.cold != nil {
