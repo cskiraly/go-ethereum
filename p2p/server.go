@@ -938,7 +938,7 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	c.caps, c.name = phs.Caps, phs.Name
 	err = srv.checkpoint(c, srv.checkpointAddPeer)
 	if err != nil {
-		clog.Trace("Rejected peer", "err", err)
+		clog.Trace("Rejected peer", "name", c.name, "err", err)
 		return err
 	}
 
