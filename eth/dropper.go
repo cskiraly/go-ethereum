@@ -42,10 +42,10 @@ const (
 	// dropping when no more peers can be added. Larger numbers result in more
 	// aggressive drop behavior.
 	peerDropThreshold = 0
-	// Fraction of total on-chain inclusions that protects a peer from being
-	// dropped. Peers contributing to the top inclusionProtectionPct% of
-	// inclusions are shielded.
-	inclusionProtectionPct = 80
+	// Fraction of inbound/dialed peers to protect based on inclusion stats.
+	// The top inclusionProtectionPct% of each category (by inclusion count)
+	// are shielded from random dropping.
+	inclusionProtectionPct = 10
 )
 
 var (
@@ -164,58 +164,60 @@ func (cm *dropper) dropRandomPeer() bool {
 	return true
 }
 
-// filterProtectedPeers removes peers from the droppable list that contribute
-// to the top inclusionProtectionPct% of on-chain inclusions. Returns the
-// filtered list.
+// filterProtectedPeers removes the top inclusionProtectionPct% of inbound
+// and dialed peers (by inclusion count) from the droppable list. This
+// ensures the most valuable peers in each category are shielded.
 func (cm *dropper) filterProtectedPeers(droppable []*p2p.Peer) []*p2p.Peer {
 	stats := cm.peerStatsFunc()
 	if len(stats) == 0 {
 		return droppable
 	}
-	// Compute total inclusions across all peers.
-	var totalIncluded int64
-	for _, s := range stats {
-		totalIncluded += s.Included
-	}
-	if totalIncluded == 0 {
-		return droppable // no inclusion data yet
-	}
-	// Sort peer IDs by Included descending.
-	type peerIncl struct {
-		id       string
+	// Split droppable peers into inbound and dialed, collecting inclusion
+	// counts from the tracker.
+	type peerEntry struct {
+		peer     *p2p.Peer
 		included int64
 	}
-	sorted := make([]peerIncl, 0, len(stats))
-	for id, s := range stats {
-		if s.Included > 0 {
-			sorted = append(sorted, peerIncl{id, s.Included})
+	var inbound, dialed []peerEntry
+	for _, p := range droppable {
+		id := p.ID().String()
+		incl := stats[id].Included
+		if p.Inbound() {
+			inbound = append(inbound, peerEntry{p, incl})
+		} else {
+			dialed = append(dialed, peerEntry{p, incl})
 		}
 	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].included > sorted[j].included
-	})
-	// Walk sorted list, accumulating until threshold reached.
-	threshold := totalIncluded * inclusionProtectionPct / 100
-	protected := make(map[string]struct{})
-	var accumulated int64
-	for _, pi := range sorted {
-		if accumulated >= threshold {
-			break
+	// Protect the top N peers in each category by inclusion count.
+	protectTop := func(entries []peerEntry, maxPeers int) map[*p2p.Peer]struct{} {
+		protected := make(map[*p2p.Peer]struct{})
+		n := maxPeers * inclusionProtectionPct / 100
+		if n == 0 || len(entries) == 0 {
+			return protected
 		}
-		protected[pi.id] = struct{}{}
-		accumulated += pi.included
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].included > entries[j].included
+		})
+		for i := 0; i < n && i < len(entries); i++ {
+			if entries[i].included > 0 {
+				protected[entries[i].peer] = struct{}{}
+			}
+		}
+		return protected
 	}
-	if len(protected) == 0 {
+	protectedSet := protectTop(inbound, cm.maxInboundPeers)
+	for p := range protectTop(dialed, cm.maxDialPeers) {
+		protectedSet[p] = struct{}{}
+	}
+	if len(protectedSet) == 0 {
 		return droppable
 	}
 	log.Debug("Protecting high-inclusion peers from drop",
-		"protected", len(protected), "droppable", len(droppable),
-		"threshold", threshold, "total", totalIncluded)
+		"protected", len(protectedSet), "droppable", len(droppable))
 
-	// Filter out protected peers.
-	result := droppable[:0]
+	result := make([]*p2p.Peer, 0, len(droppable))
 	for _, p := range droppable {
-		if _, ok := protected[p.ID().String()]; !ok {
+		if _, ok := protectedSet[p]; !ok {
 			result = append(result, p)
 		}
 	}

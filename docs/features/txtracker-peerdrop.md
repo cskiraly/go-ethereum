@@ -18,19 +18,21 @@ When the dropper fires (`dropRandomPeer`), after building the list of
 droppable peers (excluding trusted, static, and recent peers), it
 queries `txtracker.GetAllPeerStats()` and computes inclusion share:
 
-1. Sum `Included` across all peers to get `totalIncluded`
-2. Sort peers by `Included` descending
-3. Walk the sorted list, accumulating inclusions. Peers that together
-   account for the top 80% of inclusions are marked as protected.
-4. Remove protected peers from the droppable list
-5. Drop randomly from the remaining peers
+1. Split droppable peers into inbound and dialed categories
+2. For each category, sort by `Included` descending
+3. Protect the top N peers in each category, where
+   N = 10% of the category's max peer count
+4. Only peers with `Included > 0` are eligible for protection
+5. Remove protected peers from the droppable list
+6. Drop randomly from the remaining peers
 
 If all droppable peers are protected, the drop is skipped entirely.
 
 ## Configuration
 
-- `inclusionProtectionPct = 80` — the inclusion share threshold.
-  Peers contributing to the top 80% of inclusions are protected.
+- `inclusionProtectionPct = 10` — percentage of each peer category
+  (inbound / dialed) to protect. With default 50 peers, this protects
+  the top ~1-2 inbound and ~1-2 dialed peers by inclusion count.
 
 ## Metrics
 
