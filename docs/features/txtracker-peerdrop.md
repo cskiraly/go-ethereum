@@ -53,6 +53,54 @@ With default 50 peers (17 dialed, 33 inbound), each category protects
 ~1-2 dialed and ~3 inbound peers. The union means up to ~2-4 dialed
 and ~3-6 inbound peers are protected (fewer if sets overlap).
 
+## Future Protection Categories
+
+The `protectionCategories` slice is designed for easy extension. Each
+category only needs a scoring function and a percentage. Candidates:
+
+### Propagation speed
+
+**First announcer rate** — peers that are frequently the first to tell
+us about a tx are our fastest information source. Score:
+`FirstAnnouncer / Announced`. Protects peers at the edge of the
+network. Data already in `PeerStats`.
+
+**Delivery latency** — peers with the lowest request→delivery latency.
+Score: inverse of `AvgLatencyMs`. Fast responders are valuable for
+time-sensitive tx fetching. Data already in `PeerStats`.
+
+### Delivery quality
+
+**Useful delivery rate** — peers whose deliveries are actually accepted
+by the pool (not duplicates/already-known). Score:
+`UsefulDelivery / Delivered`. A peer with 95% useful rate is more
+bandwidth-efficient than one at 30%. Data already in `PeerStats`.
+
+**Low rejection rate** — inverse of `Rejected / Delivered`. Peers that
+rarely deliver txs our pool rejects are better curated sources. Data
+already in `PeerStats`.
+
+### Diversity
+
+**Client diversity** — protect at least one peer of each client type
+(Geth, Erigon, Nethermind, Besu, Reth). Different clients may have
+different tx propagation behavior and mempool policies. Client name
+is available from `PeerFullInfo.Name` via the p2p server. Unlike the
+other categories, this would be a binary selection (one per client
+type) rather than a top-N ranking.
+
+**Network diversity** — protect peers from different /16 subnets or
+ASNs. Reduces single-point-of-failure risk from network partitions.
+Remote address is available from `PeerFullInfo.Address`.
+
+### Uniqueness
+
+**Exclusive delivery rate** — fraction of a peer's included txs that
+no other peer delivered. If a peer is our only source for certain txs
+that end up on chain, losing them means losing those txs. Requires
+aggregating per-tx `announcers[]` and `deliverer` data across the
+tracker — not currently exposed as a scalar stat.
+
 ## Configuration
 
 - `inclusionProtectionPct = 10` — per-category percentage
