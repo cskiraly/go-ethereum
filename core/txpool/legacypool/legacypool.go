@@ -1075,38 +1075,32 @@ func (pool *LegacyPool) Has(hash common.Hash) bool {
 }
 
 // WouldBeUnderpriced reports whether a transaction with the given gas pricing
-// would be rejected as underpriced by the pool. Two-tier check:
-//   - Pool ≥50% full: compare against the worst tx in the price heaps (same
-//     logic as add()). This covers the normal case and the brief post-block
-//     window where the pool dips below 100% capacity.
-//   - Pool <50% full: fall back to a floor check (tipCap ≥ minTip AND
-//     feeCap ≥ baseFee + minTip). Prevents fetching txs that can't even
-//     cover gas, without requiring a meaningful heap comparison.
+// would be rejected as underpriced by the pool. Two checks:
+//
+//  1. Tip floor (always): tipCap must meet the node's configured minimum
+//     gas tip. This matches the pool's own ValidateTxBasics entry check.
+//  2. Heap comparison (pool ≥50% full): the tx must be better than the
+//     worst tx in the price heaps. Prevents re-fetching non-competitive
+//     txs even when the pool briefly dips below capacity after a block.
+//
+// Note: feeCap is NOT checked against baseFee because the pool accepts
+// txs with feeCap < baseFee (they queue waiting for base fee to drop).
 func (pool *LegacyPool) WouldBeUnderpriced(feeCap, tipCap *big.Int) bool {
 	pool.mu.RLock()
 	defer pool.mu.RUnlock()
 
-	tx := types.NewTx(&types.DynamicFeeTx{
-		GasFeeCap: feeCap,
-		GasTipCap: tipCap,
-	})
-	// When pool has enough transactions for a meaningful comparison,
-	// use the price heap directly.
-	half := (pool.config.GlobalSlots + pool.config.GlobalQueue) / 2
-	if uint64(pool.all.Slots()) >= half {
-		return pool.priced.Underpriced(tx)
-	}
-	// Pool is sparse — fall back to floor check.
-	minTip := pool.gasTip.Load()
-	if tipCap.Cmp(minTip.ToBig()) < 0 {
+	// Tip must meet the node's configured minimum.
+	if tipCap.Cmp(pool.gasTip.Load().ToBig()) < 0 {
 		return true
 	}
-	head := pool.currentHead.Load()
-	if head != nil && head.BaseFee != nil {
-		threshold := new(big.Int).Add(head.BaseFee, minTip.ToBig())
-		if feeCap.Cmp(threshold) < 0 {
-			return true
-		}
+	// When pool has enough transactions, compare against the worst.
+	half := (pool.config.GlobalSlots + pool.config.GlobalQueue) / 2
+	if uint64(pool.all.Slots()) >= half {
+		tx := types.NewTx(&types.DynamicFeeTx{
+			GasFeeCap: feeCap,
+			GasTipCap: tipCap,
+		})
+		return pool.priced.Underpriced(tx)
 	}
 	return false
 }
