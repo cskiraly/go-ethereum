@@ -19,11 +19,13 @@ package eth
 import (
 	mrand "math/rand"
 	"slices"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
+	"github.com/ethereum/go-ethereum/eth/txtracker"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/p2p"
@@ -40,6 +42,10 @@ const (
 	// dropping when no more peers can be added. Larger numbers result in more
 	// aggressive drop behavior.
 	peerDropThreshold = 0
+	// Fraction of total on-chain inclusions that protects a peer from being
+	// dropped. Peers contributing to the top inclusionProtectionPct% of
+	// inclusions are shielded.
+	inclusionProtectionPct = 80
 )
 
 var (
@@ -47,7 +53,13 @@ var (
 	droppedInbound = metrics.NewRegisteredMeter("eth/dropper/inbound", nil)
 	// droppedOutbound is the number of outbound peers dropped
 	droppedOutbound = metrics.NewRegisteredMeter("eth/dropper/outbound", nil)
+	// droppedProtected is the number of times a drop was skipped because
+	// all droppable peers were protected by inclusion share.
+	droppedProtected = metrics.NewRegisteredMeter("eth/dropper/protected", nil)
 )
+
+// Callback type to get per-peer transaction statistics.
+type getPeerStatsFunc func() map[string]txtracker.PeerStats
 
 // dropper monitors the state of the peer pool and makes changes as follows:
 //   - during sync the Downloader handles peer connections, so dropper is disabled
@@ -59,6 +71,7 @@ type dropper struct {
 	maxInboundPeers int // maximum number of inbound peers
 	peersFunc       getPeersFunc
 	syncingFunc     getSyncingFunc
+	peerStatsFunc   getPeerStatsFunc // optional: tx inclusion stats for protection
 
 	// peerDropTimer introduces churn if we are close to limit capacity.
 	// We handle Dialed and Inbound connections separately
@@ -88,10 +101,12 @@ func newDropper(maxDialPeers, maxInboundPeers int) *dropper {
 	return cm
 }
 
-// Start the dropper.
-func (cm *dropper) Start(srv *p2p.Server, syncingFunc getSyncingFunc) {
+// Start the dropper. peerStatsFunc is optional (nil disables inclusion
+// protection).
+func (cm *dropper) Start(srv *p2p.Server, syncingFunc getSyncingFunc, peerStatsFunc getPeerStatsFunc) {
 	cm.peersFunc = srv.Peers
 	cm.syncingFunc = syncingFunc
+	cm.peerStatsFunc = peerStatsFunc
 	cm.wg.Add(1)
 	go cm.loop()
 }
@@ -125,19 +140,86 @@ func (cm *dropper) dropRandomPeer() bool {
 	}
 
 	droppable := slices.DeleteFunc(peers, selectDoNotDrop)
-	if len(droppable) > 0 {
-		p := droppable[mrand.Intn(len(droppable))]
-		log.Debug("Dropping random peer", "inbound", p.Inbound(),
-			"id", p.ID(), "duration", common.PrettyDuration(p.Lifetime()), "peercountbefore", len(peers))
-		p.Disconnect(p2p.DiscUselessPeer)
-		if p.Inbound() {
-			droppedInbound.Mark(1)
-		} else {
-			droppedOutbound.Mark(1)
-		}
-		return true
+	if len(droppable) == 0 {
+		return false
 	}
-	return false
+	// Protect peers that contribute to the top inclusionProtectionPct%
+	// of on-chain transaction inclusions.
+	if cm.peerStatsFunc != nil {
+		droppable = cm.filterProtectedPeers(droppable)
+		if len(droppable) == 0 {
+			droppedProtected.Mark(1)
+			return false
+		}
+	}
+	p := droppable[mrand.Intn(len(droppable))]
+	log.Debug("Dropping random peer", "inbound", p.Inbound(),
+		"id", p.ID(), "duration", common.PrettyDuration(p.Lifetime()), "peercountbefore", len(peers))
+	p.Disconnect(p2p.DiscUselessPeer)
+	if p.Inbound() {
+		droppedInbound.Mark(1)
+	} else {
+		droppedOutbound.Mark(1)
+	}
+	return true
+}
+
+// filterProtectedPeers removes peers from the droppable list that contribute
+// to the top inclusionProtectionPct% of on-chain inclusions. Returns the
+// filtered list.
+func (cm *dropper) filterProtectedPeers(droppable []*p2p.Peer) []*p2p.Peer {
+	stats := cm.peerStatsFunc()
+	if len(stats) == 0 {
+		return droppable
+	}
+	// Compute total inclusions across all peers.
+	var totalIncluded int64
+	for _, s := range stats {
+		totalIncluded += s.Included
+	}
+	if totalIncluded == 0 {
+		return droppable // no inclusion data yet
+	}
+	// Sort peer IDs by Included descending.
+	type peerIncl struct {
+		id       string
+		included int64
+	}
+	sorted := make([]peerIncl, 0, len(stats))
+	for id, s := range stats {
+		if s.Included > 0 {
+			sorted = append(sorted, peerIncl{id, s.Included})
+		}
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].included > sorted[j].included
+	})
+	// Walk sorted list, accumulating until threshold reached.
+	threshold := totalIncluded * inclusionProtectionPct / 100
+	protected := make(map[string]struct{})
+	var accumulated int64
+	for _, pi := range sorted {
+		if accumulated >= threshold {
+			break
+		}
+		protected[pi.id] = struct{}{}
+		accumulated += pi.included
+	}
+	if len(protected) == 0 {
+		return droppable
+	}
+	log.Debug("Protecting high-inclusion peers from drop",
+		"protected", len(protected), "droppable", len(droppable),
+		"threshold", threshold, "total", totalIncluded)
+
+	// Filter out protected peers.
+	result := droppable[:0]
+	for _, p := range droppable {
+		if _, ok := protected[p.ID().String()]; !ok {
+			result = append(result, p)
+		}
+	}
+	return result
 }
 
 // randomDuration generates a random duration between min and max.
