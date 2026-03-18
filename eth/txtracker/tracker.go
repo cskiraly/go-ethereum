@@ -176,6 +176,8 @@ type peerStats struct {
 	// delivered by this peer).
 	reqLatencySum  time.Duration // Sum of request→receive durations
 	reqDeliveries  int64         // Count of such deliveries
+
+	recentIncluded float64 // EMA of per-block inclusions (alpha=0.05)
 }
 
 func (ps *peerStats) toPublic() PeerStats {
@@ -194,6 +196,7 @@ func (ps *peerStats) toPublic() PeerStats {
 		Dropped:          ps.dropped,
 		AvgLatencyMs:     avgLatencyMs,
 		LatencySamples:   ps.reqDeliveries,
+		RecentIncluded:   ps.recentIncluded,
 	}
 }
 
@@ -237,8 +240,9 @@ type PeerStats struct {
 	Finalized      int64
 	Rejected       int64
 	Dropped        int64
-	AvgLatencyMs   int64 // Average request→delivery latency in ms (0 if no samples)
-	LatencySamples int64 // Number of request→delivery measurements
+	AvgLatencyMs   int64   // Average request→delivery latency in ms (0 if no samples)
+	LatencySamples int64   // Number of request→delivery measurements
+	RecentIncluded float64 // EMA of per-block inclusions (alpha=0.05)
 }
 
 // TrackerStats is the public snapshot of tracker-wide statistics.
@@ -986,6 +990,9 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 	t.checkFinalization()
 
 	// Mark all transactions in the block as included.
+	// Track per-peer inclusions for the EMA update below.
+	blockIncl := make(map[string]int)
+
 	for _, tx := range ev.Transactions {
 		hash := tx.Hash()
 
@@ -1046,9 +1053,17 @@ func (t *Tracker) handleChainEvent(ev core.ChainEvent) {
 			if rec.deliverer != "" {
 				if ps := t.peers[rec.deliverer]; ps != nil {
 					ps.included++
+					blockIncl[rec.deliverer]++
 				}
 			}
 		}
+	}
+	// Update per-peer recent-inclusion EMA for all tracked peers.
+	// Peers with inclusions in this block get a positive signal;
+	// all others decay toward zero.
+	const emaAlpha = 0.05
+	for peer, ps := range t.peers {
+		ps.recentIncluded = (1-emaAlpha)*ps.recentIncluded + emaAlpha*float64(blockIncl[peer])
 	}
 }
 

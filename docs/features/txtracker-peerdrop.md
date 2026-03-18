@@ -28,11 +28,35 @@ queries `txtracker.GetAllPeerStats()` and computes inclusion share:
 
 If all droppable peers are protected, the drop is skipped entirely.
 
+## Protection Categories
+
+The dropper supports multiple protection categories. Each independently
+selects its top-N peers per inbound/dialed pool; the union of all
+selections is protected.
+
+**1. Total inclusions** (`total-included`)
+Score: `PeerStats.Included` (cumulative count).
+Favors long-lived, consistently productive peers.
+
+**2. Recent inclusions** (`recent-included`)
+Score: `PeerStats.RecentIncluded` (EMA, alpha=0.05).
+Updated per block for all tracked peers:
+```
+peer.recentIncluded = 0.95 * peer.recentIncluded + 0.05 * blockInclusions
+```
+Favors peers delivering txs that make it on-chain in recent blocks.
+A newly productive peer gets protection faster than with total count.
+An inactive peer's score decays toward zero over ~20 blocks.
+
+Each category protects the top 10% of each pool (inbound / dialed).
+With default 50 peers (17 dialed, 33 inbound), each category protects
+~1-2 dialed and ~3 inbound peers. The union means up to ~2-4 dialed
+and ~3-6 inbound peers are protected (fewer if sets overlap).
+
 ## Configuration
 
-- `inclusionProtectionPct = 10` — percentage of each peer category
-  (inbound / dialed) to protect. With default 50 peers, this protects
-  the top ~1-2 inbound and ~1-2 dialed peers by inclusion count.
+- `inclusionProtectionPct = 10` — per-category percentage
+- `emaAlpha = 0.05` — EMA smoothing factor (in handleChainEvent)
 
 ## Metrics
 
