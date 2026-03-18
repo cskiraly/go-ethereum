@@ -101,6 +101,32 @@ that end up on chain, losing them means losing those txs. Requires
 aggregating per-tx `announcers[]` and `deliverer` data across the
 tracker — not currently exposed as a scalar stat.
 
+## Adversarial Analysis
+
+How easy is it for an attacker to get their peer protected?
+
+| Category | Gameability | Key risk |
+|---|---|---|
+| Total inclusions | **Hard** | Requires block building — can't fake on-chain inclusion |
+| Recent inclusions EMA | **Hard** | Same — requires actual block production |
+| First announcer rate | **Easy** | Garbage hash announcements inflate the count; needs weighting by whether the tx was actually useful |
+| Delivery latency | **Medium** | Favors co-location (same datacenter); hurts network diversity |
+| Useful delivery rate | **Easy** | Low-volume cherry-picking (5/5 = 100%); needs minimum delivery threshold |
+| Low rejection rate | **Easy** | Same — trivial with low volume; needs minimum threshold |
+| Client diversity | **Trivial** | Client name is self-reported in devp2p handshake; anyone can claim to be any client |
+| Network diversity | **Medium** | Cloud IPs in different subnets are cheap |
+| Exclusive delivery | **Hard** if combined with inclusions | Self-created spam txs are exclusive but not included; must require on-chain inclusion |
+
+**Safest categories**: inclusion-based (total + EMA) and exclusive
+delivery combined with inclusions. These require actual block
+production to game, which has real economic cost.
+
+**Rate-based categories** (first announcer, useful rate, rejection
+rate) need minimum volume floors to prevent low-volume gaming.
+
+**Self-reported data** (client name) should not be trusted for
+protection decisions.
+
 ## Configuration
 
 - `inclusionProtectionPct = 10` — per-category percentage
