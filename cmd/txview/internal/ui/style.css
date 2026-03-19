@@ -263,6 +263,7 @@ header h1 {
 .peers-col-first          { width: 110px; flex-shrink: 0; text-align: right; }
 .peers-col-included       { width: 100px; flex-shrink: 0; text-align: right; }
 .peers-col-finalized      { width: 100px; flex-shrink: 0; text-align: right; }
+.peers-col-recent-incl    { width: 70px;  flex-shrink: 0; text-align: right; }
 .peers-col-latency        { width: 70px;  flex-shrink: 0; text-align: right; }
 .peers-col-useful-pct     { width: 90px;  flex-shrink: 0; text-align: right; }
 .peers-col-first-pct      { width: 90px;  flex-shrink: 0; text-align: right; }
