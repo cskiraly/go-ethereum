@@ -43,9 +43,9 @@ const (
 	// aggressive drop behavior.
 	peerDropThreshold = 0
 	// Fraction of inbound/dialed peers to protect based on inclusion stats.
-	// The top inclusionProtectionPct% of each category (by inclusion count)
-	// are shielded from random dropping.
-	inclusionProtectionPct = 10
+	// The top inclusionProtectionFrac of each category (by inclusion count)
+	// are shielded from random dropping. 0.1 = top 10%.
+	inclusionProtectionFrac = 0.1
 )
 
 var (
@@ -169,15 +169,15 @@ func (cm *dropper) dropRandomPeer() bool {
 type protectionCategory struct {
 	name  string
 	score func(txtracker.PeerStats) float64
-	pct   int // percentage of max peers to protect
+	frac  float64 // fraction of max peers to protect (0.0–1.0)
 }
 
 // protectionCategories is the list of protection criteria applied by the
 // dropper. Each category independently selects its top-N peers per
 // inbound/dialed pool; the union of all selections is protected.
 var protectionCategories = []protectionCategory{
-	{"total-included", func(s txtracker.PeerStats) float64 { return float64(s.Included) }, inclusionProtectionPct},
-	{"recent-included", func(s txtracker.PeerStats) float64 { return s.RecentIncluded }, inclusionProtectionPct},
+	{"total-included", func(s txtracker.PeerStats) float64 { return float64(s.Included) }, inclusionProtectionFrac},
+	{"recent-included", func(s txtracker.PeerStats) float64 { return s.RecentIncluded }, inclusionProtectionFrac},
 }
 
 // filterProtectedPeers removes peers from the droppable list that are
@@ -208,7 +208,7 @@ func (cm *dropper) filterProtectedPeers(droppable []*p2p.Peer) []*p2p.Peer {
 	protectedSet := make(map[*p2p.Peer]struct{})
 
 	protectTopN := func(entries []peerWithStats, maxPeers int, cat protectionCategory) {
-		n := maxPeers * cat.pct / 100
+		n := int(float64(maxPeers) * cat.frac)
 		if n == 0 || len(entries) == 0 {
 			return
 		}
