@@ -817,6 +817,12 @@ func (t *Tracker) handleFetchRequested(ev *fetchRequestedEvent) {
 			rec.requestedFrom = ev.peer
 			t.touchLRU(rec)
 			t.emitEvent(hash, oldStatus, TxRequested, rec, ev.peer)
+		} else if rec.status == TxRequested {
+			// Re-request to a different peer (retry after timeout).
+			// Update the request timestamp and peer so latency tracking
+			// measures the most recent request, not the original.
+			rec.requested = now
+			rec.requestedFrom = ev.peer
 		}
 	}
 }
