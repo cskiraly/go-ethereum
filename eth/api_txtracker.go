@@ -18,6 +18,7 @@ package eth
 
 import (
 	"context"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/eth/txtracker"
@@ -59,9 +60,10 @@ func (api *TxTrackerAPI) GetAllPeerStats() map[string]txtracker.PeerStats {
 // PeerFullInfo combines tracker statistics with P2P identity for a peer.
 type PeerFullInfo struct {
 	txtracker.PeerStats
-	Name    string `json:"name,omitempty"`
-	Address string `json:"address,omitempty"`
-	Inbound bool   `json:"inbound,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Address  string `json:"address,omitempty"`
+	Inbound  bool   `json:"inbound,omitempty"`
+	Lifetime int64  `json:"lifetime"` // seconds since connection
 }
 
 // GetAllPeerInfo returns tracker stats merged with P2P identity for all peers.
@@ -71,18 +73,20 @@ func (api *TxTrackerAPI) GetAllPeerInfo() map[string]*PeerFullInfo {
 	for id, s := range stats {
 		result[id] = &PeerFullInfo{PeerStats: s}
 	}
-	// Merge P2P identity from connected peers. Also include peers that
-	// have no tracker stats yet (just connected, or no tx activity).
+	// Merge P2P identity and lifetime from connected peers. Uses
+	// Server.Peers() instead of PeersInfo() to access Lifetime().
 	if api.server != nil {
-		for _, p := range api.server.PeersInfo() {
-			fi, ok := result[p.ID]
+		for _, p := range api.server.Peers() {
+			id := p.ID().String()
+			fi, ok := result[id]
 			if !ok {
 				fi = &PeerFullInfo{}
-				result[p.ID] = fi
+				result[id] = fi
 			}
-			fi.Name = p.Name
-			fi.Address = p.Network.RemoteAddress
-			fi.Inbound = p.Network.Inbound
+			fi.Name = p.Fullname()
+			fi.Address = p.RemoteAddr().String()
+			fi.Inbound = p.Inbound()
+			fi.Lifetime = int64(p.Lifetime()) / int64(time.Second)
 		}
 	}
 	return result

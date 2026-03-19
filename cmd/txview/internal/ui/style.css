@@ -256,6 +256,7 @@ header h1 {
 .peers-col-client         { width: 130px; flex-shrink: 0; }
 .peers-col-addr           { width: 140px; flex-shrink: 0; }
 .peers-col-dir            { width: 40px;  flex-shrink: 0; text-align: center; }
+.peers-col-lifetime       { width: 70px;  flex-shrink: 0; text-align: right; }
 .peers-col-announced      { width: 100px; flex-shrink: 0; text-align: right; }
 .peers-col-delivered      { width: 100px; flex-shrink: 0; text-align: right; }
 .peers-col-useful         { width: 100px; flex-shrink: 0; text-align: right; }
