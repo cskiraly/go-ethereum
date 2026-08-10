@@ -266,6 +266,28 @@ func TestNewPeer(t *testing.T) {
 	p.Disconnect(DiscAlreadyConnected) // Should not hang
 }
 
+// TestPeerInfoLifetime verifies that Peer.Info() reports a positive
+// Lifetime, mirroring the existing Peer.Lifetime() helper. Consumers
+// (admin_peers UIs, mempool-lens) need this so they can render
+// peer-uptime without tracking first-seen client-side.
+func TestPeerInfoLifetime(t *testing.T) {
+	p := NewPeer(randomID(), "nodename", nil)
+	defer p.Disconnect(DiscAlreadyConnected)
+
+	// A short sleep guarantees Lifetime() is strictly above zero
+	// regardless of clock resolution; we only assert positivity.
+	time.Sleep(time.Millisecond)
+
+	info := p.Info()
+	if info.Lifetime <= 0 {
+		t.Errorf("expected Info.Lifetime > 0, got %v", info.Lifetime)
+	}
+	// Sanity: Info.Lifetime should be at least the slept duration.
+	if info.Lifetime < time.Millisecond {
+		t.Errorf("expected Info.Lifetime ≥ 1ms, got %v", info.Lifetime)
+	}
+}
+
 func TestMatchProtocols(t *testing.T) {
 	tests := []struct {
 		Remote []Cap

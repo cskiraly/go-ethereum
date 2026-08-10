@@ -555,6 +555,7 @@ type PeerInfo struct {
 		Static        bool   `json:"static"`
 	} `json:"network"`
 	Protocols map[string]interface{} `json:"protocols"` // Sub-protocol specific metadata fields
+	Lifetime  time.Duration          `json:"lifetime"`  // Time since the connection was established (nanoseconds)
 }
 
 // Info gathers and returns a collection of metadata known about a peer.
@@ -580,6 +581,11 @@ func (p *Peer) Info() *PeerInfo {
 	info.Network.Inbound = p.rw.is(inboundConn)
 	info.Network.Trusted = p.rw.is(trustedConn)
 	info.Network.Static = p.rw.is(staticDialedConn)
+	// Lifetime() returns mclock.AbsTime delta since p.created (a
+	// monotonic point), which is just nanoseconds and converts cleanly
+	// to time.Duration. Wall-clock isn't needed here — the duration is
+	// what consumers (admin_peers UIs, mempool-lens) want to render.
+	info.Lifetime = time.Duration(p.Lifetime())
 
 	// Gather all the running protocol infos
 	for _, proto := range p.running {
