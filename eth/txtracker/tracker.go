@@ -14,22 +14,52 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package txtracker maps accepted transactions to their delivering peer
-// and observes chain-head and finalization events to emit per-block
-// per-peer signals to a StatsConsumer (typically eth/peerstats).
+// Package txtracker tracks the hot lifecycle of transactions observed by the
+// node and exposes a per-tx event stream.
 //
-// The tracker owns the tx-hash → deliverer mapping with FIFO eviction,
-// a chain-head subscription goroutine, and the computation of per-block
-// inclusion counts and finalization credits. It does NOT maintain
-// per-peer aggregates — that is peerstats' job.
+// Two levels of events are offered:
+//
+//   - Observations (Level 1) — raw per-tx facts. Every wire-, pool-, or
+//     chain-level thing that mentions a tx hash produces exactly one
+//     Observation. Multiple observations of the same kind can fire for a
+//     single tx (e.g. 5 inbound announcements). Subscribe via
+//     SubscribeObservations.
+//
+//   - StateChanges (Level 2) — derived transitions of a tx's TxStatus
+//     state machine. At most one StateChange per forward transition;
+//     deduplicated. Subscribe via SubscribeStateChanges.
+//
+// The tracker's internal state machine consumes observations and produces
+// state changes; both are emitted on separate feeds. A hot per-tx snapshot
+// (TxInfo) is queryable via GetTx.
+//
+// Public API (producers):
+//   - NotifyAnnounced(peer, hashes, types, sizes) — peer advertised to us
+//   - NotifyAnnouncedOutbound(peer, hashes)   — we advertised to peer
+//   - NotifyFetchRequested(peer, hashes)      — we sent GetPooledTransactions
+//   - NotifyRequestedInbound(peer, hashes)    — we served a peer request
+//   - NotifyReceived(peer, hashes)            — body arrived (any source)
+//   - NotifyDeliveredOutbound(peer, hashes)   — we sent a body to peer
+//   - NotifyAccepted(peer, hashes)            — pool accepted
+//   - NotifyRejected(peer, hash, err)         — pool rejected on submit
+//   - NotifyDropped(hash, reason)             — pool evicted after accept
+//
+// Public API (consumers):
+//   - SubscribeObservations(ch) event.Subscription
+//   - SubscribeStateChanges(ch) event.Subscription
+//   - GetTx(hash) *TxInfo
+//   - ObsDropped(), StateDropped() uint64  (diagnostics)
+//
+// The tracker keeps state in memory only — no persistent storage.
 package txtracker
 
 import (
+	"math/big"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/lru"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
@@ -37,8 +67,14 @@ import (
 )
 
 const (
-	// Maximum number of tx→deliverer mappings to retain.
-	maxTracked = 262144
+	// Default maximum number of tx→TxInfo entries to retain. Tests can
+	// override via Tracker.SetMaxTracked.
+	defaultMaxTracked = 262144
+	// emitBuffer is the capacity of each internal emit channel used to
+	// decouple event emission from subscribers. Events are dropped (with
+	// the per-feed dropped counter incremented) if subscribers can't
+	// keep up.
+	emitBuffer = 4096
 )
 
 // Chain is the blockchain interface needed by the tracker.
@@ -49,114 +85,816 @@ type Chain interface {
 	CurrentFinalBlock() *types.Header
 }
 
-// StatsConsumer receives per-block signals about peer inclusion and
-// finalization. The tracker invokes NotifyBlock exactly once per handled chain
-// head, AFTER releasing its own lock, with:
-//
-//   - inclusions: per-peer count of transactions in the head block
-//   - finalized:  per-peer count of transactions in blocks that became
-//     finalized since the previous call (possibly zero-range)
-//
-// Either map may be empty but the map itself is never nil when called.
-// NotifyBlock must not call back into the tracker.
+// StatsConsumer receives per-block peer signals from the tracker.
+// NotifyBlock fires exactly once per handled chain head with per-peer
+// inclusion / finalization deltas, AFTER the tracker has released its
+// lock so the consumer can take its own locks safely.
 type StatsConsumer interface {
 	NotifyBlock(inclusions, finalized map[string]int)
 }
 
-// TxInfo records the per-transaction state the tracker maintains.
-//
-// Deliverer is the peer that first handed us this tx via NotifyAccepted.
-// AddedAt is the unix-seconds wall-clock at that moment; it is compared
-// against block.Time() to suppress credit for txs delivered at or after
-// the slot of their inclusion block (re-broadcasts of just-mined txs).
-//
-// BlockNum / BlockHash are populated when the tracker first sees the tx
-// in a head block (BlockNum == 0 means not yet seen on chain). BlockHash
-// is re-checked against canonical-at-height at finalization time so
-// reorgs do not yield credit.
-type TxInfo struct {
-	Deliverer string
-	AddedAt   uint64
-	BlockNum  uint64
-	BlockHash common.Hash
-}
-
-// Tracker records which peer delivered each transaction and emits
-// per-block inclusion and finalization signals to a StatsConsumer.
+// Tracker records per-tx lifecycle state, emits observations and state
+// changes on two distinct feeds, and drives per-block peer-credit signals
+// to a StatsConsumer.
 type Tracker struct {
-	mu  sync.Mutex
-	txs lru.BasicLRU[common.Hash, *TxInfo] // tx hash -> tx info with lru eviction
+	mu         sync.Mutex
+	txs        map[common.Hash]*TxInfo // current per-tx hot state
+	order      []common.Hash           // insertion order for FIFO eviction
+	maxTracked int                     // FIFO cap; defaults to defaultMaxTracked
 
 	chain        Chain
 	consumer     StatsConsumer
-	lastFinalNum uint64 // last finalized block number processed
+	lastFinalNum uint64      // last finalized block number processed
+	lastHeadHash common.Hash // last chain-head hash processed (for reorg detection)
+	lastHeadNum  uint64      // height of lastHeadHash
 	headCh       chan core.ChainHeadEvent
 	sub          event.Subscription
 
+	// Level 1 — raw observations
+	obsFeed    event.Feed
+	obsCh      chan Observation
+	obsDropped uint64
+
+	// Level 2 — derived state transitions
+	stateFeed    event.Feed
+	stateCh      chan StateChange
+	stateDropped uint64
+
+	// FIFO-eviction histogram: index = TxStatus (uint8). Incremented
+	// when an entry leaves t.txs because the hot map exceeds
+	// maxTracked. Bucket-0 (StatusUnknown) is reserved for
+	// completeness — a tracked entry should never be at Unknown.
+	evictedByStatus [9]uint64
+
+	emitQuit chan struct{} // signals both emit loops to stop
+
 	quit     chan struct{}
-	stopOnce sync.Once
-	step     chan struct{} // test sync: sent after each event is processed
-	now      func() uint64 // unix-seconds clock; overridable in tests
+	stopOnce sync.Once     // makes Stop idempotent and safe before Start
+	step     chan struct{} // test sync: sent after each chain-head event is processed
 	wg       sync.WaitGroup
 }
 
 // New creates a new tracker.
 func New() *Tracker {
-	return &Tracker{
-		txs:  lru.NewBasicLRU[common.Hash, *TxInfo](maxTracked),
-		quit: make(chan struct{}),
-		step: make(chan struct{}, 1),
-		now:  func() uint64 { return uint64(time.Now().Unix()) },
+	t := &Tracker{
+		txs:        make(map[common.Hash]*TxInfo),
+		maxTracked: defaultMaxTracked,
+		obsCh:      make(chan Observation, emitBuffer),
+		stateCh:    make(chan StateChange, emitBuffer),
+		emitQuit:   make(chan struct{}),
+		quit:       make(chan struct{}),
+		step:       make(chan struct{}, 1),
 	}
+	return t
 }
 
-// Start begins listening for chain head events. `consumer` receives
-// per-block signals; if nil, signals are computed but discarded
-// (useful in tests that exercise only the tx-lifecycle surface).
+// setMaxTracked overrides the FIFO cap; intended for tests that need
+// to exercise the eviction path without pushing the full default cap
+// through. Must be called before any Notify* path runs concurrently.
+func (t *Tracker) setMaxTracked(n int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if n < 1 {
+		n = 1
+	}
+	t.maxTracked = n
+}
+
+// SubscribeObservations returns a subscription that delivers every raw
+// Observation (Level 1) the tracker emits.
+func (t *Tracker) SubscribeObservations(ch chan<- Observation) event.Subscription {
+	return t.obsFeed.Subscribe(ch)
+}
+
+// SubscribeStateChanges returns a subscription that delivers every Level 2
+// StateChange (state-machine transition) the tracker emits.
+func (t *Tracker) SubscribeStateChanges(ch chan<- StateChange) event.Subscription {
+	return t.stateFeed.Subscribe(ch)
+}
+
+// ObsDropped returns the number of Observations dropped due to a full
+// emit buffer.
+func (t *Tracker) ObsDropped() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.obsDropped
+}
+
+// StateDropped returns the number of StateChanges dropped due to a full
+// emit buffer.
+func (t *Tracker) StateDropped() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.stateDropped
+}
+
+// EvictedByStatus returns a copy of the FIFO-eviction histogram keyed
+// by TxStatus. Each bucket is the cumulative number of tracked txs
+// that left the hot map at that status because the map exceeded
+// maxTracked. The slot for StatusUnknown is reserved and should
+// always be zero in practice.
+func (t *Tracker) EvictedByStatus() [9]uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.evictedByStatus
+}
+
+// Start begins listening for chain head events and starts the event
+// forwarders. `consumer` receives per-block peer-credit signals; if nil,
+// signals are computed but discarded.
 func (t *Tracker) Start(chain Chain, consumer StatsConsumer) {
 	t.chain = chain
 	t.consumer = consumer
-	// Seed lastFinalNum so checkFinalization doesn't backfill from genesis.
+	// Seed lastFinalNum so collectFinalization doesn't backfill from genesis.
 	if fh := chain.CurrentFinalBlock(); fh != nil {
 		t.lastFinalNum = fh.Number.Uint64()
 	}
-	t.headCh = make(chan core.ChainHeadEvent, 128)
+	// Buffer chain-head events generously: event.Feed.Send blocks
+	// when a subscriber's channel is full, which would back-pressure
+	// into the chain's block-insertion path. handleChainHead is fast
+	// post-A (collectFinalization no longer walks blocks) but the
+	// larger buffer adds defence in depth against a stall during
+	// catch-up bursts after a long downtime.
+	t.headCh = make(chan core.ChainHeadEvent, 4096)
 	t.sub = chain.SubscribeChainHeadEvent(t.headCh)
-	t.wg.Add(1)
+	t.wg.Add(3)
 	go t.loop()
+	go t.obsEmitLoop()
+	go t.stateEmitLoop()
 }
 
 // Stop shuts down the tracker.
 func (t *Tracker) Stop() {
 	t.stopOnce.Do(func() {
+		// sub is nil if Stop races ahead of Start (or Start was never
+		// called); guard so teardown on an error path can't panic.
 		if t.sub != nil {
 			t.sub.Unsubscribe()
 		}
 		close(t.quit)
+		close(t.emitQuit)
 	})
 	t.wg.Wait()
 }
 
-// NotifyAccepted records that a peer delivered transactions that were accepted
-// by the pool. Only accepted (not rejected/duplicate) txs should be recorded
-// to prevent attribution poisoning from replayed or invalid txs.
-// Safe to call from any goroutine.
-func (t *Tracker) NotifyAccepted(peer string, hashes []common.Hash) {
+// GetTx returns a snapshot of the tracked state for a tx, or nil if it is
+// not currently tracked (never observed, or evicted). Safe to call from
+// any goroutine.
+func (t *Tracker) GetTx(hash common.Hash) *TxInfo {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	ti, ok := t.txs[hash]
+	if !ok {
+		return nil
+	}
+	out := *ti
+	if len(ti.Announcers) > 0 {
+		out.Announcers = append([]string(nil), ti.Announcers...)
+	}
+	if ti.GasFeeCap != nil {
+		out.GasFeeCap = (*hexutil.Big)(new(big.Int).Set((*big.Int)(ti.GasFeeCap)))
+	}
+	if ti.GasTipCap != nil {
+		out.GasTipCap = (*hexutil.Big)(new(big.Int).Set((*big.Int)(ti.GasTipCap)))
+	}
+	if ti.Value != nil {
+		out.Value = (*hexutil.Big)(new(big.Int).Set((*big.Int)(ti.Value)))
+	}
+	if ti.To != nil {
+		to := *ti.To
+		out.To = &to
+	}
+	return &out
+}
 
-	addedAt := t.now()
-	for _, hash := range hashes {
-		if t.txs.Contains(hash) {
-			continue // already tracked, keep first deliverer
+//
+// Producer methods — each records an atomic fact (Observation) and
+// optionally drives a state-machine transition (StateChange).
+//
+
+// NotifyAnnounced records that a peer advertised each of the hashes to us
+// (inbound). Every call produces an ObsAnnouncedInbound observation for
+// each hash, even when the hash has been announced before. The first
+// inbound announcement per hash transitions the tx to StatusAnnounced.
+// Safe to call from any goroutine.
+//
+// types and sizes are parallel slices to hashes carrying the eth/68
+// NewPooledTransactionHashes metadata. When their lengths match
+// hashes the tracker stashes TxType and TxSize on the TxInfo for each
+// hash that doesn't already have them, so consumers see the type
+// before any body arrives. Pass nil/nil to skip metadata population
+// (legacy callers, tests).
+func (t *Tracker) NotifyAnnounced(peer string, hashes []common.Hash, types []byte, sizes []uint32) {
+	t.notifyAnnouncedHashes(peer, hashes, types, sizes)
+}
+
+// NotifyAnnouncedOutbound records that we advertised each of the hashes to
+// a peer. Emits ObsAnnouncedOutbound; never drives a state transition. Not yet wired
+// into the eth handler — reserved for outbound-observation wiring.
+func (t *Tracker) NotifyAnnouncedOutbound(peer string, hashes []common.Hash) {
+	t.notifyPeerHashes(peer, hashes, ObsAnnouncedOutbound)
+}
+
+// NotifyFetchRequested records that we sent a GetPooledTransactions to the
+// peer for these hashes. Drives the transition into StatusRequested the
+// first time we request a given hash.
+func (t *Tracker) NotifyFetchRequested(peer string, hashes []common.Hash) {
+	t.notifyPeerHashes(peer, hashes, ObsRequestedOutbound)
+}
+
+// NotifyRequestedInbound records that a peer asked us for these hashes
+// (we then serve them). Pure observation; no state transition. Not yet wired
+// into the eth handler — reserved for outbound-observation wiring.
+func (t *Tracker) NotifyRequestedInbound(peer string, hashes []common.Hash) {
+	t.notifyPeerHashes(peer, hashes, ObsRequestedInbound)
+}
+
+// NotifyReceived records that we received tx bodies from a peer
+// (direct reply, broadcast, or cache hit). Does not imply pool
+// acceptance. Body-derived fields on TxInfo (TxType, TxSize, From,
+// Nonce, Gas, GasFeeCap, GasTipCap, Value, To) are populated on first
+// receipt; subsequent calls leave them as-is.
+func (t *Tracker) NotifyReceived(peer string, txs []*types.Transaction) {
+	if len(txs) == 0 {
+		return
+	}
+	now := time.Now()
+
+	observations := make([]Observation, 0, len(txs))
+	var changes []StateChange
+
+	t.mu.Lock()
+	for _, tx := range txs {
+		if tx == nil {
+			continue
 		}
-		t.txs.Add(hash, &TxInfo{Deliverer: peer, AddedAt: addedAt})
+		hash := tx.Hash()
+		ti := t.ensureInfo(hash, now)
+		fillTxBody(ti, tx)
+		t.applyPerEventBookkeeping(ti, ObsDeliveredInbound, peer)
+		obs := t.buildObservation(ti, ObsDeliveredInbound, now, peer, 0, common.Hash{}, "")
+		observations = append(observations, obs)
+		if ch, ok := t.maybeTransition(ti, obs, now, peer); ok {
+			changes = append(changes, ch)
+		}
+	}
+	t.evict()
+	obsDrops := t.obsDropped
+	stateDrops := t.stateDropped
+	t.mu.Unlock()
+
+	t.emitObservations(observations, &obsDrops)
+	t.emitStateChanges(changes, &stateDrops)
+
+	t.mu.Lock()
+	t.obsDropped = obsDrops
+	t.stateDropped = stateDrops
+	t.mu.Unlock()
+
+}
+
+// NotifyDeliveredOutbound records that we sent a tx body to a peer.
+// Pure observation; no state transition. Not yet wired
+// into the eth handler — reserved for outbound-observation wiring.
+func (t *Tracker) NotifyDeliveredOutbound(peer string, hashes []common.Hash) {
+	t.notifyPeerHashes(peer, hashes, ObsDeliveredOutbound)
+}
+
+// NotifyLocalSubmitted records that the local node accepted a tx into
+// the pool from a non-peer ingress (e.g. eth_sendTransaction /
+// eth_sendRawTransaction). Body-derived fields on TxInfo are populated
+// from the supplied tx, ti.Local is set to true, and the state machine
+// is driven straight to StatusPooled via an ObsPoolAccepted observation
+// with peer="" — Deliverer is NOT credited (the tx originated locally,
+// not from a peer).
+//
+// This complements the peer-driven NotifyAccepted path: for txs that
+// flow through fetcher.deliverTransactions the fetcher's onAccepted
+// callback fires NotifyAccepted with the originating peer. Local
+// submissions bypass the fetcher entirely (internal/ethapi → txpool.Add)
+// so this method is the only way the tracker observes them.
+func (t *Tracker) NotifyLocalSubmitted(txs []*types.Transaction) {
+	if len(txs) == 0 {
+		return
+	}
+	now := time.Now()
+
+	observations := make([]Observation, 0, len(txs))
+	var changes []StateChange
+
+	t.mu.Lock()
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		hash := tx.Hash()
+		ti := t.ensureInfo(hash, now)
+		fillTxBody(ti, tx)
+		ti.Local = true
+		obs := t.buildObservation(ti, ObsPoolAccepted, now, "", 0, common.Hash{}, "")
+		observations = append(observations, obs)
+		if ch, ok := t.maybeTransition(ti, obs, now, ""); ok {
+			changes = append(changes, ch)
+		}
+	}
+	t.evict()
+	obsDrops := t.obsDropped
+	stateDrops := t.stateDropped
+	t.mu.Unlock()
+
+	t.emitObservations(observations, &obsDrops)
+	t.emitStateChanges(changes, &stateDrops)
+
+	t.mu.Lock()
+	t.obsDropped = obsDrops
+	t.stateDropped = stateDrops
+	t.mu.Unlock()
+}
+
+// NotifyAccepted records that the tx pool accepted each hash as delivered
+// by peer. Transitions the tx to StatusPooled and attributes peer as the
+// deliverer for per-peer credit on subsequent inclusions.
+func (t *Tracker) NotifyAccepted(peer string, hashes []common.Hash) {
+	t.notifyPeerHashes(peer, hashes, ObsPoolAccepted)
+}
+
+// NotifyRejected records that the tx pool rejected a single tx on
+// submission (err as returned by pool.Add). Transitions to
+// StatusRejected with the error text as the reason.
+func (t *Tracker) NotifyRejected(peer string, hash common.Hash, err error) {
+	reason := ""
+	if err != nil {
+		reason = err.Error()
+	}
+	t.notifyHashReason(peer, hash, reason, ObsPoolRejected)
+}
+
+// NotifyDropped records that a previously-accepted tx was removed from
+// the pool. Transitions to StatusDropped. No-op if the hash is unknown.
+func (t *Tracker) NotifyDropped(hash common.Hash, reason core.RemovalReason) {
+	t.notifyHashReason("", hash, reason.String(), ObsPoolEvicted)
+}
+
+// notifyPeerHashes is the shared implementation for multi-hash,
+// peer-driven observation kinds. It locks once for the whole batch,
+// builds observations + possibly state changes under the lock, then
+// emits them after unlocking so the event feeds can't stall the caller.
+func (t *Tracker) notifyPeerHashes(peer string, hashes []common.Hash, kind ObsKind) {
+	if len(hashes) == 0 {
+		return
+	}
+	now := time.Now()
+
+	observations := make([]Observation, 0, len(hashes))
+	var changes []StateChange
+
+	t.mu.Lock()
+	for _, hash := range hashes {
+		// ObsPoolEvicted with unknown hash is treated as no-op upstream,
+		// but notifyPeerHashes isn't used for that path — kept defensive.
+		ti := t.ensureInfo(hash, now)
+		t.applyPerEventBookkeeping(ti, kind, peer)
+		obs := t.buildObservation(ti, kind, now, peer, 0, common.Hash{}, "")
+		observations = append(observations, obs)
+		if ch, ok := t.maybeTransition(ti, obs, now, peer); ok {
+			changes = append(changes, ch)
+		}
+	}
+	t.evict()
+	obsDrops := t.obsDropped
+	stateDrops := t.stateDropped
+	t.mu.Unlock()
+
+	t.emitObservations(observations, &obsDrops)
+	t.emitStateChanges(changes, &stateDrops)
+
+	t.mu.Lock()
+	t.obsDropped = obsDrops
+	t.stateDropped = stateDrops
+	t.mu.Unlock()
+
+}
+
+// notifyAnnouncedHashes is the inbound-announcement variant of
+// notifyPeerHashes. It runs the same locking + emit dance but also
+// stashes per-hash type/size metadata on the TxInfo when supplied,
+// so consumers see TxType on the very first ObsAnnouncedInbound.
+//
+// types and sizes are parallel slices to hashes; they are honoured
+// only when both lengths match len(hashes). Any mismatch (including
+// the legacy nil/nil case) skips metadata population entirely.
+func (t *Tracker) notifyAnnouncedHashes(peer string, hashes []common.Hash, types []byte, sizes []uint32) {
+	if len(hashes) == 0 {
+		return
+	}
+	haveMeta := len(types) == len(hashes) && len(sizes) == len(hashes)
+	now := time.Now()
+
+	observations := make([]Observation, 0, len(hashes))
+	var changes []StateChange
+
+	t.mu.Lock()
+	for i, hash := range hashes {
+		ti := t.ensureInfo(hash, now)
+		if haveMeta {
+			applyAnnouncedMeta(ti, types[i], sizes[i])
+		}
+		t.applyPerEventBookkeeping(ti, ObsAnnouncedInbound, peer)
+		obs := t.buildObservation(ti, ObsAnnouncedInbound, now, peer, 0, common.Hash{}, "")
+		observations = append(observations, obs)
+		if ch, ok := t.maybeTransition(ti, obs, now, peer); ok {
+			changes = append(changes, ch)
+		}
+	}
+	t.evict()
+	obsDrops := t.obsDropped
+	stateDrops := t.stateDropped
+	t.mu.Unlock()
+
+	t.emitObservations(observations, &obsDrops)
+	t.emitStateChanges(changes, &stateDrops)
+
+	t.mu.Lock()
+	t.obsDropped = obsDrops
+	t.stateDropped = stateDrops
+	t.mu.Unlock()
+
+}
+
+// notifyHashReason handles the single-hash, reason-carrying kinds
+// (ObsPoolRejected, ObsPoolEvicted).
+func (t *Tracker) notifyHashReason(peer string, hash common.Hash, reason string, kind ObsKind) {
+	now := time.Now()
+
+	var (
+		obs    Observation
+		change StateChange
+		hasObs bool
+		hasCh  bool
+	)
+
+	t.mu.Lock()
+	if kind == ObsPoolEvicted {
+		// Eviction of an unknown hash is a no-op — we have no record to
+		// transition, and creating a fresh entry just to mark it Dropped
+		// would be misleading.
+		if _, ok := t.txs[hash]; !ok {
+			t.mu.Unlock()
+			return
+		}
+	}
+	ti := t.ensureInfo(hash, now)
+	// RejectErr is unconditional: a rejection is unconditional. DropReason
+	// is gated on the eviction actually firing the StateChange — for an
+	// inclusion-driven pool removal the state stays at Included and we
+	// don't want a misleading "nonce expired" lingering on the TxInfo.
+	if kind == ObsPoolRejected {
+		ti.RejectErr = reason
+	}
+	obs = t.buildObservation(ti, kind, now, peer, 0, common.Hash{}, reason)
+	hasObs = true
+	if c, ok := t.maybeTransition(ti, obs, now, peer); ok {
+		change = c
+		hasCh = true
+		if kind == ObsPoolEvicted && c.NewStatus == StatusDropped {
+			ti.DropReason = reason
+		}
+	}
+	t.evict()
+	obsDrops := t.obsDropped
+	stateDrops := t.stateDropped
+	t.mu.Unlock()
+
+	if hasObs {
+		t.emitObs(obs, &obsDrops)
+	}
+	if hasCh {
+		t.emitState(change, &stateDrops)
+	}
+
+	t.mu.Lock()
+	t.obsDropped = obsDrops
+	t.stateDropped = stateDrops
+	t.mu.Unlock()
+
+}
+
+//
+// Internals — bookkeeping, state machine, emission.
+//
+
+// ensureInfo returns the TxInfo for hash, creating one if missing. Must
+// be called with t.mu held.
+func (t *Tracker) ensureInfo(hash common.Hash, now time.Time) *TxInfo {
+	ti, ok := t.txs[hash]
+	if ok {
+		return ti
+	}
+	ti = &TxInfo{Hash: hash, FirstSeen: now}
+	t.txs[hash] = ti
+	t.order = append(t.order, hash)
+	return ti
+}
+
+// fillTxBody populates body-derived fields on ti from a full tx if they
+// are not already set. Idempotent — safe to call multiple times for the
+// same tx; subsequent calls are no-ops once the body has been filled.
+//
+// Must be called with t.mu held. Sender recovery uses a Signer derived
+// from tx.ChainId() (with a Homestead fallback for pre-EIP-155 txs);
+// recovery failures leave From at its zero value rather than erroring.
+//
+// We use ti.Gas as the "body has been filled" sentinel because Gas is
+// only ever written here and is always non-zero for a valid tx (EIP-150
+// floor is 21 000). TxType and TxSize used to play that role but are
+// now also populated by applyAnnouncedMeta from eth/68 announcements,
+// which can fire before any body arrives — switching to Gas keeps the
+// body-fill path running exactly once even after applyAnnouncedMeta
+// has set TxType / TxSize.
+func fillTxBody(ti *TxInfo, tx *types.Transaction) {
+	if ti.Gas != 0 {
+		return // body already filled
+	}
+	ti.TxType = tx.Type()
+	ti.TxSize = uint32(tx.Size())
+	ti.Nonce = tx.Nonce()
+	ti.Gas = tx.Gas()
+	ti.GasFeeCap = (*hexutil.Big)(tx.GasFeeCap())
+	ti.GasTipCap = (*hexutil.Big)(tx.GasTipCap())
+	ti.Value = (*hexutil.Big)(tx.Value())
+	ti.To = tx.To()
+	var signer types.Signer
+	if chainID := tx.ChainId(); chainID != nil && chainID.Sign() > 0 {
+		signer = types.LatestSignerForChainID(chainID)
+	} else {
+		signer = types.HomesteadSigner{}
+	}
+	if from, err := types.Sender(signer, tx); err == nil {
+		ti.From = from
 	}
 }
 
+// applyAnnouncedMeta sets TxType and TxSize on ti from eth/68 announcement
+// metadata if they are not already set. Must be called with t.mu held.
+//
+// "Already set" is detected by ti.TxSize != 0; a real tx in flight on
+// the wire is never zero-sized. Subsequent announcements with conflicting
+// metadata are silently ignored — peers can lie and the first observation
+// wins. When the tx body eventually arrives, fillTxBody overwrites both
+// fields with the authoritative values from the body.
+func applyAnnouncedMeta(ti *TxInfo, txType uint8, txSize uint32) {
+	if ti.TxSize != 0 || txSize == 0 {
+		return
+	}
+	ti.TxType = txType
+	ti.TxSize = txSize
+}
+
+// applyPerEventBookkeeping applies TxInfo side-effects that are specific
+// to the observation kind (e.g. recording an announcer, attributing a
+// deliverer). Must be called with t.mu held.
+func (t *Tracker) applyPerEventBookkeeping(ti *TxInfo, kind ObsKind, peer string) {
+	switch kind {
+	case ObsAnnouncedInbound:
+		if peer != "" && !containsString(ti.Announcers, peer) {
+			ti.Announcers = append(ti.Announcers, peer)
+		}
+	case ObsPoolAccepted:
+		if ti.Deliverer == "" && peer != "" {
+			ti.Deliverer = peer // first deliverer wins
+		}
+	}
+}
+
+// buildObservation assembles an Observation value from the inputs + any
+// tx-level classification cached on TxInfo. Must be called with t.mu held.
+func (t *Tracker) buildObservation(ti *TxInfo, kind ObsKind, ts time.Time, peer string, blockNum uint64, blockHash common.Hash, reason string) Observation {
+	return Observation{
+		TxHash:    ti.Hash,
+		Timestamp: ts,
+		Kind:      kind,
+		Peer:      peer,
+		BlockNum:  blockNum,
+		BlockHash: blockHash,
+		Reason:    reason,
+		TxType:    ti.TxType,
+	}
+}
+
+// maybeTransition runs the state machine on a just-built Observation
+// against the current TxInfo. Returns (StateChange, true) if this
+// observation caused a forward transition, else (_, false). Mutates
+// ti.Status on transition. Must be called with t.mu held.
+func (t *Tracker) maybeTransition(ti *TxInfo, obs Observation, now time.Time, peer string) (StateChange, bool) {
+	old := ti.Status
+	next := old
+	// Snapshot Returns BEFORE the post-terminal bookkeeping so we can
+	// detect a cycle bump and reset the bitmap to scope it per-cycle.
+	oldReturns := ti.Returns
+
+	// Post-terminal activity bookkeeping fires regardless of whether
+	// the observation transitions the status. Passive observations
+	// (announce, body-push) on a terminal-state tx no longer reset
+	// status — they bump the dedicated counter only. Active observations
+	// (we requested it, pool re-accepted) AND chain reorg DO transition
+	// (see the cases below) and bump Returns + the per-kind counter.
+	if old == StatusRejected || old == StatusDropped {
+		switch obs.Kind {
+		case ObsAnnouncedInbound:
+			bumpU8(&ti.AnnouncedAfterTerminal)
+		case ObsDeliveredInbound:
+			bumpU8(&ti.ReceivedAfterTerminal)
+		case ObsRequestedOutbound:
+			bumpU8(&ti.RequestedAfterTerminal)
+			bumpU8(&ti.Returns)
+		case ObsPoolAccepted:
+			bumpU8(&ti.PooledAfterTerminal)
+			bumpU8(&ti.Returns)
+		}
+	} else if old == StatusIncluded && obs.Kind == ObsChainReorged {
+		bumpU8(&ti.ReorgRestarts)
+		bumpU8(&ti.Returns)
+	}
+
+	switch obs.Kind {
+	case ObsAnnouncedInbound:
+		if old == StatusUnknown {
+			next = StatusAnnounced
+		}
+		// Passive announce on a terminal-state tx is counter-only;
+		// status stays terminal. (Was previously: reset to Announced
+		// + bump Returns. Removed because peer announces aren't an
+		// "active restart" — see Returns-counter redefinition.)
+	case ObsRequestedOutbound:
+		if old <= StatusAnnounced || old == StatusRejected || old == StatusDropped {
+			next = StatusRequested
+		}
+	case ObsDeliveredInbound:
+		if old < StatusReceived {
+			next = StatusReceived
+		}
+		// Passive body-push on a terminal-state tx is counter-only.
+	case ObsPoolAccepted:
+		if old < StatusPooled || old == StatusRejected || old == StatusDropped {
+			next = StatusPooled
+		}
+	case ObsPoolRejected:
+		next = StatusRejected
+	case ObsPoolEvicted:
+		// Inclusion-driven pool removal: when a tx is mined the pool
+		// emits RemovedTxsEvent (with reason "nonce expired" from
+		// demoteUnexecutables) and we receive it as ObsPoolEvicted.
+		// By that point the chain-side observation has typically
+		// transitioned the tx to StatusIncluded / StatusFinalized, so
+		// we keep the chain status rather than overwriting with Dropped.
+		// Hitting ObsPoolEvicted from earlier stages
+		// (Announced/Requested/Received) means we missed the
+		// Pool-acceptance signal entirely; fabricating a Dropped state
+		// we never observed entering is worse than dropping the signal.
+		// Mirrors the dormant tracker's status==TxPooled guard.
+		if old == StatusPooled {
+			next = StatusDropped
+		}
+	case ObsChainIncluded:
+		if old != StatusIncluded && old != StatusFinalized {
+			next = StatusIncluded
+		}
+	case ObsChainReorged:
+		if old == StatusIncluded {
+			next = StatusPooled
+		}
+	case ObsChainFinalized:
+		if old != StatusFinalized {
+			next = StatusFinalized
+		}
+	default:
+		// ObsAnnouncedOutbound, ObsRequestedInbound, ObsDeliveredOutbound:
+		// pure observations, no state change.
+	}
+	if next == old {
+		return StateChange{}, false
+	}
+	ti.Status = next
+	ti.LastChange = now
+	switch next {
+	case StatusRequested:
+		ti.Requested = now
+	case StatusReceived:
+		ti.Received = now
+	case StatusPooled:
+		// Re-entry from Included (reorg) preserves the original Pooled
+		// timestamp so a UI can still see when the tx first hit the pool.
+		if ti.Pooled.IsZero() {
+			ti.Pooled = now
+		}
+	case StatusIncluded:
+		ti.Included = now
+	case StatusFinalized:
+		ti.Finalized = now
+	case StatusDropped:
+		ti.Dropped = now
+	}
+	// Cycle bitmap maintenance. Bit (next-1) marks the just-entered
+	// state. If Returns advanced during this transition (active re-entry
+	// or chain reorg), this is a new cycle — reset the bitmap to just
+	// the new state. Otherwise OR in the new bit, preserving prior
+	// state visits in the current cycle. next is guaranteed >= 1 here
+	// (StatusUnknown can never be a transition target, only a source on
+	// the first transition), so next-1 never underflows.
+	newBit := uint8(1) << uint8(next-1)
+	if ti.Returns != oldReturns {
+		ti.CycleBitmap = newBit
+	} else {
+		ti.CycleBitmap |= newBit
+	}
+	return StateChange{
+		TxHash:      ti.Hash,
+		OldStatus:   old,
+		NewStatus:   next,
+		Timestamp:   now,
+		Trigger:     obs.Kind,
+		Peer:        peer,
+		BlockNum:    obs.BlockNum,
+		BlockHash:   obs.BlockHash,
+		Reason:      obs.Reason,
+		TxType:      ti.TxType,
+		CycleIdx:    ti.Returns,
+		CycleBitmap: ti.CycleBitmap,
+	}, true
+}
+
+// emitObs sends a single observation to the emit channel, counting the
+// drop in *drops if the channel is full. Must NOT be called with t.mu
+// held (writing to the buffered channel can block briefly, and we don't
+// want to stall other producers).
+func (t *Tracker) emitObs(obs Observation, drops *uint64) {
+	select {
+	case t.obsCh <- obs:
+	default:
+		*drops++
+	}
+}
+
+// emitState sends a single state change, counting the drop in *drops if
+// the channel is full.
+func (t *Tracker) emitState(ch StateChange, drops *uint64) {
+	select {
+	case t.stateCh <- ch:
+	default:
+		*drops++
+	}
+}
+
+// emitObservations drains a slice of observations to the emit channel.
+func (t *Tracker) emitObservations(obs []Observation, drops *uint64) {
+	for _, o := range obs {
+		t.emitObs(o, drops)
+	}
+}
+
+// emitStateChanges drains a slice of state changes to the emit channel.
+func (t *Tracker) emitStateChanges(cs []StateChange, drops *uint64) {
+	for _, c := range cs {
+		t.emitState(c, drops)
+	}
+}
+
+// evict trims t.txs / t.order down to t.maxTracked entries (FIFO).
+// Must be called with t.mu held.
+//
+// For each evicted entry, t.evictedByStatus is incremented at the
+// entry's last-known TxStatus index. Reading the histogram lets UIs
+// surface "we are losing X% of pooled txs to FIFO churn" type alerts.
+func (t *Tracker) evict() {
+	for len(t.txs) > t.maxTracked {
+		oldest := t.order[0]
+		t.order = t.order[1:]
+		if ti, ok := t.txs[oldest]; ok {
+			if int(ti.Status) < len(t.evictedByStatus) {
+				t.evictedByStatus[ti.Status]++
+			}
+		}
+		delete(t.txs, oldest)
+	}
+	if cap(t.order) > 2*t.maxTracked {
+		t.order = append([]common.Hash(nil), t.order...)
+	}
+}
+
+// containsString reports whether v is present in s.
+func containsString(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// loop reads from the chain head subscription and dispatches to the
+// per-block handler.
 func (t *Tracker) loop() {
 	defer t.wg.Done()
-
 	for {
 		select {
 		case ev := <-t.headCh:
@@ -173,43 +911,165 @@ func (t *Tracker) loop() {
 	}
 }
 
+// obsEmitLoop drains the internal observation channel and forwards events
+// to the public obs feed. Runs in its own goroutine so that Feed.Send
+// (which may fan out to multiple subscribers) cannot block a tracker
+// producer.
+func (t *Tracker) obsEmitLoop() {
+	defer t.wg.Done()
+	for {
+		select {
+		case obs := <-t.obsCh:
+			t.obsFeed.Send(obs)
+		case <-t.emitQuit:
+			return
+		}
+	}
+}
+
+// stateEmitLoop is the sibling of obsEmitLoop for the state-change feed.
+func (t *Tracker) stateEmitLoop() {
+	defer t.wg.Done()
+	for {
+		select {
+		case ch := <-t.stateCh:
+			t.stateFeed.Send(ch)
+		case <-t.emitQuit:
+			return
+		}
+	}
+}
+
+// maxReorgDepth caps how far back the reorg-detection walk goes when
+// the chain-head's parent doesn't match the previously-known head.
+// Reorgs deeper than this are very rare in practice (post-merge it
+// takes a multi-slot CL fork) and walking further risks holding the
+// tracker lock too long. Txs in blocks beyond this depth stay
+// "Included" until they finalize or are evicted from the hot map.
+const maxReorgDepth = 64
+
 // handleChainHead computes per-peer deltas for the new head block and any
-// newly-finalized blocks, then hands them to the StatsConsumer AFTER
-// releasing t.mu. The lock-release-before-consumer pattern avoids any
-// cross-package lock ordering.
+// newly-finalized blocks, emits Observations + StateChanges for matching
+// tracked txs, and hands the per-peer credits to the StatsConsumer AFTER
+// releasing t.mu.
+//
+// On a chain-head event whose ParentHash doesn't match the previously-
+// known head hash, the tracker walks the orphaned side of the reorg
+// (capped at maxReorgDepth) and emits ObsChainReorged for every
+// tracked tx that was StatusIncluded in an orphaned block. The state
+// machine drops those txs back to StatusPooled. Txs that subsequently
+// reappear on the new chain re-enter StatusIncluded via the normal
+// inclusion path.
 func (t *Tracker) handleChainHead(ev core.ChainHeadEvent) {
-	// Fetch the head block by hash (not just number) to avoid using a
-	// reorged block if the tracker goroutine lags behind the chain.
 	block := t.chain.GetBlock(ev.Header.Hash(), ev.Header.Number.Uint64())
 	if block == nil {
 		return
 	}
-	t.mu.Lock()
-
-	// Count per-peer inclusions in this block, and record (BlockNum,
-	// BlockHash) on first inclusion so the iterate-t.txs finalization
-	// scan can find the entry later without re-reading the block. Skip
-	// txs whose delivery arrived at or after this block's slot — those
-	// are likely post-slot re-broadcasts of an already-mined tx, not
-	// genuine relay work.
-	blockTime := block.Time()
-	blockNum := block.Number().Uint64()
+	blockNum := block.NumberU64()
 	blockHash := block.Hash()
-	inclusions := make(map[string]int)
-	for _, tx := range block.Transactions() {
-		ti, ok := t.txs.Peek(tx.Hash())
-		if !ok || ti.AddedAt >= blockTime {
-			continue
-		}
-		inclusions[ti.Deliverer]++
-		if ti.BlockNum == 0 {
-			ti.BlockNum = blockNum
-			ti.BlockHash = blockHash
-		}
+	blockTime := block.Time()
+	parentHash := ev.Header.ParentHash
+	now := time.Now()
+
+	var observations []Observation
+	var changes []StateChange
+
+	t.mu.Lock()
+	// Reorg detection: if we have a previous head and the new block's
+	// parent doesn't match it, walk the orphaned side and reorg the
+	// matching txs. Only fires when there is actually a previously-known
+	// head (skipped on the first chain-head event).
+	if t.lastHeadHash != (common.Hash{}) && parentHash != t.lastHeadHash {
+		reorgObs, reorgChanges := t.collectReorg(now, parentHash, blockNum)
+		observations = append(observations, reorgObs...)
+		changes = append(changes, reorgChanges...)
 	}
-	// Accumulate per-peer finalization credits over the newly-finalized
-	// range (possibly zero blocks).
-	finalized := t.collectFinalizationCredits()
+
+	inclusions := make(map[string]int)
+	// Skip the per-tx loop entirely when there's nothing to update.
+	// Common during catch-up after a fresh restart, where the chain
+	// emits a flood of head events before the pool has produced any
+	// NotifyAccepted calls. Without this guard we still pay
+	// 150×tx.Hash + 150×map-miss per block (~1.5µs) — small per
+	// block but unbounded across catch-up.
+	if len(t.txs) > 0 {
+		for _, tx := range block.Transactions() {
+			h := tx.Hash()
+			ti, ok := t.txs[h]
+			if !ok {
+				// Create a fresh TxInfo so the chain-inclusion transition
+				// flows through the standard state machine and a 0→5
+				// StateChange is emitted to subscribers. Without this,
+				// hashes that first appear on chain (Flashbots / MEV-Boost
+				// / direct-to-builder paths) are invisible to event
+				// consumers — they were skipped entirely before. Pre-block
+				// fields stay at their zero values; consumers detect the
+				// chain-only origin by Status transitioning 0→5 (or
+				// equivalently, by Pooled / Requested / Received all
+				// being zero on the resulting TxInfo). fillTxBody below
+				// populates body fields + From from the block tx.
+				ti = t.ensureInfo(h, now)
+			}
+			// Body fields may still be empty if the tracker never observed
+			// this tx via NotifyReceived (e.g. a tx that reached the pool
+			// through a path that skipped the receive notification). The
+			// block carries the body, so fill in here as a fallback.
+			fillTxBody(ti, tx)
+			// Pre-slot gate on peer credit: a tx whose body we accepted at
+			// or after this block's slot time is almost certainly a
+			// re-broadcast of an already-mined tx, not genuine relay work,
+			// so its deliverer earns neither inclusion nor (via the frozen
+			// IncludedDeliverer) finalization credit. The ObsChainIncluded
+			// event below still fires so the lens feed sees the inclusion;
+			// only the peerstats credit is suppressed. Mirrors the
+			// pre-slot gate on peerdrop-latency's emitter tracker.
+			//
+			// A zero block time (genesis, or a mock block in tests) is
+			// treated as "no slot known" and never gates — real mined
+			// blocks always carry a non-zero timestamp.
+			if ti.Deliverer != "" && (blockTime == 0 || ti.Pooled.IsZero() || uint64(ti.Pooled.Unix()) < blockTime) {
+				inclusions[ti.Deliverer]++
+				// Freeze the deliverer-of-record at first inclusion. Used
+				// downstream by finalization-credit attribution
+				// (collectFinalization) so a late mutation of ti.Deliverer
+				// — e.g. via a buggy re-acceptance of an already-mined tx
+				// after the original TxInfo was FIFO-evicted and recreated
+				// — cannot steal credit from the original deliverer.
+				if ti.IncludedDeliverer == "" {
+					ti.IncludedDeliverer = ti.Deliverer
+				}
+			}
+			obs := t.buildObservation(ti, ObsChainIncluded, now, "", blockNum, blockHash, "")
+			observations = append(observations, obs)
+			if c, ok := t.maybeTransition(ti, obs, now, ""); ok {
+				ti.BlockNum = blockNum
+				ti.BlockHash = blockHash
+				changes = append(changes, c)
+			}
+		}
+		// Chain-only TxInfos created above can push us over maxTracked
+		// on busy blocks; trim once after the whole block has been
+		// processed rather than per-tx to keep the FIFO order intact.
+		t.evict()
+	}
+
+	t.lastHeadHash = blockHash
+	t.lastHeadNum = blockNum
+
+	finalized, finObs, finChanges := t.collectFinalization(now)
+	observations = append(observations, finObs...)
+	changes = append(changes, finChanges...)
+
+	obsDrops := t.obsDropped
+	stateDrops := t.stateDropped
+	t.mu.Unlock()
+
+	t.emitObservations(observations, &obsDrops)
+	t.emitStateChanges(changes, &stateDrops)
+
+	t.mu.Lock()
+	t.obsDropped = obsDrops
+	t.stateDropped = stateDrops
 	t.mu.Unlock()
 
 	if t.consumer != nil {
@@ -217,72 +1077,184 @@ func (t *Tracker) handleChainHead(ev core.ChainHeadEvent) {
 	}
 }
 
-// collectFinalizationCredits accumulates per-peer finalization credits for
-// blocks newly finalized since lastFinalNum, and advances lastFinalNum.
-// Returns a (possibly empty) credits map keyed by peer ID. Must be called
-// with t.mu held.
+// collectReorg walks the orphaned side of a reorg and emits an
+// ObsChainReorged for every tracked tx in StatusIncluded whose block
+// is being orphaned. The state machine drops those txs back to
+// StatusPooled.
 //
-// The pivot here is to iterate t.txs (which we already maintain by hash
-// with BlockNum + BlockHash recorded at inclusion time) rather than
-// walking each newly-finalized block from disk. The walk over chain
-// blocks was the dominant cost during catch-up after a restart: every
-// block called GetBlockByNumber (cold-disk RLP-decode) and then per-tx
-// tx.Hash() and types.Sender() against fresh cache-cold *Transaction
-// instances. By inverting, the only chain query is one cheap canonical-
-// hash lookup per unique BlockNum that has tracked entries, used to
-// confirm the recorded BlockHash is still on the canonical chain (and
-// thus the tx really is finalized). No tx iteration, no hashing, no
-// sender derivation against cold blocks.
-func (t *Tracker) collectFinalizationCredits() map[string]int {
+// The walk starts at t.lastHeadHash (the previously-known head) and
+// follows ParentHash backwards until it meets the new chain's
+// ancestry — reached when the walked block's hash matches an ancestor
+// of newParent at the same height — or until maxReorgDepth blocks
+// have been visited. Must be called with t.mu held.
+//
+// To detect "ancestor of newParent at this height", we walk the new
+// chain back too, building a small set of new-chain ancestor hashes
+// keyed by height. The first old-chain block whose hash appears in
+// that set is the common ancestor; everything visited before it is
+// orphaned.
+func (t *Tracker) collectReorg(now time.Time, newParent common.Hash, newHeadNum uint64) ([]Observation, []StateChange) {
+	if t.lastHeadHash == (common.Hash{}) {
+		return nil, nil
+	}
+	var (
+		observations []Observation
+		changes      []StateChange
+	)
+
+	// Build the set of new-chain ancestor hashes back to the old head's
+	// height (or maxReorgDepth, whichever is smaller). The new head's
+	// parent itself is the most recent ancestor.
+	newAncestors := make(map[common.Hash]struct{})
+	cursor := newParent
+	cursorNum := newHeadNum - 1
+	for i := 0; i < maxReorgDepth && cursor != (common.Hash{}); i++ {
+		newAncestors[cursor] = struct{}{}
+		if cursorNum == 0 {
+			break
+		}
+		nb := t.chain.GetBlock(cursor, cursorNum)
+		if nb == nil {
+			break
+		}
+		cursor = nb.ParentHash()
+		cursorNum--
+	}
+
+	// Walk the old chain back; for each block not in newAncestors,
+	// process its txs as orphaned.
+	oldHash := t.lastHeadHash
+	oldNum := t.lastHeadNum
+	for i := 0; i < maxReorgDepth && oldHash != (common.Hash{}); i++ {
+		if _, ok := newAncestors[oldHash]; ok {
+			break // common ancestor — stop walking
+		}
+		oblock := t.chain.GetBlock(oldHash, oldNum)
+		if oblock == nil {
+			break // chain pruned the orphan; can't reorg-correct what we can't see
+		}
+		orphanHash := oblock.Hash()
+		orphanNum := oblock.NumberU64()
+		for _, tx := range oblock.Transactions() {
+			h := tx.Hash()
+			ti, ok := t.txs[h]
+			if !ok {
+				continue
+			}
+			obs := t.buildObservation(ti, ObsChainReorged, now, "", orphanNum, orphanHash, "")
+			observations = append(observations, obs)
+			if c, ok := t.maybeTransition(ti, obs, now, ""); ok {
+				// Clear the included-block context; if the tx is re-included
+				// on the new chain, the inclusion path will repopulate it.
+				ti.BlockNum = 0
+				ti.BlockHash = common.Hash{}
+				changes = append(changes, c)
+			}
+		}
+		oldHash = oblock.ParentHash()
+		if oldNum == 0 {
+			break
+		}
+		oldNum--
+	}
+	return observations, changes
+}
+
+// collectFinalization accumulates per-peer finalization credits for blocks
+// newly finalized since lastFinalNum and returns the credits map alongside
+// observations + state changes for each affected tracked tx. Must be
+// called with t.mu held.
+// The pivot here is to iterate t.txs (which already records BlockNum
+// and BlockHash at inclusion time) instead of walking each newly-
+// finalized block from disk. The walk-by-block design was the
+// dominant cost during catch-up after a restart: blocks finalized
+// 32+ blocks ago aren't in the chain's recent-block LRU, so each
+// GetBlockByNumber paid full RLP decode and the per-tx loop hit
+// cache-cold tx.Hash() and types.Sender() across freshly-decoded
+// instances. With the inversion, the only chain query is one cheap
+// canonical-hash lookup per unique BlockNum that has tracked entries
+// — used to confirm the recorded inclusion is on the canonical chain
+// (orphan-block references won't match).
+func (t *Tracker) collectFinalization(now time.Time) (map[string]int, []Observation, []StateChange) {
 	credits := make(map[string]int)
+	var observations []Observation
+	var changes []StateChange
+
 	finalHeader := t.chain.CurrentFinalBlock()
 	if finalHeader == nil {
-		return credits
+		return credits, observations, changes
 	}
 	finalNum := finalHeader.Number.Uint64()
 	if finalNum <= t.lastFinalNum {
-		return credits
+		return credits, observations, changes
 	}
 
-	// Group entries by their recorded BlockNum so the canonical-hash
-	// lookup happens once per height, not once per tx. The BlockNum range
-	// check filters both "not yet seen on chain" (BlockNum == 0) and
-	// "already credited in a prior pass" (BlockNum <= lastFinalNum); no
-	// separate status bookkeeping is needed.
+	// Group Included tracked entries by their recorded BlockNum so the
+	// canonical-hash lookup happens once per height, not once per tx.
 	buckets := make(map[uint64][]*TxInfo)
-	for _, hash := range t.txs.Keys() {
-		ti, ok := t.txs.Peek(hash)
-		if !ok || ti.BlockNum <= t.lastFinalNum || ti.BlockNum > finalNum {
+	for _, ti := range t.txs {
+		if ti.Status != StatusIncluded {
+			continue
+		}
+		if ti.BlockNum <= t.lastFinalNum || ti.BlockNum > finalNum {
 			continue
 		}
 		buckets[ti.BlockNum] = append(buckets[ti.BlockNum], ti)
 	}
 
-	total := 0
 	for num, tis := range buckets {
 		canonHash := t.chain.GetCanonicalHash(num)
 		if canonHash == (common.Hash{}) {
 			continue
 		}
 		for _, ti := range tis {
-			// BlockHash was recorded when the entry was first seen
-			// on chain. If it doesn't match the canonical hash now,
-			// the entry's recorded inclusion is in an orphaned
-			// block; skip rather than misreport finality.
+			// BlockHash was recorded when we transitioned to
+			// StatusIncluded. If it now disagrees with the
+			// canonical hash, the recorded inclusion is in an
+			// orphaned block and the entry should NOT be marked
+			// finalized — the normal head/reorg path will
+			// re-resolve its status when it sees the new chain.
 			if ti.BlockHash != canonHash {
 				continue
 			}
-			if ti.Deliverer != "" {
-				credits[ti.Deliverer]++
-				total++
+			// Read finalization credit from the deliverer that
+			// was frozen at inclusion time (handleChainHead
+			// per-block loop), not the live ti.Deliverer. The
+			// live field can be flipped post-inclusion by an
+			// eviction-then-replay path; the frozen field is the
+			// one that earned the inclusion credit.
+			if ti.IncludedDeliverer != "" {
+				credits[ti.IncludedDeliverer]++
+			}
+			obs := t.buildObservation(ti, ObsChainFinalized, now, "", num, canonHash, "")
+			observations = append(observations, obs)
+			if c, ok := t.maybeTransition(ti, obs, now, ""); ok {
+				changes = append(changes, c)
 			}
 		}
 	}
 
-	if total > 0 {
+	if total := sumCounts(credits); total > 0 {
 		log.Trace("Accumulated finalization credits",
 			"from", t.lastFinalNum+1, "to", finalNum, "txs", total)
 	}
 	t.lastFinalNum = finalNum
-	return credits
+	return credits, observations, changes
+}
+
+func sumCounts(m map[string]int) int {
+	var sum int
+	for _, v := range m {
+		sum += v
+	}
+	return sum
+}
+
+// bumpU8 saturating-adds 1 to *p. Used by the post-terminal activity
+// counters on TxInfo so an extreme spammer (a peer announcing the same
+// hash hundreds of times) caps at 255 rather than silently wrapping.
+func bumpU8(p *uint8) {
+	if *p < 255 {
+		*p++
+	}
 }
