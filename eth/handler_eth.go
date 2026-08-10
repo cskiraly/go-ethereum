@@ -62,6 +62,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 	// Consume any broadcasts and announces, forwarding the rest to the downloader
 	switch packet := packet.(type) {
 	case *eth.NewPooledTransactionHashesPacket72:
+		h.txTracker.NotifyAnnounced(peer.ID(), packet.Hashes, packet.Types, packet.Sizes)
 		hashes, err := h.txFetcher.Notify(peer.ID(), packet.Types, packet.Sizes, packet.Hashes)
 		if err != nil {
 			return err
@@ -72,6 +73,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		return nil
 
 	case *eth.NewPooledTransactionHashesPacket71:
+		h.txTracker.NotifyAnnounced(peer.ID(), packet.Hashes, packet.Types, packet.Sizes)
 		_, err := h.txFetcher.Notify(peer.ID(), packet.Types, packet.Sizes, packet.Hashes)
 		return err
 
@@ -83,6 +85,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err := handleTransactions(peer, txs, true); err != nil {
 			return fmt.Errorf("Transactions: %v", err)
 		}
+		h.txTracker.NotifyReceived(peer.ID(), txs)
 		return h.txFetcher.Enqueue(peer.ID(), peer.Version(), txs, false)
 
 	case *eth.PooledTransactionsPacket:
@@ -93,6 +96,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err := handleTransactions(peer, txs, false); err != nil {
 			return fmt.Errorf("PooledTransactions: %v", err)
 		}
+		h.txTracker.NotifyReceived(peer.ID(), txs)
 		return h.txFetcher.Enqueue(peer.ID(), peer.Version(), txs, true)
 
 	case *eth.CellsResponse:

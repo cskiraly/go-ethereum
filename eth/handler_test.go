@@ -61,8 +61,9 @@ type testTxPool struct {
 
 	custody map[common.Hash]types.CustodyBitmap
 
-	txFeed event.Feed   // Notification feed to allow waiting for inclusion
-	lock   sync.RWMutex // Protects the transaction pool
+	txFeed      event.Feed   // Notification feed to allow waiting for inclusion
+	removedFeed event.Feed   // Removed-tx feed (test stub, never sends)
+	lock        sync.RWMutex // Protects the transaction pool
 }
 
 // newTestTxPool creates a mock transaction pool.
@@ -260,6 +261,14 @@ func (p *testTxPool) AddPooledTx(pooledTx *blobpool.BlobTxForPool) error {
 	p.cellPool[hash] = pooledTx.CellSidecar.Cells
 	p.txPool[hash] = pooledTx.Tx
 	return nil
+}
+
+// SubscribeRemovedTransactions returns an event subscription on the
+// removed-tx feed. The test pool never emits removal events, so the
+// subscription stays silent — sufficient for the existing handler
+// tests to satisfy the txPool interface.
+func (p *testTxPool) SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription {
+	return p.removedFeed.Subscribe(ch)
 }
 
 // FilterType should check whether the pool supports the given type of transactions.

@@ -361,6 +361,14 @@ func (b *EthAPIBackend) SubscribeLogsEvent(ch chan<- []*types.Log) event.Subscri
 func (b *EthAPIBackend) SendTx(ctx context.Context, signedTx *types.Transaction) error {
 	err := b.eth.txPool.Add([]*types.Transaction{signedTx}, false)[0]
 
+	// Notify the txtracker that this tx hit the pool from a local
+	// (non-peer) submission. The fetcher's onAccepted only fires for
+	// peer-driven inserts; without this hook, locally-submitted txs
+	// never appear in the tracker's hot map.
+	if err == nil && b.eth.handler != nil && b.eth.handler.txTracker != nil {
+		b.eth.handler.txTracker.NotifyLocalSubmitted([]*types.Transaction{signedTx})
+	}
+
 	// If the local transaction tracker is not configured, returns whatever
 	// returned from the txpool.
 	if b.eth.localTxTracker == nil {

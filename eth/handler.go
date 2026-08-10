@@ -97,6 +97,10 @@ type txPool interface {
 	// or also for reorged out ones.
 	SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) event.Subscription
 
+	// SubscribeRemovedTransactions subscribes to events for transactions that
+	// were removed from the pool after acceptance.
+	SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription
+
 	// FilterType returns whether the given tx type is supported by the txPool.
 	FilterType(kind byte) bool
 }
@@ -126,6 +130,7 @@ type handlerConfig struct {
 	RequiredBlocks   map[uint64]common.Hash // Hard coded map of required block hashes for sync challenges
 	SnapV2           bool                   // Whether to advertise and sync via the snap/2 protocol
 	FetchProbability uint64                 // Full blob fetch probability for sparse blobpool (blobFetcher)
+
 }
 
 type handler struct {
@@ -147,9 +152,11 @@ type handler struct {
 	peers          *peerSet
 	txBroadcastKey [16]byte
 
-	txsCh      chan core.NewTxsEvent
-	txsSub     event.Subscription
-	blockRange *blockRangeState
+	txsCh         chan core.NewTxsEvent
+	txsSub        event.Subscription
+	removedTxsCh  chan core.RemovedTxsEvent
+	removedTxsSub event.Subscription
+	blockRange    *blockRangeState
 
 	requiredBlocks map[uint64]common.Hash
 
@@ -190,6 +197,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		if p == nil {
 			return errors.New("unknown peer")
 		}
+		h.txTracker.NotifyFetchRequested(peer, hashes)
 		return p.RequestTxs(hashes)
 	}
 
@@ -213,8 +221,11 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		return nil
 	}
 	h.txTracker = txtracker.New()
+	// Source B for block-classification metrics: ask the peerset whether
+	// any peer knows each chain-included tx. Done via a closure so the
+	// txtracker package stays free of eth-protocol imports.
 	h.peerStats = peerstats.New()
-	h.txFetcher = fetcher.NewTxFetcher(h.chain, validateMeta, addTxs, fetchTx, h.removePeer, h.txTracker.NotifyAccepted, h.peerStats.NotifyRequestResult, blobBuffer)
+	h.txFetcher = fetcher.NewTxFetcher(h.chain, validateMeta, addTxs, fetchTx, h.removePeer, h.txTracker.NotifyAccepted, h.txTracker.NotifyRejected, h.peerStats.NotifyRequestResult, blobBuffer)
 
 	// Construct the blob fetcher for cell-based blob data availability
 	blobCallbacks := fetcher.BlobFetcherFunctions{
@@ -476,6 +487,12 @@ func (h *handler) Start(maxPeers int) {
 	h.txsSub = h.txpool.SubscribeTransactions(h.txsCh, false)
 	go h.txBroadcastLoop()
 
+	// forward pool eviction events to the txtracker
+	h.wg.Add(1)
+	h.removedTxsCh = make(chan core.RemovedTxsEvent, txChanSize)
+	h.removedTxsSub = h.txpool.SubscribeRemovedTransactions(h.removedTxsCh)
+	go h.removedTxsLoop()
+
 	// broadcast block range
 	h.wg.Add(1)
 	h.blockRange = newBlockRangeState(h.chain, h.downloader)
@@ -496,7 +513,8 @@ func (h *handler) Start(maxPeers int) {
 }
 
 func (h *handler) Stop() {
-	h.txsSub.Unsubscribe() // quits txBroadcastLoop
+	h.txsSub.Unsubscribe()        // quits txBroadcastLoop
+	h.removedTxsSub.Unsubscribe() // quits removedTxsLoop
 	h.blockRange.stop()
 	h.txFetcher.Stop()
 	h.blobFetcher.Stop()
@@ -584,6 +602,30 @@ func (h *handler) txBroadcastLoop() {
 		case event := <-h.txsCh:
 			h.BroadcastTransactions(event.Txs)
 		case <-h.txsSub.Err():
+			return
+		}
+	}
+}
+
+// removedTxsLoop forwards each pool eviction event to the txtracker so
+// it can flip the corresponding tx to StatusDropped and surface the
+// reason on the txtracker namespace. The loop is the only consumer of
+// the removed-tx feed today; it relies on the buffered channel to
+// absorb bursts and on the tracker's own NotifyDropped buffering for
+// any consumer-side backpressure.
+func (h *handler) removedTxsLoop() {
+	defer h.wg.Done()
+	for {
+		select {
+		case event := <-h.removedTxsCh:
+			for i, hash := range event.Hashes {
+				reason := core.RemovalUnknown
+				if i < len(event.Reasons) {
+					reason = event.Reasons[i]
+				}
+				h.txTracker.NotifyDropped(hash, reason)
+			}
+		case <-h.removedTxsSub.Err():
 			return
 		}
 	}

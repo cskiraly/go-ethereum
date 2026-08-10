@@ -189,6 +189,7 @@ type TxFetcher struct {
 	fetchTxs        func(string, []common.Hash) error                      // Retrieves a set of txs from a remote peer
 	dropPeer        func(string)                                           // Drops a peer in case of announcement violation
 	onAccepted      func(peer string, hashes []common.Hash)                // Optional: notified with accepted tx hashes per peer
+	onRejected      func(peer string, hash common.Hash, err error)         // Optional: notified per tx the pool rejected
 	onRequestResult func(peer string, latency time.Duration, timeout bool) // Optional: notified per timed-out request and per delivery with pool-accepted txs
 
 	buffer *blobpool.BlobBuffer
@@ -203,15 +204,15 @@ type TxFetcher struct {
 // based on hash announcements.
 // Chain can be nil to disable on-chain checks.
 func NewTxFetcher(chain *core.BlockChain, validateMeta func(common.Hash, byte) error, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error,
-	dropPeer func(string), onAccepted func(string, []common.Hash), onRequestResult func(string, time.Duration, bool), buffer *blobpool.BlobBuffer) *TxFetcher {
-	return NewTxFetcherForTests(chain, validateMeta, addTxs, fetchTxs, dropPeer, onAccepted, onRequestResult, buffer, mclock.System{}, time.Now, nil)
+	dropPeer func(string), onAccepted func(string, []common.Hash), onRejected func(string, common.Hash, error), onRequestResult func(string, time.Duration, bool), buffer *blobpool.BlobBuffer) *TxFetcher {
+	return NewTxFetcherForTests(chain, validateMeta, addTxs, fetchTxs, dropPeer, onAccepted, onRejected, onRequestResult, buffer, mclock.System{}, time.Now, nil)
 }
 
 // NewTxFetcherForTests is a testing method to mock out the realtime clock with
 // a simulated version and the internal randomness with a deterministic one.
 // Chain can be nil to disable on-chain checks.
 func NewTxFetcherForTests(
-	chain *core.BlockChain, validateMeta func(common.Hash, byte) error, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string), onAccepted func(string, []common.Hash), onRequestResult func(string, time.Duration, bool),
+	chain *core.BlockChain, validateMeta func(common.Hash, byte) error, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string), onAccepted func(string, []common.Hash), onRejected func(string, common.Hash, error), onRequestResult func(string, time.Duration, bool),
 	buffer *blobpool.BlobBuffer, clock mclock.Clock, realTime func() time.Time, rand *mrand.Rand) *TxFetcher {
 	return &TxFetcher{
 		notify:          make(chan *txAnnounce),
@@ -235,6 +236,7 @@ func NewTxFetcherForTests(
 		dropPeer:        dropPeer,
 		buffer:          buffer,
 		onAccepted:      onAccepted,
+		onRejected:      onRejected,
 		onRequestResult: onRequestResult,
 		clock:           clock,
 		realTime:        realTime,
@@ -403,6 +405,13 @@ func (f *TxFetcher) Enqueue(peer string, version uint, txs []*types.Transaction,
 				// Since KZG verification is computationally expensive, this acts as a
 				// defensive measure against potential DoS attacks.
 				violation = err
+			}
+			// Notify the tracker of pool rejections. Skip ErrAlreadyKnown:
+			// the tx is already pooled, not rejected; firing the rejection
+			// callback would mark a healthy tx as rejected in the
+			// tracker's state machine.
+			if err != nil && !errors.Is(err, txpool.ErrAlreadyKnown) && f.onRejected != nil {
+				f.onRejected(peer, batch[j].Hash(), err)
 			}
 			added = append(added, batch[j].Hash())
 			metas = append(metas, txMetadata{

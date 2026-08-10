@@ -114,6 +114,7 @@ func newTestTxFetcher() *TxFetcher {
 		nil,
 		nil,
 		nil,
+		nil,
 		newTestBlobBuffer(),
 	)
 }
@@ -2222,6 +2223,7 @@ func TestTransactionForgotten(t *testing.T) {
 		func(string) {},
 		nil,
 		nil,
+		nil,
 		newTestBlobBuffer(),
 		mockClock,
 		mockTime,
@@ -2328,6 +2330,101 @@ func (r *resultRecorder) snapshot() []resultSample {
 	return slices.Clone(r.samples)
 }
 
+// rejectRecorder is a thread-safe recorder for onRejected callbacks.
+type rejectRecorder struct {
+	mu      sync.Mutex
+	samples []rejectSample
+}
+
+type rejectSample struct {
+	peer string
+	hash common.Hash
+	err  error
+}
+
+func (r *rejectRecorder) record(peer string, hash common.Hash, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.samples = append(r.samples, rejectSample{peer, hash, err})
+}
+
+func (r *rejectRecorder) snapshot() []rejectSample {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]rejectSample, len(r.samples))
+	copy(out, r.samples)
+	return out
+}
+
+// TestTransactionFetcherRejectedFiresCallback asserts that the
+// onRejected callback fires once per non-ErrAlreadyKnown rejection
+// returned by addTxs, with the peer, hash, and error in scope.
+func TestTransactionFetcherRejectedFiresCallback(t *testing.T) {
+	rec := &rejectRecorder{}
+	testTransactionFetcherParallel(t, txFetcherTest{
+		init: func() *TxFetcher {
+			f := newTestTxFetcher()
+			// Force every addTx to fail with ErrUnderpriced.
+			f.addTxs = func(txs []*types.Transaction) []error {
+				errs := make([]error, len(txs))
+				for i := range errs {
+					errs[i] = txpool.ErrUnderpriced
+				}
+				return errs
+			}
+			f.onRejected = rec.record
+			return f
+		},
+		steps: []interface{}{
+			doTxEnqueue{peer: "A", txs: []*types.Transaction{testTxs[0]}, direct: true},
+			doFunc(func() {
+				samples := rec.snapshot()
+				if len(samples) != 1 {
+					t.Fatalf("expected 1 rejection, got %d (%v)", len(samples), samples)
+				}
+				if samples[0].peer != "A" {
+					t.Errorf("peer mismatch: got %q, want A", samples[0].peer)
+				}
+				if samples[0].hash != testTxs[0].Hash() {
+					t.Errorf("hash mismatch: got %x", samples[0].hash)
+				}
+				if !errors.Is(samples[0].err, txpool.ErrUnderpriced) {
+					t.Errorf("err mismatch: got %v", samples[0].err)
+				}
+			}),
+		},
+	})
+}
+
+// TestTransactionFetcherRejectedSkipsAlreadyKnown asserts that an
+// ErrAlreadyKnown response from addTxs does NOT fire onRejected — the
+// tx is already pooled, not rejected.
+func TestTransactionFetcherRejectedSkipsAlreadyKnown(t *testing.T) {
+	rec := &rejectRecorder{}
+	testTransactionFetcherParallel(t, txFetcherTest{
+		init: func() *TxFetcher {
+			f := newTestTxFetcher()
+			f.addTxs = func(txs []*types.Transaction) []error {
+				errs := make([]error, len(txs))
+				for i := range errs {
+					errs[i] = txpool.ErrAlreadyKnown
+				}
+				return errs
+			}
+			f.onRejected = rec.record
+			return f
+		},
+		steps: []interface{}{
+			doTxEnqueue{peer: "A", txs: []*types.Transaction{testTxs[0]}, direct: true},
+			doFunc(func() {
+				if samples := rec.snapshot(); len(samples) != 0 {
+					t.Fatalf("expected 0 rejections for ErrAlreadyKnown, got %d (%v)", len(samples), samples)
+				}
+			}),
+		},
+	})
+}
+
 // TestTransactionFetcherRequestResultOnDelivery asserts that an in-time
 // direct delivery fires the onRequestResult callback with timeout=false.
 func TestTransactionFetcherRequestResultOnDelivery(t *testing.T) {
@@ -2421,7 +2518,7 @@ func TestTransactionFetcherRequestResultRequiresAcceptance(t *testing.T) {
 					return errs
 				},
 				func(string, []common.Hash) error { return nil },
-				nil, nil, rec.record,
+				nil, nil, nil, rec.record,
 				newTestBlobBuffer(),
 			)
 			return f
@@ -2490,7 +2587,7 @@ func TestTransactionFetcherRequestResultRequiresAcceptedRequest(t *testing.T) {
 					return errs
 				},
 				func(string, []common.Hash) error { return nil },
-				nil, nil, rec.record,
+				nil, nil, nil, rec.record,
 				newTestBlobBuffer(),
 			)
 		},
