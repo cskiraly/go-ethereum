@@ -39,6 +39,13 @@ const (
 	wsPingWriteTimeout = 5 * time.Second
 	wsPongTimeout      = 30 * time.Second
 	wsDefaultReadLimit = 32 * 1024 * 1024
+	// Compression level for the per-message DEFLATE extension.
+	// Level 1 ("BestSpeed") trades ~2-3% extra wire size vs level 6
+	// ("DefaultCompression") for considerably less CPU per message,
+	// which matters for WS subscriptions that fan out at hundreds of
+	// notifications per second on a busy node. The dictionary-less
+	// form gorilla negotiates is plenty for redundant JSON-RPC text.
+	wsCompressionLevel = 1
 )
 
 var wsBufferPool = new(sync.Pool)
@@ -53,6 +60,14 @@ func (s *Server) WebsocketHandler(allowedOrigins []string) http.Handler {
 		WriteBufferSize: wsWriteBuffer,
 		WriteBufferPool: wsBufferPool,
 		CheckOrigin:     wsHandshakeValidator(allowedOrigins),
+		// Negotiate per-message DEFLATE (RFC 7692) when the client
+		// offers it. JSON-RPC notifications are highly compressible —
+		// 64-char hex hashes, ISO timestamps and a verbose envelope
+		// repeat per event — so on busy subscriptions (txtracker
+		// state-changes / observations) this typically halves wire
+		// bytes. Clients that don't offer the extension fall back to
+		// uncompressed transparently.
+		EnableCompression: true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -60,6 +75,11 @@ func (s *Server) WebsocketHandler(allowedOrigins []string) http.Handler {
 			log.Debug("WebSocket upgrade failed", "err", err)
 			return
 		}
+		// SetCompressionLevel only affects messages this side writes;
+		// the negotiation in Upgrade has already accepted the
+		// extension when the client requested it. Errors here mean
+		// the extension wasn't negotiated — safe to ignore.
+		_ = conn.SetCompressionLevel(wsCompressionLevel)
 		codec := newWebsocketCodec(conn, r.Host, r.Header, s.wsReadLimit)
 		s.ServeCodec(codec, 0)
 	})
@@ -229,6 +249,10 @@ func newClientTransportWS(endpoint string, cfg *clientConfig) (reconnectFunc, er
 			WriteBufferSize: wsWriteBuffer,
 			WriteBufferPool: wsBufferPool,
 			Proxy:           http.ProxyFromEnvironment,
+			// Mirror the server-side handler: offer permessage-deflate
+			// when dialing remote WS endpoints so subscription streams
+			// from other geth instances are compressed too.
+			EnableCompression: true,
 		}
 	}
 
@@ -255,6 +279,9 @@ func newClientTransportWS(endpoint string, cfg *clientConfig) (reconnectFunc, er
 			}
 			return nil, hErr
 		}
+		// Lower the DEFLATE level on outgoing client writes (no-op
+		// when the server didn't accept the extension).
+		_ = conn.SetCompressionLevel(wsCompressionLevel)
 		messageSizeLimit := int64(wsDefaultReadLimit)
 		if cfg.wsMessageSizeLimit != nil && *cfg.wsMessageSizeLimit >= 0 {
 			messageSizeLimit = *cfg.wsMessageSizeLimit

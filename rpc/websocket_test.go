@@ -48,6 +48,34 @@ func TestWebsocketClientHeaders(t *testing.T) {
 }
 
 // This test checks that the server rejects connections from disallowed origins.
+// TestWebsocketCompressionNegotiated verifies that the WS handler
+// negotiates permessage-deflate when the dialer offers it, so JSON-RPC
+// notifications on busy subscriptions go out compressed. The check
+// inspects the upgrade response's Sec-WebSocket-Extensions header —
+// "permessage-deflate" appears there iff the extension was accepted.
+func TestWebsocketCompressionNegotiated(t *testing.T) {
+	t.Parallel()
+
+	var (
+		srv     = newTestServer()
+		httpsrv = httptest.NewServer(srv.WebsocketHandler([]string{"*"}))
+		wsURL   = "ws:" + strings.TrimPrefix(httpsrv.URL, "http:")
+	)
+	defer srv.Stop()
+	defer httpsrv.Close()
+
+	dialer := websocket.Dialer{EnableCompression: true}
+	conn, resp, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	ext := resp.Header.Get("Sec-WebSocket-Extensions")
+	if !strings.Contains(ext, "permessage-deflate") {
+		t.Errorf("expected Sec-WebSocket-Extensions to include permessage-deflate, got %q", ext)
+	}
+}
+
 func TestWebsocketOriginCheck(t *testing.T) {
 	t.Parallel()
 
@@ -142,7 +170,21 @@ func TestWebsocketLargeRead(t *testing.T) {
 				// to be infinite.
 				tt.limit += buffer
 			}
-			opts := []ClientOption{WithWebsocketMessageSizeLimit(int64(tt.limit))}
+			// The size-limit assertion targets the wire payload, not
+			// the JSON-RPC method's logical result. Per-message DEFLATE
+			// (now negotiated by default in DialContext's dialer)
+			// would shrink "AAA..." down to ~30 bytes regardless of
+			// size and the server's read limit would never trigger.
+			// Override the dialer to disable compression so the test
+			// keeps measuring the limit it intends to.
+			opts := []ClientOption{
+				WithWebsocketMessageSizeLimit(int64(tt.limit)),
+				WithWebsocketDialer(websocket.Dialer{
+					ReadBufferSize:  wsReadBuffer,
+					WriteBufferSize: wsWriteBuffer,
+					WriteBufferPool: wsBufferPool,
+				}),
+			}
 			client, err := DialOptions(context.Background(), wsURL, opts...)
 			if err != nil {
 				t.Fatalf("failed to dial test server: %v", err)
