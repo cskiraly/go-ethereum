@@ -20,11 +20,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -289,5 +291,105 @@ func TestNotify(t *testing.T) {
 	want := `{"jsonrpc":"2.0","method":"_subscription","params":{"subscription":"test","result":"hello"}}`
 	if have != want {
 		t.Errorf("have:\n%v\nwant:\n%v\n", have, want)
+	}
+}
+
+// failingConn is a ServerCodec whose writeJSON always errors. close
+// is sync.Once-guarded and observable via wasClosed() so tests can
+// assert the codec teardown actually fired.
+type failingConn struct {
+	closeMu sync.Mutex
+	closed_ bool
+}
+
+func (c *failingConn) writeJSON(ctx context.Context, msg *jsonrpcMessage, isError bool) error {
+	return errors.New("boom: simulated wedged client")
+}
+func (c *failingConn) writeJSONBatch(ctx context.Context, msgs []*jsonrpcMessage, isError bool) error {
+	return errors.New("boom: simulated wedged client")
+}
+func (c *failingConn) closed() <-chan interface{} { return nil }
+func (c *failingConn) remoteAddr() string         { return "" }
+func (c *failingConn) peerInfo() PeerInfo         { return PeerInfo{} }
+func (c *failingConn) readBatch() (msgs []*jsonrpcMessage, isBatch bool, err error) {
+	return nil, false, io.EOF
+}
+func (c *failingConn) close() {
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+	c.closed_ = true
+}
+func (c *failingConn) wasClosed() bool {
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+	return c.closed_
+}
+
+// TestNotifyWriteFailureClosesSubscription verifies that a Notify
+// call whose write fails causes the notifier to mark itself failed,
+// close the subscription's err channel, and tear down the underlying
+// codec — protecting geth from a wedged client that would otherwise
+// keep the per-subscription goroutine bouncing off the writeJSON
+// deadline for every queued event.
+func TestNotifyWriteFailureClosesSubscription(t *testing.T) {
+	t.Parallel()
+
+	conn := &failingConn{}
+	id := ID("test")
+	sub := &Subscription{ID: id, err: make(chan error, 1)}
+	notifier := &Notifier{
+		h:         &handler{conn: conn},
+		sub:       sub,
+		activated: true,
+	}
+
+	// First Notify hits the failing writer and trips the protection.
+	if err := notifier.Notify(id, "first"); err == nil {
+		t.Fatal("expected error from first Notify, got nil")
+	}
+
+	// sub.err is closed (with the original write error delivered).
+	select {
+	case err, ok := <-sub.Err():
+		if !ok {
+			t.Fatal("sub.err closed without delivering the write error")
+		}
+		if err == nil || !strings.Contains(err.Error(), "boom") {
+			t.Errorf("unexpected error on sub.err: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("sub.err didn't fire after write failure")
+	}
+
+	// Codec was closed so the connection-shutdown path engages.
+	if !conn.wasClosed() {
+		t.Error("codec.close was not invoked after write failure")
+	}
+
+	// Subsequent Notify short-circuits with errSubscriptionClosed —
+	// no second write attempt to the wedged conn.
+	if err := notifier.Notify(id, "second"); !errors.Is(err, errSubscriptionClosed) {
+		t.Errorf("second Notify: got %v, want errSubscriptionClosed", err)
+	}
+}
+
+// TestSubscriptionDoubleCloseIsIdempotent verifies that the
+// sync.Once guard on Subscription.close prevents the panic that
+// would otherwise occur when both the write-failure path and
+// cancelServerSubscriptions race to close the same sub.
+func TestSubscriptionDoubleCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	sub := &Subscription{err: make(chan error, 1)}
+	sub.close(errors.New("first"))
+	sub.close(errors.New("second")) // would panic without the sync.Once
+
+	// First error delivered; channel closed.
+	if err, ok := <-sub.Err(); !ok || err == nil {
+		t.Errorf("expected first error on sub.err, got err=%v ok=%v", err, ok)
+	}
+	// Second drain returns zero value because channel is closed.
+	if err, ok := <-sub.Err(); ok {
+		t.Errorf("expected sub.err to be closed, got err=%v", err)
 	}
 }

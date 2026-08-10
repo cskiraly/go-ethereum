@@ -108,7 +108,21 @@ type Notifier struct {
 	buffer       []any
 	callReturned bool
 	activated    bool
+	// failed is set when a notification write fails (broken connection,
+	// write deadline exceeded). Once set, future Notify calls return
+	// errSubscriptionClosed immediately so a wedged client can't keep
+	// the per-subscription goroutine bouncing off the 10-second write
+	// timeout for every queued event. The subscription's err channel
+	// is closed and the underlying codec is closed; the latter triggers
+	// the normal connection-shutdown path which cleans up all other
+	// subscriptions tied to the same connection.
+	failed bool
 }
+
+// errSubscriptionClosed is returned from Notify after a write failure
+// has marked the notifier as failed. Mirrors what callers see when the
+// subscription is canceled normally.
+var errSubscriptionClosed = errors.New("subscription closed")
 
 // CreateSubscription returns a new subscription that is coupled to the
 // RPC connection. By default subscriptions are inactive and notifications
@@ -129,6 +143,11 @@ func (n *Notifier) CreateSubscription() *Subscription {
 
 // Notify sends a notification to the client with the given data as payload.
 // If an error occurs the RPC connection is closed and the error is returned.
+//
+// Once a previous Notify (or activate) has seen a write failure, this method
+// returns errSubscriptionClosed immediately without re-attempting the write,
+// so a slow or wedged client can't keep the per-subscription goroutine
+// blocked on the 10-second writeJSON deadline for every queued event.
 func (n *Notifier) Notify(id ID, data any) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -137,6 +156,9 @@ func (n *Notifier) Notify(id ID, data any) error {
 		panic("can't Notify before subscription is created")
 	} else if n.sub.ID != id {
 		panic("Notify with wrong ID")
+	}
+	if n.failed {
+		return errSubscriptionClosed
 	}
 	if n.activated {
 		return n.send(n.sub, data)
@@ -183,7 +205,27 @@ func (n *Notifier) send(sub *Subscription, data any) error {
 		Method:  n.namespace + notificationMethodSuffix,
 		Params:  params,
 	}
-	return n.h.conn.writeJSON(context.Background(), &msg, false)
+	err = n.h.conn.writeJSON(context.Background(), &msg, false)
+	if err != nil {
+		// Write failed (deadline exceeded, encode error, broken
+		// connection). Treat the notifier as dead so future Notify
+		// calls short-circuit, signal the subscription's err channel
+		// so any consumer goroutine exits, and close the underlying
+		// codec so the WS / IPC server-side cleans up. This protects
+		// the producer (typically a per-subscription goroutine in a
+		// service like txtracker) from blocking 10s per queued event
+		// against a wedged client.
+		//
+		// Holding n.mu here is fine: sub.close is sync.Once-guarded
+		// and codec.close is sync.Once-guarded; neither re-enters the
+		// notifier.
+		n.failed = true
+		sub.close(err)
+		if codec, ok := n.h.conn.(ServerCodec); ok {
+			codec.close()
+		}
+	}
+	return err
 }
 
 // A Subscription is created by a notifier and tied to that notifier. The client can use
@@ -192,11 +234,32 @@ type Subscription struct {
 	ID        ID
 	namespace string
 	err       chan error // closed on unsubscribe
+	closeOnce sync.Once  // guards close(err) — idempotent across paths
 }
 
 // Err returns a channel that is closed when the client send an unsubscribe request.
 func (s *Subscription) Err() <-chan error {
 	return s.err
+}
+
+// close signals the subscription as terminated and closes its err
+// channel. Idempotent — multiple paths can race to close (a write
+// failure inside Notifier.send and the handler's normal teardown via
+// cancelServerSubscriptions); only the first call has any effect.
+//
+// If err is non-nil it is delivered on the err channel before close
+// (best-effort; the channel is buffered so this never blocks but is
+// guarded by the default branch in case the buffer was already used).
+func (s *Subscription) close(err error) {
+	s.closeOnce.Do(func() {
+		if err != nil {
+			select {
+			case s.err <- err:
+			default:
+			}
+		}
+		close(s.err)
+	})
 }
 
 // MarshalJSON marshals a subscription as its ID.

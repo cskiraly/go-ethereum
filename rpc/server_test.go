@@ -287,8 +287,13 @@ func TestServerWebsocketReadLimit(t *testing.T) {
 
 			wsURL := "ws:" + strings.TrimPrefix(httpsrv.URL, "http:")
 
-			// Connect WebSocket client
-			client, err := DialOptions(context.Background(), wsURL)
+			// Connect WebSocket client. Disable per-message DEFLATE so
+			// the test still measures the wire-level read limit — the
+			// default dialer offers permessage-deflate now and a 1024-A
+			// payload would compress below the 256-byte limit and never
+			// trigger.
+			client, err := DialOptions(context.Background(), wsURL,
+				WithWebsocketDialer(websocket.Dialer{}))
 			if err != nil {
 				t.Fatalf("can't dial: %v", err)
 			}

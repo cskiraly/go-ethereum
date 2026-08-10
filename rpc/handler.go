@@ -428,8 +428,10 @@ func (h *handler) cancelServerSubscriptions(err error) {
 	defer h.subLock.Unlock()
 
 	for id, s := range h.serverSubs {
-		s.err <- err
-		close(s.err)
+		// s.close is sync.Once-guarded, so racing with a write-failure
+		// path inside Notifier.send (which also closes the sub) is
+		// safe — only the first close takes effect.
+		s.close(err)
 		delete(h.serverSubs, id)
 	}
 }
@@ -686,7 +688,9 @@ func (h *handler) unsubscribe(ctx context.Context, id ID) (bool, error) {
 	if s == nil {
 		return false, ErrSubscriptionNotFound
 	}
-	close(s.err)
+	// Idempotent close so a write failure that already closed this sub
+	// can race with an explicit unsubscribe without panicking.
+	s.close(nil)
 	delete(h.serverSubs, id)
 	return true, nil
 }
