@@ -230,6 +230,18 @@ func (api *API) BouncingStats(_ context.Context) BouncingStats {
 	return api.tracker.BouncingStats()
 }
 
+// BlockClassStats returns cumulative-since-startup counts of chain-
+// included txs sorted into {private, announcedOnly, bounced, pooledClean}
+// against the tracker's pre-block knowledge of each hash. Mirrors the
+// lens-side Stats Included-by-submission-path buckets so the two views
+// can be compared directly. Cheap: returns four atomic Loads.
+//
+//	> txtracker.blockClassStats()
+//	{ total: 12834, private: 41, announcedOnly: 12, bounced: 8, pooledClean: 12773 }
+func (api *API) BlockClassStats(_ context.Context) BlockClassStats {
+	return api.tracker.BlockClassStats()
+}
+
 // BouncingPeers returns the sorted list of distinct peers that
 // triggered an announce- or body-side bouncing hit on the given
 // hash. Empty for hashes not in the bouncing map. Companion to

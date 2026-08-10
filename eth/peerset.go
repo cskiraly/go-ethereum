@@ -23,6 +23,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/eth/protocols/snap"
 	"github.com/ethereum/go-ethereum/p2p"
@@ -202,6 +203,26 @@ func (ps *peerSet) len() int {
 	defer ps.lock.RUnlock()
 
 	return len(ps.peers)
+}
+
+// peerCoverage reports how many of the currently-connected eth peers
+// have `hash` in their per-peer known-tx cache, alongside the total
+// peer count at the time of the call. Used by the txtracker block-
+// classification metrics to derive a peerset-proxy public/private
+// signal complementary to the tracker's own pre-block knowledge.
+//
+// Walks the peer map once under the read lock; cost is one bounded
+// lookup per peer (knownTxs is a fixed-size LRU set).
+func (ps *peerSet) peerCoverage(hash common.Hash) (total, knowing int) {
+	ps.lock.RLock()
+	defer ps.lock.RUnlock()
+	for _, p := range ps.peers {
+		total++
+		if p.KnownTransaction(hash) {
+			knowing++
+		}
+	}
+	return
 }
 
 // snapLen returns the number of `snap` peers whose negotiated version is at

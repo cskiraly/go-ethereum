@@ -162,6 +162,18 @@ type Tracker struct {
 	// txtracker_bouncingStats. Allocated by New(); never reset.
 	bouncingStats *bouncingStatsAcc
 
+	// blockClass accumulates cumulative-since-startup per-bucket
+	// classifications of chain-included txs. Atomic counters; read
+	// without holding t.mu. See block_class.go.
+	blockClass *blockClassAcc
+
+	// peerCoverage, when non-nil, is invoked once per chain-included tx
+	// to ask the eth peerset how many peers know the hash. Wired by the
+	// eth backend via SetPeerCoverage so the tracker package stays free
+	// of eth-protocol imports. Lock-free read; the tracker treats nil as
+	// "Source B disabled".
+	peerCoverage PeerCoverageFunc
+
 	// pooledBySender counts currently-StatusPooled txs per sender, kept
 	// in sync by updatePooledCount on every transition + by evict on
 	// FIFO removal. Used at drop time to decide whether to apply the
@@ -211,6 +223,7 @@ func New() *Tracker {
 		step:           make(chan struct{}, 1),
 		pooledBySender: make(map[common.Address]int),
 		bouncingStats:  newBouncingStatsAcc(),
+		blockClass:     newBlockClassAcc(),
 	}
 	// Bouncing toggles default to ON so the protection is active from
 	// startup; the operator flips one OFF via the txtracker RPC to A/B
@@ -220,6 +233,14 @@ func New() *Tracker {
 	t.bouncingRejectEnabled.Store(true)
 	t.bouncingFeeGateEnabled.Store(true)
 	return t
+}
+
+// SetPeerCoverage wires the eth-peerset "does any peer know this hash"
+// callback used by the Source B block-classification metrics. Pass nil
+// to disable. Must be called BEFORE Start so the block-import loop
+// sees a stable reference without a write lock.
+func (t *Tracker) SetPeerCoverage(f PeerCoverageFunc) {
+	t.peerCoverage = f
 }
 
 // SetCapturePath enables NDJSON capture of every Observation and
@@ -1198,10 +1219,26 @@ func (t *Tracker) handleChainHead(ev core.ChainHeadEvent) {
 	// 150×tx.Hash + 150×map-miss per block (~1.5µs) — small per
 	// block but unbounded across catch-up.
 	gateRecoverSender := t.bouncingCount.Load() > 0
+	// Gate block-classification metrics on the tracker having at least
+	// one tracked entry. During cold-start catch-up before any pool
+	// activity, every block tx would otherwise look "private" and swamp
+	// the counters with no diagnostic value.
+	classifyBlocks := len(t.txs) > 0
 	if len(t.txs) > 0 || gateRecoverSender {
 		for _, tx := range block.Transactions() {
 			h := tx.Hash()
 			ti, ok := t.txs[h]
+			if classifyBlocks {
+				var tiForClass *TxInfo
+				if ok {
+					tiForClass = ti
+				}
+				t.blockClass.record(classifyBlockInclusion(tiForClass))
+				if t.peerCoverage != nil {
+					total, knowing := t.peerCoverage(h)
+					t.blockClass.recordPeerCoverage(total, knowing)
+				}
+			}
 			if !ok {
 				// Create a fresh TxInfo so the chain-inclusion transition
 				// flows through the standard state machine and a 0→5

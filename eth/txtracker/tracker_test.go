@@ -2231,4 +2231,11 @@ loop:
 	if len(ti.Announcers) != 0 {
 		t.Errorf("chain-only tx has unexpected Announcers: %v", ti.Announcers)
 	}
+	// classifyBlockInclusion on the just-created TxInfo (post-block)
+	// will be PooledClean because Pooled is set… wait no: chain-only
+	// path keeps Pooled at zero. So classifier sees no hint, no pool,
+	// no bounce → Private. Confirm.
+	if got := classifyBlockInclusion(ti); got != BlockClassPrivate {
+		t.Errorf("classifyBlockInclusion(post-block chain-only): got %d, want Private(%d)", got, BlockClassPrivate)
+	}
 }

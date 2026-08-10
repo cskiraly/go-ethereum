@@ -45,4 +45,26 @@ var (
 	bouncingWhatifInsertedDropMeter   = metrics.NewRegisteredMeter("eth/txtracker/bouncing/whatif/inserted_drop", nil)
 	bouncingWhatifInsertedRejectMeter = metrics.NewRegisteredMeter("eth/txtracker/bouncing/whatif/inserted_reject", nil)
 	bouncingWhatifGateBlockedMeter    = metrics.NewRegisteredMeter("eth/txtracker/bouncing/whatif/gate_blocked", nil)
+
+	// Block-classification meters. Each chain-included tx is sorted
+	// into exactly one of {private, announcedOnly, bounced, pooledClean}
+	// based on the tracker's pre-block knowledge of the hash. Mirrors
+	// the lens-side Stats Included-by-submission-path buckets so the two
+	// views can be cross-checked: deltas between server and lens
+	// localize WS-delivery losses vs tracker-coverage gaps.
+	blockClassTotalMeter         = metrics.NewRegisteredMeter("eth/txtracker/block/total", nil)
+	blockClassPrivateMeter       = metrics.NewRegisteredMeter("eth/txtracker/block/private", nil)
+	blockClassAnnouncedOnlyMeter = metrics.NewRegisteredMeter("eth/txtracker/block/announcedOnly", nil)
+	blockClassBouncedMeter       = metrics.NewRegisteredMeter("eth/txtracker/block/bounced", nil)
+	blockClassPooledCleanMeter   = metrics.NewRegisteredMeter("eth/txtracker/block/pooledClean", nil)
+
+	// Source B — peerset proxy. peersetKnown counts included txs where
+	// at least one connected peer had the hash in their knownTxs cache.
+	// CoverageBp is the per-tx ratio in basis points (knowing*10000/total)
+	// — a histogram so an operator can see whether public hashes were
+	// known to a handful of peers (low coverage, churn-dominated) or
+	// the whole peerset (high coverage, well-propagated).
+	blockClassPeersetKnownMeter     = metrics.NewRegisteredMeter("eth/txtracker/block/peerset/known", nil)
+	blockClassPeersetUnknownMeter   = metrics.NewRegisteredMeter("eth/txtracker/block/peerset/unknown", nil)
+	blockClassPeersetCoverageBpHist = metrics.NewRegisteredHistogram("eth/txtracker/block/peerset/coverageBp", nil, metrics.NewExpDecaySample(1028, 0.015))
 )

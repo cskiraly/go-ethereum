@@ -236,6 +236,9 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	// Source B for block-classification metrics: ask the peerset whether
 	// any peer knows each chain-included tx. Done via a closure so the
 	// txtracker package stays free of eth-protocol imports.
+	h.txTracker.SetPeerCoverage(func(hash common.Hash) (int, int) {
+		return h.peers.peerCoverage(hash)
+	})
 	if config.TxTrackerCapturePath != "" {
 		if err := h.txTracker.SetCapturePath(config.TxTrackerCapturePath); err != nil {
 			log.Warn("txtracker capture disabled", "err", err)
