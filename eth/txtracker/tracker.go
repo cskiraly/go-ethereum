@@ -56,6 +56,7 @@ package txtracker
 import (
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -100,6 +101,12 @@ type StatsConsumer interface {
 	NotifyAccepted(peer string, count int)
 	NotifyRejected(peer string)
 	NotifyDropped(peer string)
+	// NotifyBouncingBlocked fires when the tracker's bouncing
+	// protection suppressed `count` peer-attributed events — either
+	// announces we didn't fetch (IsBouncing-true path) or pushed
+	// bodies we intercepted before pool.Add. The lens Peers tab
+	// surfaces it as a "this peer is hammering us" column.
+	NotifyBouncingBlocked(peer string, count int)
 }
 
 // Tracker records per-tx lifecycle state, emits observations and state
@@ -135,6 +142,38 @@ type Tracker struct {
 	// completeness — a tracked entry should never be at Unknown.
 	evictedByStatus [9]uint64
 
+	// bouncing holds hashes the local pool just evicted for an
+	// overflow-style reason ("rate limited", "capacity", "replaced").
+	// IsBouncing consults this map on the fetcher's announce hot
+	// path. See bouncing.go.
+	bouncing sync.Map // map[common.Hash]bouncingEntry
+
+	// bouncingCount mirrors len(bouncing) as an atomic counter so the
+	// chain-head loop can cheaply skip recoverSender on untracked
+	// txs when there are no bouncing entries to clear (the dominant
+	// case during catch-up after a restart). Maintained in lockstep
+	// with bouncingSizeGauge in markBouncing / deleteBouncing.
+	bouncingCount atomic.Int64
+
+	// bouncingStats accumulates cumulative-since-startup aggregates
+	// over the bouncing map: inserts per source/reason, clears per
+	// path, sums of per-entry counters for departed entries, and
+	// histograms over lifetime and announces-blocked. Surfaced via
+	// txtracker_bouncingStats. Allocated by New(); never reset.
+	bouncingStats *bouncingStatsAcc
+
+	// pooledBySender counts currently-StatusPooled txs per sender, kept
+	// in sync by updatePooledCount on every transition + by evict on
+	// FIFO removal. Used at drop time to decide whether to apply the
+	// single-tx TTL on a new bouncing entry. Accessed under t.mu.
+	pooledBySender map[common.Address]int
+
+	// poolFloor, if set, gates bouncing-entry clearance on whether the
+	// tx fee would still pass admission (avoids refetches that would
+	// just rebound as underpriced). Set via SetPoolFloor before
+	// Start; read from the chain-head goroutine without locking.
+	poolFloor PoolFloor
+
 	emitQuit chan struct{} // signals both emit loops to stop
 
 	// capture is an optional NDJSON sink that mirrors every
@@ -152,13 +191,15 @@ type Tracker struct {
 // New creates a new tracker.
 func New() *Tracker {
 	t := &Tracker{
-		txs:        make(map[common.Hash]*TxInfo),
-		maxTracked: defaultMaxTracked,
-		obsCh:      make(chan Observation, emitBuffer),
-		stateCh:    make(chan StateChange, emitBuffer),
-		emitQuit:   make(chan struct{}),
-		quit:       make(chan struct{}),
-		step:       make(chan struct{}, 1),
+		txs:            make(map[common.Hash]*TxInfo),
+		maxTracked:     defaultMaxTracked,
+		obsCh:          make(chan Observation, emitBuffer),
+		stateCh:        make(chan StateChange, emitBuffer),
+		emitQuit:       make(chan struct{}),
+		quit:           make(chan struct{}),
+		step:           make(chan struct{}, 1),
+		pooledBySender: make(map[common.Address]int),
+		bouncingStats:  newBouncingStatsAcc(),
 	}
 	return t
 }
@@ -310,6 +351,14 @@ func (t *Tracker) GetTx(hash common.Hash) *TxInfo {
 	if ti.To != nil {
 		to := *ti.To
 		out.To = &to
+	}
+	// Populate the Bouncing flag at read time from the sync.Map rather
+	// than mirroring it on the TxInfo struct itself — the bouncing
+	// entry's lifecycle (insert / TTL / sender-inclusion / FIFO clear)
+	// is independent of t.mu, so a stored boolean would drift. Cheap:
+	// one sync.Map.Load per GetTx.
+	if _, ok := t.bouncing.Load(hash); ok {
+		out.Bouncing = true
 	}
 	return &out
 }
@@ -484,13 +533,13 @@ func (t *Tracker) NotifyRejected(peer string, hash common.Hash, err error) {
 	if err != nil {
 		reason = err.Error()
 	}
-	t.notifyHashReason(peer, hash, reason, ObsPoolRejected)
+	t.notifyHashReason(peer, hash, reason, ObsPoolRejected, bouncingRejectionProtected(err))
 }
 
 // NotifyDropped records that a previously-accepted tx was removed from
 // the pool. Transitions to StatusDropped. No-op if the hash is unknown.
 func (t *Tracker) NotifyDropped(hash common.Hash, reason core.RemovalReason) {
-	t.notifyHashReason("", hash, reason.String(), ObsPoolEvicted)
+	t.notifyHashReason("", hash, reason.String(), ObsPoolEvicted, bouncingDropProtected(reason))
 }
 
 // notifyPeerHashes is the shared implementation for multi-hash,
@@ -597,7 +646,7 @@ func (t *Tracker) notifyAnnouncedHashes(peer string, hashes []common.Hash, types
 
 // notifyHashReason handles the single-hash, reason-carrying kinds
 // (ObsPoolRejected, ObsPoolEvicted).
-func (t *Tracker) notifyHashReason(peer string, hash common.Hash, reason string, kind ObsKind) {
+func (t *Tracker) notifyHashReason(peer string, hash common.Hash, reason string, kind ObsKind, bounceProtected bool) {
 	now := time.Now()
 
 	var (
@@ -638,7 +687,19 @@ func (t *Tracker) notifyHashReason(peer string, hash common.Hash, reason string,
 		if kind == ObsPoolEvicted && c.NewStatus == StatusDropped {
 			ti.DropReason = reason
 			dropDeliverer = ti.Deliverer
+			if bounceProtected {
+				t.markBouncing(hash, ti, now, bouncingFromDrop, reason)
+			}
 		}
+	}
+	// Submission-time rejections with bounce-loop reasons (gap,
+	// capacity, auth conflict) get the same protection as
+	// post-acceptance overflow drops. Done outside the maybeTransition
+	// branch so a hash that's already StatusRejected gets re-marked
+	// after a previous bouncing entry was cleared (e.g. by
+	// sender-inclusion) and the fetcher tried again.
+	if kind == ObsPoolRejected && bounceProtected {
+		t.markBouncing(hash, ti, now, bouncingFromReject, reason)
 	}
 	t.evict()
 	obsDrops := t.obsDropped
@@ -872,6 +933,7 @@ func (t *Tracker) maybeTransition(ti *TxInfo, obs Observation, now time.Time, pe
 	}
 	ti.Status = next
 	ti.LastChange = now
+	t.updatePooledCount(ti.From, old, next)
 	switch next {
 	case StatusRequested:
 		ti.Requested = now
@@ -969,7 +1031,17 @@ func (t *Tracker) evict() {
 			if int(ti.Status) < len(t.evictedByStatus) {
 				t.evictedByStatus[ti.Status]++
 			}
+			// Keep pooledBySender in sync when a still-Pooled entry
+			// leaves the hot map: the count must reflect entries we
+			// can still see.
+			if ti.Status == StatusPooled && ti.From != (common.Address{}) {
+				t.pooledBySender[ti.From]--
+				if t.pooledBySender[ti.From] <= 0 {
+					delete(t.pooledBySender, ti.From)
+				}
+			}
 		}
+		t.deleteBouncing(oldest, clearFIFO)
 		delete(t.txs, oldest)
 	}
 	if cap(t.order) > 2*t.maxTracked {
@@ -1082,13 +1154,33 @@ func (t *Tracker) handleChainHead(ev core.ChainHeadEvent) {
 	}
 
 	inclusions := make(map[string]int)
-	// Skip the per-tx loop entirely when there's nothing to update.
+	// Senders of txs in this block — used after unlock to clear any
+	// bouncing entries belonging to those senders. A landed tx frees
+	// the sender's pool slot, so previously-rate-limited / capacity /
+	// replaced hashes from the same sender deserve a fresh chance.
+	// Populated for every block tx (tracked or not) so a tx that
+	// reaches the chain without ever passing through our pool / fetcher
+	// still counts as a sender-inclusion signal for the bouncing map.
+	//
+	// recoverSender on untracked block txs is gated on the bouncing
+	// map being non-empty: if there are no bouncing entries to clear,
+	// deriving the sender of every block tx is wasted ECDSA work.
+	// Crucially this gate fires during catch-up after a node restart
+	// (the bouncing map starts empty) where the chain emits a flood
+	// of head events — without the gate, every block tx of every
+	// catch-up block ate ~100µs of cache-cold ECDSA, blocking chain
+	// insertion. Read once outside the loop so a steady-state
+	// non-empty map doesn't pay an atomic-load per tx.
+	includedSenders := make(map[common.Address]struct{})
+	// Skip the per-tx loop entirely when there's nothing to update
+	// (no tracked entries) and nothing to clear (no bouncing entries).
 	// Common during catch-up after a fresh restart, where the chain
 	// emits a flood of head events before the pool has produced any
 	// NotifyAccepted calls. Without this guard we still pay
 	// 150×tx.Hash + 150×map-miss per block (~1.5µs) — small per
 	// block but unbounded across catch-up.
-	if len(t.txs) > 0 {
+	gateRecoverSender := t.bouncingCount.Load() > 0
+	if len(t.txs) > 0 || gateRecoverSender {
 		for _, tx := range block.Transactions() {
 			h := tx.Hash()
 			ti, ok := t.txs[h]
@@ -1103,7 +1195,9 @@ func (t *Tracker) handleChainHead(ev core.ChainHeadEvent) {
 				// chain-only origin by Status transitioning 0→5 (or
 				// equivalently, by Pooled / Requested / Received all
 				// being zero on the resulting TxInfo). fillTxBody below
-				// populates body fields + From from the block tx.
+				// populates body fields + From from the block tx, which
+				// also feeds the bouncing-clear includedSenders set —
+				// supersedes the previous gateRecoverSender shortcut.
 				ti = t.ensureInfo(h, now)
 			}
 			// Body fields may still be empty if the tracker never observed
@@ -1111,6 +1205,9 @@ func (t *Tracker) handleChainHead(ev core.ChainHeadEvent) {
 			// through a path that skipped the receive notification). The
 			// block carries the body, so fill in here as a fallback.
 			fillTxBody(ti, tx)
+			if ti.From != (common.Address{}) {
+				includedSenders[ti.From] = struct{}{}
+			}
 			// Pre-slot gate on peer credit: a tx whose body we accepted at
 			// or after this block's slot time is almost certainly a
 			// re-broadcast of an already-mined tx, not genuine relay work,
@@ -1167,6 +1264,12 @@ func (t *Tracker) handleChainHead(ev core.ChainHeadEvent) {
 	t.obsDropped = obsDrops
 	t.stateDropped = stateDrops
 	t.mu.Unlock()
+
+	baseFee := uint64(0)
+	if ev.Header.BaseFee != nil && ev.Header.BaseFee.IsUint64() {
+		baseFee = ev.Header.BaseFee.Uint64()
+	}
+	t.clearBouncingForSenders(includedSenders, baseFee)
 
 	if t.consumer != nil {
 		t.consumer.NotifyBlock(inclusions, finalized)

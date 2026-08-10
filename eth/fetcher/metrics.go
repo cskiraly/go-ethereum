@@ -25,6 +25,7 @@ var (
 	txAnnounceKnownMeter       = metrics.NewRegisteredMeter("eth/fetcher/transaction/announces/known", nil)
 	txAnnounceUnderpricedMeter = metrics.NewRegisteredMeter("eth/fetcher/transaction/announces/underpriced", nil)
 	txAnnounceOnchainMeter     = metrics.NewRegisteredMeter("eth/fetcher/transaction/announces/onchain", nil)
+	txAnnounceBouncingMeter    = metrics.NewRegisteredMeter("eth/fetcher/transaction/announces/bouncing", nil)
 	txAnnounceDOSMeter         = metrics.NewRegisteredMeter("eth/fetcher/transaction/announces/dos", nil)
 
 	txBroadcastInMeter          = metrics.NewRegisteredMeter("eth/fetcher/transaction/broadcasts/in", nil)

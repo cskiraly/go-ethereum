@@ -268,18 +268,25 @@ type TxInfo struct {
 	// than wrapping. Useful for "this tx is being announced 100× by
 	// a single peer after we dropped it" diagnostics without polluting
 	// the active-cycle bookkeeping.
-	AnnouncedAfterTerminal uint8           `json:"announcedAfterTerminal,omitempty"`
-	ReceivedAfterTerminal  uint8           `json:"receivedAfterTerminal,omitempty"`
-	RequestedAfterTerminal uint8           `json:"requestedAfterTerminal,omitempty"`
-	PooledAfterTerminal    uint8           `json:"pooledAfterTerminal,omitempty"`
-	ReorgRestarts          uint8           `json:"reorgRestarts,omitempty"`
-	TxType                 uint8           `json:"txType,omitempty"`
-	TxSize                 uint32          `json:"txSize,omitempty"`
-	From                   common.Address  `json:"from,omitempty"`
-	Nonce                  uint64          `json:"nonce,omitempty"`
-	Gas                    uint64          `json:"gas,omitempty"`
-	GasFeeCap              *hexutil.Big    `json:"gasFeeCap,omitempty"`
-	GasTipCap              *hexutil.Big    `json:"gasTipCap,omitempty"`
-	Value                  *hexutil.Big    `json:"value,omitempty"`
-	To                     *common.Address `json:"to,omitempty"`
+	AnnouncedAfterTerminal uint8  `json:"announcedAfterTerminal,omitempty"`
+	ReceivedAfterTerminal  uint8  `json:"receivedAfterTerminal,omitempty"`
+	RequestedAfterTerminal uint8  `json:"requestedAfterTerminal,omitempty"`
+	PooledAfterTerminal    uint8  `json:"pooledAfterTerminal,omitempty"`
+	ReorgRestarts          uint8  `json:"reorgRestarts,omitempty"`
+	TxType                 uint8  `json:"txType,omitempty"`
+	TxSize                 uint32 `json:"txSize,omitempty"`
+	// Bouncing is true while the tracker has a live bouncing entry
+	// for this hash — i.e. announces are suppressed and pushed bodies
+	// are intercepted before pool.Add. Populated by GetTx at read
+	// time, not stored on the TxInfo itself (the bouncing-map
+	// lifecycle is decoupled from t.mu, so a mirrored field would
+	// drift). Omitted from JSON when false.
+	Bouncing  bool            `json:"bouncing,omitempty"`
+	From      common.Address  `json:"from,omitempty"`
+	Nonce     uint64          `json:"nonce,omitempty"`
+	Gas       uint64          `json:"gas,omitempty"`
+	GasFeeCap *hexutil.Big    `json:"gasFeeCap,omitempty"`
+	GasTipCap *hexutil.Big    `json:"gasTipCap,omitempty"`
+	Value     *hexutil.Big    `json:"value,omitempty"`
+	To        *common.Address `json:"to,omitempty"`
 }

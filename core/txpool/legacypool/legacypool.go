@@ -58,8 +58,9 @@ const (
 
 var (
 	// ErrTxPoolOverflow is returned if the transaction pool is full and can't accept
-	// another remote transaction.
-	ErrTxPoolOverflow = errors.New("txpool is full")
+	// another remote transaction. Alias of the shared txpool sentinel, kept
+	// here for compatibility with existing importers.
+	ErrTxPoolOverflow = txpool.ErrTxPoolOverflow
 
 	// ErrOutOfOrderTxFromDelegated is returned when the transaction with gapped
 	// nonce received from the accounts with delegation or pending delegation.
@@ -67,12 +68,13 @@ var (
 
 	// ErrAuthorityReserved is returned if a transaction has an authorization
 	// signed by an address which already has in-flight transactions known to the
-	// pool.
-	ErrAuthorityReserved = errors.New("authority already reserved")
+	// pool. Alias of the shared txpool sentinel.
+	ErrAuthorityReserved = txpool.ErrAuthorityReserved
 
 	// ErrFutureReplacePending is returned if a future transaction replaces a pending
-	// one. Future transactions should only be able to replace other future transactions.
-	ErrFutureReplacePending = errors.New("future transaction tries to replace pending")
+	// one. Future transactions should only be able to replace other future
+	// transactions. Alias of the shared txpool sentinel.
+	ErrFutureReplacePending = txpool.ErrFutureReplacePending
 )
 
 var (
@@ -438,6 +440,30 @@ func (pool *LegacyPool) SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEv
 func (pool *LegacyPool) trackRemoved(hash common.Hash, reason core.RemovalReason) {
 	pool.removed = append(pool.removed, hash)
 	pool.removedReasons = append(pool.removedReasons, reason)
+}
+
+// MinTip reports the effective-tip floor a new transaction must clear at
+// the given base fee to be admitted. When the pool isn't full this is
+// just the configured minimum tip; when the pool is full it's lifted to
+// the effective tip of the cheapest pooled tx (a new entrant must
+// displace it). The bouncing-protection path consults MinTip per block
+// to avoid re-fetching hashes whose stored fees have aged below the
+// current floor — refetching such a tx would just bounce off as
+// underpriced.
+func (pool *LegacyPool) MinTip(baseFee uint64) uint64 {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+
+	floor := pool.gasTip.Load().Uint64()
+	capacity := pool.config.GlobalSlots + pool.config.GlobalQueue
+	if uint64(pool.all.Slots()) < capacity {
+		return floor
+	}
+	bf := new(big.Int).SetUint64(baseFee)
+	if tip := pool.priced.lowestEffectiveTip(bf); tip > floor {
+		floor = tip
+	}
+	return floor
 }
 
 // SetGasTip updates the minimum gas tip required by the transaction pool for a

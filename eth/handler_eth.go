@@ -85,8 +85,14 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		if err := handleTransactions(peer, txs, true); err != nil {
 			return fmt.Errorf("Transactions: %v", err)
 		}
+		// NotifyReceived runs on the full slice so the wire-truth
+		// observation (ObsDeliveredInbound + ReceivedAfterTerminal++)
+		// fires for every body the peer actually pushed. The
+		// bouncing-aware filter then strips hashes we've flagged so
+		// the pool never sees a body that would bounce off again.
 		h.txTracker.NotifyReceived(peer.ID(), txs)
-		return h.txFetcher.Enqueue(peer.ID(), peer.Version(), txs, false)
+		toEnqueue, _ := h.txTracker.FilterInboundBodies(peer.ID(), txs)
+		return h.txFetcher.Enqueue(peer.ID(), peer.Version(), toEnqueue, false)
 
 	case *eth.PooledTransactionsPacket:
 		txs, err := packet.List.Items()
@@ -97,7 +103,8 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 			return fmt.Errorf("PooledTransactions: %v", err)
 		}
 		h.txTracker.NotifyReceived(peer.ID(), txs)
-		return h.txFetcher.Enqueue(peer.ID(), peer.Version(), txs, true)
+		toEnqueue, _ := h.txTracker.FilterInboundBodies(peer.ID(), txs)
+		return h.txFetcher.Enqueue(peer.ID(), peer.Version(), toEnqueue, true)
 
 	case *eth.CellsResponse:
 		outer, err := packet.Cells.Items()

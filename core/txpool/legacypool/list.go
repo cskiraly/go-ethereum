@@ -581,6 +581,49 @@ func (l *pricedList) Removed(count int) {
 	l.Reheap()
 }
 
+// lowestEffectiveTip returns the effective tip at baseFee of the
+// cheapest currently-pooled tx across both priced heaps. Returns 0
+// when both heaps are empty (or every head is stale).
+//
+// Read-only: stales at the heap heads are skipped without popping, so
+// callers can hold the pool's read lock. A stale head transiently
+// hides the true minimum until the next write-side path prunes it,
+// which only causes lowestEffectiveTip to under-report briefly — the
+// configured-min floor still applies in MinTip.
+func (l *pricedList) lowestEffectiveTip(baseFee *big.Int) uint64 {
+	headTip := func(h *priceHeap) (uint64, bool) {
+		if len(h.list) == 0 {
+			return 0, false
+		}
+		head := h.list[0]
+		if l.all.Get(head.Hash()) == nil {
+			return 0, false // stale; skip
+		}
+		tip, err := head.EffectiveGasTip(baseFee)
+		if err != nil || tip == nil {
+			return 0, false
+		}
+		if !tip.IsUint64() {
+			return ^uint64(0), true
+		}
+		return tip.Uint64(), true
+	}
+	uTip, hasU := headTip(&l.urgent)
+	fTip, hasF := headTip(&l.floating)
+	switch {
+	case hasU && hasF:
+		if uTip < fTip {
+			return uTip
+		}
+		return fTip
+	case hasU:
+		return uTip
+	case hasF:
+		return fTip
+	}
+	return 0
+}
+
 // Underpriced checks whether a transaction is cheaper than (or as cheap as) the
 // lowest priced (remote) transaction currently being tracked.
 func (l *pricedList) Underpriced(tx *types.Transaction) bool {

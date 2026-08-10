@@ -135,6 +135,14 @@ type handlerConfig struct {
 	// Observation and StateChange to a rotating NDJSON file (or directory).
 	// Empty disables capture (default). See eth/txtracker/capture.go.
 	TxTrackerCapturePath string
+
+	// PoolFloor exposes the local pool's effective-tip admission floor
+	// to the txtracker's bouncing-protection sweep. Optional; nil
+	// disables the stage-2 fee gate (sender-inclusion alone clears
+	// bouncing entries, as in stage 1). Wired to the legacypool in
+	// eth/backend.go so legacy bouncing entries can be re-gated against
+	// current pool conditions.
+	PoolFloor txtracker.PoolFloor
 }
 
 type handler struct {
@@ -237,6 +245,18 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	}
 	h.peerStats = peerstats.New()
 	h.txFetcher = fetcher.NewTxFetcher(h.chain, validateMeta, addTxs, fetchTx, h.removePeer, h.txTracker.NotifyAccepted, h.txTracker.NotifyRejected, h.peerStats.NotifyRequestResult, blobBuffer)
+	// Anti-bounce: the tracker knows which hashes the local pool just
+	// evicted as "rate limited" / "capacity" / "replaced" and reports
+	// them via IsBouncing on the announce hot path. Wired before Start
+	// so the fetcher's goroutines see a stable field.
+	h.txFetcher.SetBouncingChecker(h.txTracker)
+	if config.PoolFloor != nil {
+		// Stage-2 fee gate: clearance of a bouncing entry on
+		// sender-inclusion now also requires the tx fee to clear the
+		// pool's current admission floor, so we don't waste a refetch
+		// on a hash that would just be rejected as underpriced.
+		h.txTracker.SetPoolFloor(config.PoolFloor)
+	}
 
 	// Construct the blob fetcher for cell-based blob data availability
 	blobCallbacks := fetcher.BlobFetcherFunctions{

@@ -136,6 +136,21 @@ type txDrop struct {
 	peer string
 }
 
+// BouncingChecker reports whether re-fetching a hash should be suppressed
+// because the local pool just evicted it for an overflow-style reason
+// ("rate limited", "capacity", "replaced") and a re-pool would just bounce
+// off the same condition. Implemented by eth/txtracker.Tracker; tests can
+// supply a stub. Read on the announce hot path; the implementation is
+// expected to be lock-free.
+//
+// The peer arg lets the checker attribute the suppressed announce to the
+// peer that produced it (per-entry distinct-peers set + per-peer counter
+// in peerstats). Empty string is allowed for callers that have no peer
+// context (legacy paths, tests).
+type BouncingChecker interface {
+	IsBouncing(hash common.Hash, peer string) bool
+}
+
 // TxFetcher is responsible for retrieving new transaction based on announcements.
 //
 // The fetcher operates in 3 stages:
@@ -161,6 +176,7 @@ type TxFetcher struct {
 
 	txSeq       uint64                             // Unique transaction sequence number
 	underpriced *lru.Cache[common.Hash, time.Time] // Transactions discarded as too cheap (don't re-fetch)
+	bouncing    BouncingChecker                    // Optional checker for overflow-evicted hashes; nil disables the extra skip
 
 	chain          *core.BlockChain                  // Blockchain interface for on-chain checks
 	txOnChainCache *lru.Cache[common.Hash, struct{}] // Cache to avoid fetching once the tx gets on chain
@@ -202,10 +218,20 @@ type TxFetcher struct {
 
 // NewTxFetcher creates a transaction fetcher to retrieve transaction
 // based on hash announcements.
-// Chain can be nil to disable on-chain checks.
+// Chain can be nil to disable on-chain checks. The optional bouncing
+// checker is consulted in the announce-skip path; nil disables that
+// extra suppression. Set it via SetBouncingChecker before Start; the
+// field is read without locking from the announce path.
 func NewTxFetcher(chain *core.BlockChain, validateMeta func(common.Hash, byte) error, addTxs func([]*types.Transaction) []error, fetchTxs func(string, []common.Hash) error,
 	dropPeer func(string), onAccepted func(string, []common.Hash), onRejected func(string, common.Hash, error), onRequestResult func(string, time.Duration, bool), buffer *blobpool.BlobBuffer) *TxFetcher {
 	return NewTxFetcherForTests(chain, validateMeta, addTxs, fetchTxs, dropPeer, onAccepted, onRejected, onRequestResult, buffer, mclock.System{}, time.Now, nil)
+}
+
+// SetBouncingChecker installs an optional bouncing checker. Must be
+// called before Start; a later call would race with the fetcher's
+// announce-handling goroutines. nil clears any previously-set checker.
+func (f *TxFetcher) SetBouncingChecker(bc BouncingChecker) {
+	f.bouncing = bc
 }
 
 // NewTxFetcherForTests is a testing method to mock out the realtime clock with
@@ -264,6 +290,7 @@ func (f *TxFetcher) Notify(peer string, kinds []byte, sizes []uint32, hashes []c
 		duplicate   int64
 		onchain     int64
 		underpriced int64
+		bouncing    int64
 	)
 	for i, hash := range hashes {
 		err := f.validateMeta(hash, kinds[i])
@@ -289,6 +316,14 @@ func (f *TxFetcher) Notify(peer string, kinds []byte, sizes []uint32, hashes []c
 			continue
 		}
 
+		// Skip hashes the local pool just evicted as "rate limited" /
+		// "capacity" / "replaced" — re-fetching would just bounce off
+		// the same pool condition (see eth/txtracker.Tracker.IsBouncing).
+		if f.bouncing != nil && f.bouncing.IsBouncing(hash, peer) {
+			bouncing++
+			continue
+		}
+
 		unknownHashes = append(unknownHashes, hash)
 		if kinds[i] == types.BlobTxType {
 			blobFetchHashes = append(blobFetchHashes, hash)
@@ -302,6 +337,7 @@ func (f *TxFetcher) Notify(peer string, kinds []byte, sizes []uint32, hashes []c
 	txAnnounceKnownMeter.Mark(duplicate)
 	txAnnounceUnderpricedMeter.Mark(underpriced)
 	txAnnounceOnchainMeter.Mark(onchain)
+	txAnnounceBouncingMeter.Mark(bouncing)
 
 	// If anything's left to announce, push it into the internal loop
 	if len(unknownHashes) == 0 {

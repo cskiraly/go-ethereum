@@ -364,6 +364,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		SnapV2:               config.SnapV2,
 		FetchProbability:     config.BlobPool.FetchProbability,
 		TxTrackerCapturePath: config.TxTrackerCapturePath,
+		PoolFloor:            legacyPool, // legacypool exposes MinTip for the stage-2 fee gate
 	}); err != nil {
 		return nil, err
 	}

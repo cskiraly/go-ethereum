@@ -180,3 +180,49 @@ func (api *API) Diagnostics(_ context.Context) Diagnostics {
 func (api *API) CaptureInfo(_ context.Context) CaptureInfo {
 	return api.tracker.CaptureInfo()
 }
+
+// BouncingEntries returns a snapshot of the bouncing map. Each entry
+// carries the hash, the sender's address, the fee fields used by the
+// stage-2 fee gate, the two saved-bounce counters
+// (AnnouncesBlocked / BodiesBlocked), and the *size* of the distinct-
+// peers set. The peer list itself is omitted from the snapshot —
+// callers that need the names use txtracker_bouncingPeers(hash) for
+// on-demand per-hash lookup, which keeps the periodic poll cheap
+// even with hundreds of entries.
+//
+// The snapshot is capped at the top bouncingEntriesMaxResponse
+// entries by total suppressions, then sorted by hash for stable
+// ordering across polls. On a node where the bouncing map is well
+// under the cap the slice contains every entry; only the high-
+// volume long tail is trimmed.
+//
+//	> txtracker.bouncingEntries()
+//	[ { hash: "0x…", sender: "0x…", announcesBlocked: 5, bodiesBlocked: 2,
+//	    peersCount: 2, … }, … ]
+func (api *API) BouncingEntries(_ context.Context) []BouncingEntryInfo {
+	return api.tracker.BouncingEntries()
+}
+
+// BouncingStats returns aggregate cumulative-since-startup counters
+// over the bouncing map plus a live-snapshot of the current entries.
+// See the BouncingStats type for field meanings. Cheap: walks the
+// live bouncing sync.Map once (bounded by the current entry count,
+// usually 100s-1000s) and reads atomic counters; safe to poll at
+// 1-5s cadence from a UI.
+//
+//	> txtracker.bouncingStats()
+//	{ liveEntries: 142, cumInsertsReject: 9871, cumAnnouncesBlocked: 234561,
+//	  insertsByReason: { insufficient_funds: 7800, … }, … }
+func (api *API) BouncingStats(_ context.Context) BouncingStats {
+	return api.tracker.BouncingStats()
+}
+
+// BouncingPeers returns the sorted list of distinct peers that
+// triggered an announce- or body-side bouncing hit on the given
+// hash. Empty for hashes not in the bouncing map. Companion to
+// BouncingEntries, which carries only the peer count per entry —
+// the lens detail panel uses this when the user opens a row to
+// avoid shipping every entry's peer list on every poll.
+func (api *API) BouncingPeers(_ context.Context, hash common.Hash) []string {
+	return api.tracker.BouncingPeers(hash)
+}

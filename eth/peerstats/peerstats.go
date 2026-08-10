@@ -94,13 +94,14 @@ type PeerStats struct {
 	// StatsConsumer; included / finalized are summed from per-block
 	// deltas in NotifyBlock. Survives across consumer reloads (lives
 	// for the life of the geth process).
-	Announced int64 // Inbound NewPooledTransactionHashes per hash
-	Delivered int64 // Inbound bodies received from this peer
-	Accepted  int64 // Pool accepted a body delivered by this peer
-	Rejected  int64 // Pool rejected a body delivered by this peer
-	Dropped   int64 // Pool entries from this peer later evicted/dropped
-	Included  int64 // Cumulative count of this peer's deliveries that reached chain
-	Finalized int64 // Cumulative count of this peer's deliveries that reached finalization
+	Announced       int64 // Inbound NewPooledTransactionHashes per hash
+	Delivered       int64 // Inbound bodies received from this peer
+	Accepted        int64 // Pool accepted a body delivered by this peer
+	Rejected        int64 // Pool rejected a body delivered by this peer
+	Dropped         int64 // Pool entries from this peer later evicted/dropped
+	BouncingBlocked int64 // Bouncing-protection suppressions attributed to this peer: announce-side fetches we didn't issue plus pushed bodies we intercepted before pool.Add
+	Included        int64 // Cumulative count of this peer's deliveries that reached chain
+	Finalized       int64 // Cumulative count of this peer's deliveries that reached finalization
 	// EMAs and request-latency stats — see field-level docs.
 	RecentFinalized   float64       // EMA of per-block finalization credits (slow)
 	RecentIncluded    float64       // EMA of per-block inclusions (fast)
@@ -115,6 +116,7 @@ type peerStats struct {
 	accepted           int64
 	rejected           int64
 	dropped            int64
+	bouncingBlocked    int64
 	included           int64
 	finalized          int64
 	recentFinalized    float64
@@ -270,6 +272,24 @@ func (s *Stats) NotifyDropped(peer string) {
 	}
 }
 
+// NotifyBouncingBlocked records that count bouncing-protection
+// suppressions were attributed to this peer — either announces we
+// didn't fetch (IsBouncing returned true on the fetcher path) or
+// pushed bodies we intercepted before pool.Add. A high counter
+// signals a peer is repeatedly trying to push a previously-dropped
+// or previously-rejected tx, and tells operators where the noise
+// is coming from. Ignored for peers not currently registered.
+func (s *Stats) NotifyBouncingBlocked(peer string, count int) {
+	if peer == "" || count <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps := s.peers[peer]; ps != nil {
+		ps.bouncingBlocked += int64(count)
+	}
+}
+
 // NotifyRequestResult records a tx-request outcome for the given peer.
 // latency is the round-trip time (for timeouts, pass the timeout value).
 // timeout indicates whether the request timed out rather than receiving an
@@ -331,6 +351,7 @@ func (s *Stats) GetAllPeerStats() map[string]PeerStats {
 			Accepted:          ps.accepted,
 			Rejected:          ps.rejected,
 			Dropped:           ps.dropped,
+			BouncingBlocked:   ps.bouncingBlocked,
 			Included:          ps.included,
 			Finalized:         ps.finalized,
 			RecentFinalized:   ps.recentFinalized,

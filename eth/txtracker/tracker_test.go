@@ -209,11 +209,12 @@ type mockConsumer struct {
 	mu      sync.Mutex
 	signals []signal
 	// Per-peer counts for the kind-specific hooks.
-	announced map[string]int
-	delivered map[string]int
-	accepted  map[string]int
-	rejected  map[string]int
-	dropped   map[string]int
+	announced       map[string]int
+	delivered       map[string]int
+	accepted        map[string]int
+	rejected        map[string]int
+	dropped         map[string]int
+	bouncingBlocked map[string]int
 }
 
 type signal struct {
@@ -280,6 +281,15 @@ func (c *mockConsumer) NotifyDropped(peer string) {
 		c.dropped = make(map[string]int)
 	}
 	c.dropped[peer]++
+}
+
+func (c *mockConsumer) NotifyBouncingBlocked(peer string, count int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.bouncingBlocked == nil {
+		c.bouncingBlocked = make(map[string]int)
+	}
+	c.bouncingBlocked[peer] += count
 }
 
 func (c *mockConsumer) last() signal {
