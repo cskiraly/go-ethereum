@@ -797,6 +797,37 @@ func TestFilterInboundBodiesPartitions(t *testing.T) {
 	}
 }
 
+// TestFilterInboundBodiesWhatifPassesThrough verifies that with the
+// master toggle OFF the filter returns the full slice in toEnqueue
+// (matching the IsBouncing whatif semantics) and does not touch the
+// per-entry counter.
+func TestFilterInboundBodiesWhatifPassesThrough(t *testing.T) {
+	tr := New()
+	chain := newMockChain()
+	tr.Start(chain, nil)
+	defer tr.Stop()
+
+	key, _ := crypto.GenerateKey()
+	tx := signedTx(t, key, 1)
+	hash := driveBouncing(tr, "peerA", tx, core.RemovalRateLimited)
+
+	tr.SetBouncingFlag("main", false)
+	defer tr.SetBouncingFlag("main", true)
+
+	toEnqueue, blocked := tr.FilterInboundBodies("peerB", []*types.Transaction{tx})
+	if len(toEnqueue) != 1 || toEnqueue[0].Hash() != hash {
+		t.Fatalf("toEnqueue=%v; want [tx]", toEnqueue)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("blocked=%v; want empty under whatif", blocked)
+	}
+	v, _ := tr.bouncing.Load(hash)
+	entry := v.(*bouncingEntry)
+	if got := entry.bodiesBlocked.Load(); got != 0 {
+		t.Errorf("whatif path bumped bodiesBlocked: got %d, want 0", got)
+	}
+}
+
 // TestIsBouncingBumpsAnnouncesBlocked verifies that IsBouncing returning
 // true increments the entry's announcesBlocked counter and adds the
 // supplied peer to the distinct-peers set. The whatif path (main
@@ -834,6 +865,20 @@ func TestIsBouncingBumpsAnnouncesBlocked(t *testing.T) {
 		t.Errorf("distinct peers = %d; want 2", got)
 	}
 
+	// Main toggle OFF → IsBouncing returns false via the whatif path
+	// and must NOT bump the counter.
+	tr.SetBouncingFlag("main", false)
+	defer tr.SetBouncingFlag("main", true)
+	before := entry.announcesBlocked.Load()
+	if tr.IsBouncing(hash, "peerC") {
+		t.Fatalf("IsBouncing with main=false returned true; want false")
+	}
+	if got := entry.announcesBlocked.Load(); got != before {
+		t.Errorf("announcesBlocked bumped on whatif path: %d → %d", before, got)
+	}
+	if _, seen := entry.peers["peerC"]; seen {
+		t.Errorf("whatif path added peerC to distinct-peers set; should not")
+	}
 }
 
 // TestBouncingEntryRecordHit verifies the per-entry distinct-peers set

@@ -174,6 +174,17 @@ type Tracker struct {
 	// Start; read from the chain-head goroutine without locking.
 	poolFloor PoolFloor
 
+	// Runtime A/B toggles for the bouncing protection layers. All
+	// default to true; flipping any to false causes that layer to
+	// short-circuit while the corresponding bouncing/whatif/* meter
+	// records the would-have-fired event. Settable via the txtracker
+	// JSON-RPC namespace (BouncingFlags / SetBouncingFlag); read on
+	// hot paths without locking.
+	bouncingEnabled        atomic.Bool // master read toggle (IsBouncing)
+	bouncingDropEnabled    atomic.Bool // post-acceptance insert (NotifyDropped)
+	bouncingRejectEnabled  atomic.Bool // submission-time insert (NotifyRejected)
+	bouncingFeeGateEnabled atomic.Bool // stage-2 fee gate in clear sweep
+
 	emitQuit chan struct{} // signals both emit loops to stop
 
 	// capture is an optional NDJSON sink that mirrors every
@@ -201,6 +212,13 @@ func New() *Tracker {
 		pooledBySender: make(map[common.Address]int),
 		bouncingStats:  newBouncingStatsAcc(),
 	}
+	// Bouncing toggles default to ON so the protection is active from
+	// startup; the operator flips one OFF via the txtracker RPC to A/B
+	// the layer at runtime.
+	t.bouncingEnabled.Store(true)
+	t.bouncingDropEnabled.Store(true)
+	t.bouncingRejectEnabled.Store(true)
+	t.bouncingFeeGateEnabled.Store(true)
 	return t
 }
 

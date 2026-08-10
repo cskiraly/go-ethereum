@@ -18,6 +18,7 @@ package txtracker
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -181,6 +182,18 @@ func (api *API) CaptureInfo(_ context.Context) CaptureInfo {
 	return api.tracker.CaptureInfo()
 }
 
+// BouncingFlags returns the current state of the four runtime
+// bouncing-protection toggles. Defaults are all true; flipping any
+// to false short-circuits that protection layer while a parallel
+// bouncing/whatif/* meter records the would-have-fired events. Used
+// for live A/B comparison via geth's attach console:
+//
+//	> txtracker.bouncingFlags()
+//	{ main: true, drop: true, reject: true, fee_gate: true }
+func (api *API) BouncingFlags(_ context.Context) map[string]bool {
+	return api.tracker.BouncingFlags()
+}
+
 // BouncingEntries returns a snapshot of the bouncing map. Each entry
 // carries the hash, the sender's address, the fee fields used by the
 // stage-2 fee gate, the two saved-bounce counters
@@ -225,4 +238,19 @@ func (api *API) BouncingStats(_ context.Context) BouncingStats {
 // avoid shipping every entry's peer list on every poll.
 func (api *API) BouncingPeers(_ context.Context, hash common.Hash) []string {
 	return api.tracker.BouncingPeers(hash)
+}
+
+// SetBouncingFlag flips one of the four bouncing-protection toggles
+// at runtime and returns the previous value. Recognised names are
+// "main", "drop", "reject", and "fee_gate"; any other name yields
+// an RPC error.
+//
+//	> txtracker.setBouncingFlag("main", false)
+//	true   // previous value
+func (api *API) SetBouncingFlag(_ context.Context, name string, enabled bool) (bool, error) {
+	prev, ok := api.tracker.SetBouncingFlag(name, enabled)
+	if !ok {
+		return false, fmt.Errorf("unknown bouncing flag %q (valid: %v)", name, BouncingFlagNames)
+	}
+	return prev, nil
 }

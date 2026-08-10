@@ -35,4 +35,14 @@ var (
 	bouncingSizeGauge           = metrics.NewRegisteredGauge("eth/txtracker/bouncing/size", nil)
 	bouncingInsertedDropMeter   = metrics.NewRegisteredMeter("eth/txtracker/bouncing/inserted/drop", nil)
 	bouncingInsertedRejectMeter = metrics.NewRegisteredMeter("eth/txtracker/bouncing/inserted/reject", nil)
+
+	// What-if meters: bumped when the matching runtime toggle is OFF
+	// and the layer would have fired. Lets the operator A/B compare
+	// active vs counterfactual rates on a single live node by flipping
+	// flags via the txtracker JSON-RPC namespace. See
+	// SetBouncingFlag in api.go.
+	bouncingWhatifSuppressedMeter     = metrics.NewRegisteredMeter("eth/txtracker/bouncing/whatif/suppressed", nil)
+	bouncingWhatifInsertedDropMeter   = metrics.NewRegisteredMeter("eth/txtracker/bouncing/whatif/inserted_drop", nil)
+	bouncingWhatifInsertedRejectMeter = metrics.NewRegisteredMeter("eth/txtracker/bouncing/whatif/inserted_reject", nil)
+	bouncingWhatifGateBlockedMeter    = metrics.NewRegisteredMeter("eth/txtracker/bouncing/whatif/gate_blocked", nil)
 )

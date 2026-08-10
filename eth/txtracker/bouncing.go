@@ -198,6 +198,13 @@ func bouncingRejectionProtected(err error) bool {
 // The peer arg lets the entry's per-entry stats record which peer
 // triggered the suppression (distinct-peers set + announcesBlocked
 // counter). Empty peer is allowed and skips the per-peer accounting.
+//
+// When the master bouncingEnabled toggle is OFF, returns false even
+// for live entries and bumps bouncing/whatif/suppressed instead so an
+// operator running an A/B comparison can see the would-be suppression
+// rate while letting announces flow through to the fetcher unfiltered.
+// The whatif path does NOT bump the per-entry counter — that counter
+// only reflects suppressions that actually happened.
 func (t *Tracker) IsBouncing(hash common.Hash, peer string) bool {
 	v, ok := t.bouncing.Load(hash)
 	if !ok {
@@ -206,6 +213,10 @@ func (t *Tracker) IsBouncing(hash common.Hash, peer string) bool {
 	entry := v.(*bouncingEntry)
 	if !entry.until.IsZero() && time.Now().After(entry.until) {
 		t.deleteBouncing(hash, clearTTL)
+		return false
+	}
+	if !t.bouncingEnabled.Load() {
+		bouncingWhatifSuppressedMeter.Mark(1)
 		return false
 	}
 	entry.announcesBlocked.Add(1)
@@ -229,10 +240,18 @@ func (t *Tracker) IsBouncing(hash common.Hash, peer string) bool {
 // actually pushed. The only thing this method gates is whether the
 // pool sees the body.
 //
+// When the master bouncingEnabled toggle is OFF, returns the full
+// slice in toEnqueue and an empty blocked slice — same A/B semantics
+// as IsBouncing. The per-entry counter does NOT advance on the
+// whatif path; only suppressions that actually took effect count.
+//
 // Lock-free: sync.Map.Load + atomic.Add on the hot path; the
 // per-entry peers set takes a brief per-entry mutex.
 func (t *Tracker) FilterInboundBodies(peer string, txs []*types.Transaction) (toEnqueue, blocked []*types.Transaction) {
 	if len(txs) == 0 {
+		return txs, nil
+	}
+	if !t.bouncingEnabled.Load() {
 		return txs, nil
 	}
 	toEnqueue = make([]*types.Transaction, 0, len(txs))
@@ -291,6 +310,27 @@ func (t *Tracker) markBouncing(hash common.Hash, ti *TxInfo, now time.Time, sour
 	if ti.From == (common.Address{}) {
 		return
 	}
+	// Per-source toggle: when OFF, skip the actual insert and only
+	// bump the matching whatif counter so an A/B operator sees the
+	// counterfactual insert rate.
+	switch source {
+	case bouncingFromDrop:
+		if !t.bouncingDropEnabled.Load() {
+			bouncingWhatifInsertedDropMeter.Mark(1)
+			if t.bouncingStats != nil {
+				t.bouncingStats.recordWhatif(source)
+			}
+			return
+		}
+	case bouncingFromReject:
+		if !t.bouncingRejectEnabled.Load() {
+			bouncingWhatifInsertedRejectMeter.Mark(1)
+			if t.bouncingStats != nil {
+				t.bouncingStats.recordWhatif(source)
+			}
+			return
+		}
+	}
 	until := time.Time{}
 	if t.pooledBySender[ti.From] == 0 {
 		until = now.Add(bouncingSingleTxTTL)
@@ -348,9 +388,15 @@ func (t *Tracker) clearBouncingForSenders(senders map[common.Address]struct{}, b
 		if gateOn && bouncingEffectiveTip(entry.gasFeeCap, entry.gasTipCap, baseFee) < floor {
 			// Sender slot freed but tx fee is below current pool
 			// floor — refetching would just bounce off as
-			// underpriced. Keep the entry blocked.
-			bouncingGateBlockedMeter.Mark(1)
-			return true
+			// underpriced. With the fee-gate toggle ON, keep the
+			// entry blocked. With the toggle OFF, fall through to
+			// the clear path and only record the would-have-been-
+			// blocked event in the whatif meter.
+			if t.bouncingFeeGateEnabled.Load() {
+				bouncingGateBlockedMeter.Mark(1)
+				return true
+			}
+			bouncingWhatifGateBlockedMeter.Mark(1)
 		}
 		hash, _ := k.(common.Hash)
 		t.deleteBouncing(hash, clearSenderInclusion)
@@ -386,6 +432,40 @@ func bouncingEffectiveTip(gasFeeCap, gasTipCap *big.Int, baseFee uint64) uint64 
 // disables the fee gate (stage-1 fallback).
 func (t *Tracker) SetPoolFloor(p PoolFloor) {
 	t.poolFloor = p
+}
+
+// BouncingFlagNames lists the runtime toggle names the RPC API
+// (BouncingFlags / SetBouncingFlag) accepts. Source-of-truth list,
+// also used by tests.
+var BouncingFlagNames = []string{"main", "drop", "reject", "fee_gate"}
+
+// BouncingFlags returns a snapshot of the four runtime toggle
+// states. Used by the txtracker_bouncingFlags RPC method and tests.
+func (t *Tracker) BouncingFlags() map[string]bool {
+	return map[string]bool{
+		"main":     t.bouncingEnabled.Load(),
+		"drop":     t.bouncingDropEnabled.Load(),
+		"reject":   t.bouncingRejectEnabled.Load(),
+		"fee_gate": t.bouncingFeeGateEnabled.Load(),
+	}
+}
+
+// SetBouncingFlag flips the named toggle and returns the previous
+// value. Returns (false, false) when name is not a recognised flag —
+// callers should treat that as an error. Recognised names are listed
+// in BouncingFlagNames.
+func (t *Tracker) SetBouncingFlag(name string, enabled bool) (prev bool, ok bool) {
+	switch name {
+	case "main":
+		return t.bouncingEnabled.Swap(enabled), true
+	case "drop":
+		return t.bouncingDropEnabled.Swap(enabled), true
+	case "reject":
+		return t.bouncingRejectEnabled.Swap(enabled), true
+	case "fee_gate":
+		return t.bouncingFeeGateEnabled.Swap(enabled), true
+	}
+	return false, false
 }
 
 // BouncingEntryInfo is the public snapshot of a single bouncing-map

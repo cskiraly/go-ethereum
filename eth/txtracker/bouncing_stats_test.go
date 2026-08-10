@@ -83,3 +83,28 @@ func TestBouncingStatsClearPaths(t *testing.T) {
 		t.Errorf("LiveEntries = %d, want 0 (both cleared)", stats.LiveEntries)
 	}
 }
+
+// TestBouncingStatsWhatif verifies that OFF-toggle whatif inserts bump
+// the whatif counters and that real inserts don't double-count.
+func TestBouncingStatsWhatif(t *testing.T) {
+	tr := New()
+	chain := newMockChain()
+	tr.Start(chain, nil)
+	defer tr.Stop()
+
+	// Disable the reject-side toggle; subsequent rejections are
+	// whatif-only.
+	tr.SetBouncingFlag("reject", false)
+
+	key, _ := crypto.GenerateKey()
+	tx := signedTx(t, key, 1)
+	driveRejection(tr, "peerA", tx, txpool.ErrTxPoolOverflow)
+
+	stats := tr.BouncingStats()
+	if stats.CumInsertsReject != 0 {
+		t.Errorf("CumInsertsReject = %d, want 0 (toggle off)", stats.CumInsertsReject)
+	}
+	if stats.CumWhatifInsertsReject != 1 {
+		t.Errorf("CumWhatifInsertsReject = %d, want 1", stats.CumWhatifInsertsReject)
+	}
+}

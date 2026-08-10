@@ -101,8 +101,10 @@ type bouncingStatsAcc struct {
 	// Cumulative inserts by source. Mirror the existing
 	// bouncingInsertedDropMeter / Reject; restated here so the RPC
 	// snapshot is self-contained (geth metrics are a separate pipe).
-	cumInsertsDrop   atomic.Uint64
-	cumInsertsReject atomic.Uint64
+	cumInsertsDrop         atomic.Uint64
+	cumInsertsReject       atomic.Uint64
+	cumWhatifInsertsDrop   atomic.Uint64
+	cumWhatifInsertsReject atomic.Uint64
 
 	// Cumulative suppression activity. Live entries' per-entry
 	// counters are added in at snapshot time; values here capture
@@ -166,6 +168,18 @@ func (a *bouncingStatsAcc) recordInsert(hash [32]byte, source bouncingSource, re
 	a.mu.Lock()
 	a.markedAt[hash] = now
 	a.mu.Unlock()
+}
+
+// recordWhatif is called when a markBouncing call is short-circuited
+// by an OFF toggle. Used so the comparison view shows what the
+// protection WOULD have inserted under different settings.
+func (a *bouncingStatsAcc) recordWhatif(source bouncingSource) {
+	switch source {
+	case bouncingFromDrop:
+		a.cumWhatifInsertsDrop.Add(1)
+	case bouncingFromReject:
+		a.cumWhatifInsertsReject.Add(1)
+	}
 }
 
 // recordRemove is called by deleteBouncing whenever an entry actually
@@ -235,10 +249,12 @@ type BouncingStats struct {
 	// Cumulative since startup. CumAnnouncesBlocked /
 	// CumBodiesBlocked include both live and departed entries' work,
 	// so they're the "total suppressions since startup" headline.
-	CumInsertsDrop      uint64 `json:"cumInsertsDrop"`
-	CumInsertsReject    uint64 `json:"cumInsertsReject"`
-	CumAnnouncesBlocked uint64 `json:"cumAnnouncesBlocked"`
-	CumBodiesBlocked    uint64 `json:"cumBodiesBlocked"`
+	CumInsertsDrop         uint64 `json:"cumInsertsDrop"`
+	CumInsertsReject       uint64 `json:"cumInsertsReject"`
+	CumWhatifInsertsDrop   uint64 `json:"cumWhatifInsertsDrop"`
+	CumWhatifInsertsReject uint64 `json:"cumWhatifInsertsReject"`
+	CumAnnouncesBlocked    uint64 `json:"cumAnnouncesBlocked"`
+	CumBodiesBlocked       uint64 `json:"cumBodiesBlocked"`
 
 	// Cumulative inserts grouped by canonical reason category. The
 	// keys are stable strings drawn from bouncingReasonLabels plus
@@ -293,6 +309,8 @@ func (a *bouncingStatsAcc) snapshot(t *Tracker) BouncingStats {
 		LiveBodiesBlocked:       liveBod,
 		CumInsertsDrop:          a.cumInsertsDrop.Load(),
 		CumInsertsReject:        a.cumInsertsReject.Load(),
+		CumWhatifInsertsDrop:    a.cumWhatifInsertsDrop.Load(),
+		CumWhatifInsertsReject:  a.cumWhatifInsertsReject.Load(),
 		CumAnnouncesBlocked:     liveAnn + a.cumAnnouncesBlockedDeparted.Load(),
 		CumBodiesBlocked:        liveBod + a.cumBodiesBlockedDeparted.Load(),
 		InsertsByReason:         insertsByReason,
