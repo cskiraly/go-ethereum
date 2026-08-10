@@ -163,6 +163,12 @@ type SubPool interface {
 	// or also for reorged out ones.
 	SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs bool) event.Subscription
 
+	// SubscribeRemovedTransactions subscribes to events for transactions that
+	// were removed from the pool after acceptance (replaced, evicted,
+	// truncated, demoted post-inclusion, etc.). Each event carries
+	// positionally-aligned Hashes and Reasons slices.
+	SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription
+
 	// Nonce returns the next nonce of an account, with all transactions executable
 	// by the pool already applied on top.
 	Nonce(addr common.Address) uint64

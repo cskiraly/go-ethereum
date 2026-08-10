@@ -568,7 +568,7 @@ func TestChainFork(t *testing.T) {
 	if _, err := pool.add(tx); err != nil {
 		t.Error("didn't expect error", err)
 	}
-	pool.removeTx(tx.Hash(), true, true)
+	pool.removeTx(tx.Hash(), true, true, core.RemovalUnknown)
 
 	// reset the pool's internal state
 	resetState()
@@ -2075,6 +2075,48 @@ func TestReplacement(t *testing.T) {
 	}
 	if err := validatePoolInternals(pool); err != nil {
 		t.Fatalf("pool internal state corrupted: %v", err)
+	}
+}
+
+// TestRemovedTxsEventOnReplace verifies that pool replacement (a tx with
+// the same nonce + sufficient price bump) emits a RemovedTxsEvent
+// carrying the displaced hash and the "replaced" reason.
+func TestRemovedTxsEventOnReplace(t *testing.T) {
+	t.Parallel()
+
+	statedb, _ := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
+	blockchain := newTestBlockChain(params.TestChainConfig, 1000000, statedb, new(event.Feed))
+
+	pool := New(testTxPoolConfig, blockchain)
+	pool.Init(testTxPoolConfig.PriceLimit, blockchain.CurrentBlock(), newReserver())
+	defer pool.Close()
+
+	removed := make(chan core.RemovedTxsEvent, 4)
+	sub := pool.SubscribeRemovedTransactions(removed)
+	defer sub.Unsubscribe()
+
+	key, _ := crypto.GenerateKey()
+	testAddBalance(pool, crypto.PubkeyToAddress(key.PublicKey), big.NewInt(1000000000))
+
+	original := pricedTransaction(0, 100000, big.NewInt(1), key)
+	if err := pool.addRemoteSync(original); err != nil {
+		t.Fatalf("add original: %v", err)
+	}
+	replacement := pricedTransaction(0, 100000, big.NewInt(2), key)
+	if err := pool.addRemote(replacement); err != nil {
+		t.Fatalf("add replacement: %v", err)
+	}
+
+	select {
+	case ev := <-removed:
+		if len(ev.Hashes) != 1 || ev.Hashes[0] != original.Hash() {
+			t.Errorf("unexpected hashes: got %v, want [%x]", ev.Hashes, original.Hash())
+		}
+		if len(ev.Reasons) != 1 || ev.Reasons[0] != core.RemovalReplaced {
+			t.Errorf("unexpected reasons: got %v, want [\"replaced\"]", ev.Reasons)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for RemovedTxsEvent")
 	}
 }
 

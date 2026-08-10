@@ -26,6 +26,71 @@ import (
 // NewTxsEvent is posted when a batch of transactions enter the transaction pool.
 type NewTxsEvent struct{ Txs []*types.Transaction }
 
+// RemovalReason describes why a previously-accepted transaction was
+// removed from the transaction pool. The String form is the short,
+// lowercase label exposed to event consumers (RPC feeds, logs);
+// programmatic consumers should dispatch on the typed value, never
+// on the label text.
+type RemovalReason uint8
+
+const (
+	RemovalUnknown RemovalReason = iota
+	RemovalReplaced
+	RemovalUnderpriced
+	RemovalCapacity
+	RemovalRateLimited
+	RemovalNonceExpired
+	RemovalNonceGap
+	RemovalUnderfunded
+	RemovalInvalid
+	RemovalDuplicate
+	RemovalIncluded
+	RemovalExpired
+	RemovalGasLimitExceeded
+)
+
+// String returns the short lowercase label for the removal reason.
+func (r RemovalReason) String() string {
+	switch r {
+	case RemovalReplaced:
+		return "replaced"
+	case RemovalUnderpriced:
+		return "underpriced"
+	case RemovalCapacity:
+		return "capacity"
+	case RemovalRateLimited:
+		return "rate limited"
+	case RemovalNonceExpired:
+		return "nonce expired"
+	case RemovalNonceGap:
+		return "nonce gap"
+	case RemovalUnderfunded:
+		return "underfunded"
+	case RemovalInvalid:
+		return "invalid"
+	case RemovalDuplicate:
+		return "duplicate"
+	case RemovalIncluded:
+		return "included"
+	case RemovalExpired:
+		return "expired"
+	case RemovalGasLimitExceeded:
+		return "gas limit exceeded"
+	}
+	return "unknown"
+}
+
+// RemovedTxsEvent is posted when one or more transactions are evicted
+// from the transaction pool after acceptance (replaced, underpriced,
+// truncated for capacity, dropped during reorg cleanup, etc.).
+//
+// Hashes and Reasons are positionally aligned: Reasons[i] explains why
+// Hashes[i] was removed.
+type RemovedTxsEvent struct {
+	Hashes  []common.Hash
+	Reasons []RemovalReason
+}
+
 // RemovedLogsEvent is posted when a reorg happens
 type RemovedLogsEvent struct{ Logs []*types.Log }
 

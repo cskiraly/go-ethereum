@@ -230,13 +230,16 @@ func (config *Config) sanitize() Config {
 // will reject new transactions with delegations from that account with standard in-flight
 // transactions.
 type LegacyPool struct {
-	config      Config
-	chainconfig *params.ChainConfig
-	chain       BlockChain
-	gasTip      atomic.Pointer[uint256.Int]
-	txFeed      event.Feed
-	signer      types.Signer
-	mu          sync.RWMutex
+	config         Config
+	chainconfig    *params.ChainConfig
+	chain          BlockChain
+	gasTip         atomic.Pointer[uint256.Int]
+	txFeed         event.Feed
+	removedFeed    event.Feed           // Event feed for evicted transactions
+	removed        []common.Hash        // Accumulator for batched RemovedTxsEvent emission (under pool.mu)
+	removedReasons []core.RemovalReason // Parallel reasons for the accumulator
+	signer         types.Signer
+	mu             sync.RWMutex
 
 	currentHead   atomic.Pointer[types.Header] // Current head of the blockchain
 	currentState  *state.StateDB               // Current state in the blockchain head
@@ -379,9 +382,16 @@ func (pool *LegacyPool) loop() {
 		case <-evict.C:
 			pool.mu.Lock()
 			for _, hash := range pool.queue.evictList() {
-				pool.removeTx(hash, true, true)
+				pool.removeTx(hash, true, true, core.RemovalExpired)
 			}
+			removed := pool.removed
+			removedReasons := pool.removedReasons
+			pool.removed = nil
+			pool.removedReasons = nil
 			pool.mu.Unlock()
+			if len(removed) > 0 {
+				pool.removedFeed.Send(core.RemovedTxsEvent{Hashes: removed, Reasons: removedReasons})
+			}
 		}
 	}
 }
@@ -413,11 +423,27 @@ func (pool *LegacyPool) SubscribeTransactions(ch chan<- core.NewTxsEvent, reorgs
 	return pool.txFeed.Subscribe(ch)
 }
 
+// SubscribeRemovedTransactions registers a subscription for txs evicted
+// from the pool after acceptance. Emits one RemovedTxsEvent per batched
+// removal; the slice carries one entry per evicted tx with the matching
+// short-string Reason.
+func (pool *LegacyPool) SubscribeRemovedTransactions(ch chan<- core.RemovedTxsEvent) event.Subscription {
+	return pool.removedFeed.Subscribe(ch)
+}
+
+// trackRemoved appends a hash + reason to the per-batch accumulator.
+// Must be called with pool.mu held; the surrounding batch operation is
+// responsible for draining the accumulator and emitting a single
+// RemovedTxsEvent after releasing the lock.
+func (pool *LegacyPool) trackRemoved(hash common.Hash, reason core.RemovalReason) {
+	pool.removed = append(pool.removed, hash)
+	pool.removedReasons = append(pool.removedReasons, reason)
+}
+
 // SetGasTip updates the minimum gas tip required by the transaction pool for a
 // new transaction, and drops all transactions below this threshold.
 func (pool *LegacyPool) SetGasTip(tip *big.Int) {
 	pool.mu.Lock()
-	defer pool.mu.Unlock()
 
 	var (
 		newTip = uint256.MustFromBig(tip)
@@ -429,9 +455,18 @@ func (pool *LegacyPool) SetGasTip(tip *big.Int) {
 		// pool.priced is sorted by GasFeeCap, so we have to iterate through pool.all instead
 		drop := pool.all.TxsBelowTip(tip)
 		for _, tx := range drop {
-			pool.removeTx(tx.Hash(), false, true)
+			pool.removeTx(tx.Hash(), false, true, core.RemovalUnderpriced)
 		}
 		pool.priced.Removed(len(drop))
+	}
+	removed := pool.removed
+	removedReasons := pool.removedReasons
+	pool.removed = nil
+	pool.removedReasons = nil
+	pool.mu.Unlock()
+
+	if len(removed) > 0 {
+		pool.removedFeed.Send(core.RemovedTxsEvent{Hashes: removed, Reasons: removedReasons})
 	}
 	log.Info("Legacy pool tip threshold updated", "tip", newTip)
 }
@@ -758,7 +793,7 @@ func (pool *LegacyPool) add(tx *types.Transaction) (replaced bool, err error) {
 			underpricedTxMeter.Mark(1)
 
 			sender, _ := types.Sender(pool.signer, tx)
-			dropped := pool.removeTx(tx.Hash(), false, sender != from) // Don't unreserve the sender of the tx being added if last from the acc
+			dropped := pool.removeTx(tx.Hash(), false, sender != from, core.RemovalUnderpriced) // Don't unreserve the sender of the tx being added if last from the acc
 
 			pool.changesSinceReorg += dropped
 		}
@@ -775,6 +810,7 @@ func (pool *LegacyPool) add(tx *types.Transaction) (replaced bool, err error) {
 		// New transaction is better, replace old one
 		if old != nil {
 			pool.all.Remove(old.Hash())
+			pool.trackRemoved(old.Hash(), core.RemovalReplaced)
 			pool.priced.Removed(1)
 			pendingReplaceMeter.Mark(1)
 		}
@@ -830,7 +866,7 @@ func (pool *LegacyPool) enqueueTx(hash common.Hash, tx *types.Transaction, addAl
 		return false, err
 	}
 	if replaced != nil {
-		pool.removeTx(*replaced, true, true)
+		pool.removeTx(*replaced, true, true, core.RemovalReplaced)
 	}
 	// If the transaction isn't in lookup set but it's expected to be there,
 	// show the error log.
@@ -860,6 +896,7 @@ func (pool *LegacyPool) promoteTx(addr common.Address, hash common.Hash, tx *typ
 	if !inserted {
 		// An older transaction was better, discard this
 		pool.all.Remove(hash)
+		pool.trackRemoved(hash, core.RemovalUnderpriced)
 		pool.priced.Removed(1)
 		pendingDiscardMeter.Mark(1)
 		return false
@@ -867,6 +904,7 @@ func (pool *LegacyPool) promoteTx(addr common.Address, hash common.Hash, tx *typ
 	// Otherwise discard any previous transaction and mark this
 	if old != nil {
 		pool.all.Remove(old.Hash())
+		pool.trackRemoved(old.Hash(), core.RemovalReplaced)
 		pool.priced.Removed(1)
 		pendingReplaceMeter.Mark(1)
 	} else {
@@ -1051,7 +1089,10 @@ func (pool *LegacyPool) Has(hash common.Hash) bool {
 // which could lead to a premature release of the lock.
 //
 // Returns the number of transactions removed from the pending queue.
-func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool, unreserve bool) int {
+//
+// reason is the short label appended to the per-batch removal accumulator
+// (drained by the caller after the surrounding batch operation completes).
+func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool, unreserve bool, reason core.RemovalReason) int {
 	// Fetch the transaction we wish to delete
 	tx := pool.all.Get(hash)
 	if tx == nil {
@@ -1075,6 +1116,7 @@ func (pool *LegacyPool) removeTx(hash common.Hash, outofbound bool, unreserve bo
 	}
 	// Remove it from the list of known transactions
 	pool.all.Remove(hash)
+	pool.trackRemoved(hash, reason)
 	if outofbound {
 		pool.priced.Removed(1)
 	}
@@ -1234,7 +1276,7 @@ func (pool *LegacyPool) runReorg(done chan struct{}, reset *txpoolResetRequest, 
 					return true
 				})
 				for _, hash := range hashes {
-					pool.removeTx(hash, true, true)
+					pool.removeTx(hash, true, true, core.RemovalGasLimitExceeded)
 				}
 			}
 		}
@@ -1281,6 +1323,14 @@ func (pool *LegacyPool) runReorg(done chan struct{}, reset *txpoolResetRequest, 
 
 	dropBetweenReorgHistogram.Update(int64(pool.changesSinceReorg))
 	pool.changesSinceReorg = 0 // Reset change counter
+
+	// Drain the per-batch removal accumulator while still under the lock
+	// to keep it consistent with the actions just taken; emit after
+	// releasing the lock so subscribers cannot block reorg progress.
+	removed := pool.removed
+	removedReasons := pool.removedReasons
+	pool.removed = nil
+	pool.removedReasons = nil
 	pool.mu.Unlock()
 
 	// Notify subsystems for newly added transactions
@@ -1297,6 +1347,9 @@ func (pool *LegacyPool) runReorg(done chan struct{}, reset *txpoolResetRequest, 
 			txs = append(txs, set.Flatten()...)
 		}
 		pool.txFeed.Send(core.NewTxsEvent{Txs: txs})
+	}
+	if len(removed) > 0 {
+		pool.removedFeed.Send(core.RemovedTxsEvent{Hashes: removed, Reasons: removedReasons})
 	}
 }
 
@@ -1418,6 +1471,7 @@ func (pool *LegacyPool) promoteExecutables(accounts []common.Address) []*types.T
 	// remove all removable transactions
 	for _, hash := range dropped {
 		pool.all.Remove(hash)
+		pool.trackRemoved(hash, core.RemovalInvalid)
 	}
 	pool.priced.Removed(len(dropped))
 
@@ -1474,6 +1528,7 @@ func (pool *LegacyPool) truncatePending() {
 						// Drop the transaction from the global pools too
 						hash := tx.Hash()
 						pool.all.Remove(hash)
+						pool.trackRemoved(hash, core.RemovalRateLimited)
 
 						// Update the account nonce to the dropped transaction
 						pool.pendingNonces.setIfLower(offenders[i], tx.Nonce())
@@ -1499,6 +1554,7 @@ func (pool *LegacyPool) truncatePending() {
 					// Drop the transaction from the global pools too
 					hash := tx.Hash()
 					pool.all.Remove(hash)
+					pool.trackRemoved(hash, core.RemovalRateLimited)
 
 					// Update the account nonce to the dropped transaction
 					pool.pendingNonces.setIfLower(addr, tx.Nonce())
@@ -1520,6 +1576,7 @@ func (pool *LegacyPool) truncateQueue() {
 	// Remove all removable transactions from the lookup and global price list
 	for _, hash := range removed {
 		pool.all.Remove(hash)
+		pool.trackRemoved(hash, core.RemovalCapacity)
 	}
 	pool.priced.Removed(len(removed))
 
@@ -1549,6 +1606,7 @@ func (pool *LegacyPool) demoteUnexecutables() {
 		for _, tx := range olds {
 			hash := tx.Hash()
 			pool.all.Remove(hash)
+			pool.trackRemoved(hash, core.RemovalNonceExpired)
 			log.Trace("Removed old pending transaction", "hash", hash)
 		}
 		// Drop all transactions that are too costly (low balance or out of gas), and queue any invalids back for later
@@ -1556,6 +1614,7 @@ func (pool *LegacyPool) demoteUnexecutables() {
 		for _, tx := range drops {
 			hash := tx.Hash()
 			pool.all.Remove(hash)
+			pool.trackRemoved(hash, core.RemovalUnderfunded)
 			log.Trace("Removed unpayable pending transaction", "hash", hash)
 		}
 		pendingNofundsMeter.Mark(int64(len(drops)))
