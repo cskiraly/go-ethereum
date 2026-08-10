@@ -46,6 +46,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/eth/fetcher"
 	"github.com/ethereum/go-ethereum/eth/gasprice"
+	"github.com/ethereum/go-ethereum/eth/peerstats"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/eth/protocols/snap"
 	"github.com/ethereum/go-ethereum/eth/tracers"
@@ -351,17 +352,18 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	// Permit the downloader to use the trie cache allowance during fast sync
 	cacheLimit := options.TrieCleanLimit + options.TrieDirtyLimit + options.SnapshotLimit
 	if eth.handler, err = newHandler(&handlerConfig{
-		NodeID:           eth.p2pServer.Self().ID(),
-		Database:         chainDb,
-		Chain:            eth.blockchain,
-		TxPool:           eth.txPool,
-		BlobPool:         eth.blobTxPool,
-		Network:          networkID,
-		Sync:             config.SyncMode,
-		BloomCache:       uint64(cacheLimit),
-		RequiredBlocks:   config.RequiredBlocks,
-		SnapV2:           config.SnapV2,
-		FetchProbability: config.BlobPool.FetchProbability,
+		NodeID:               eth.p2pServer.Self().ID(),
+		Database:             chainDb,
+		Chain:                eth.blockchain,
+		TxPool:               eth.txPool,
+		BlobPool:             eth.blobTxPool,
+		Network:              networkID,
+		Sync:                 config.SyncMode,
+		BloomCache:           uint64(cacheLimit),
+		RequiredBlocks:       config.RequiredBlocks,
+		SnapV2:               config.SnapV2,
+		FetchProbability:     config.BlobPool.FetchProbability,
+		TxTrackerCapturePath: config.TxTrackerCapturePath,
 	}); err != nil {
 		return nil, err
 	}
@@ -431,6 +433,20 @@ func (s *Ethereum) APIs() []rpc.API {
 		}, {
 			Namespace: "net",
 			Service:   s.netRPCService,
+		}, {
+			Namespace: "txtracker",
+			Service:   txtracker.NewAPI(s.handler.txTracker),
+		}, {
+			Namespace: "peerstats",
+			Service: func() *peerstats.API {
+				api := peerstats.NewAPI(s.handler.peerStats)
+				// The dropper is always constructed (newDropper in
+				// New); the closure binds to its GetProtectedSet so
+				// the RPC reflects the live protection set even
+				// before s.dropper.Start runs.
+				api.SetProtectedSetFunc(s.dropper.GetProtectedSet)
+				return api
+			}(),
 		},
 	}...)
 }

@@ -132,6 +132,42 @@ func TestProtectedPeersNilFunc(t *testing.T) {
 	}
 }
 
+// TestGetProtectedSetReturnsStringIDs is the contract the
+// peerstats RPC depends on: GetProtectedSet returns a non-nil map
+// keyed by enode-ID string for the same peers protectedPeers
+// returns by *p2p.Peer pointer. Empty map (not nil) when
+// peersFunc / peerStatsFunc are unset, so RPC consumers don't
+// have to special-case the "dropper not started" phase.
+func TestGetProtectedSetReturnsStringIDs(t *testing.T) {
+	cm := &dropper{maxDialPeers: 20, maxInboundPeers: 30}
+
+	// Phase 1: no callbacks installed → empty map (not nil).
+	if got := cm.GetProtectedSet(); got == nil {
+		t.Fatal("expected empty map, got nil")
+	} else if len(got) != 0 {
+		t.Fatalf("expected empty map, got %v", got)
+	}
+
+	// Phase 2: install callbacks; one of the 20 peers leads
+	// RecentFinalized, top-10% of 20 = 2 protected per category,
+	// only RecentFinalized is set so 2 total.
+	peers := makePeers(20)
+	stats := map[string]peerstats.PeerStats{
+		peers[0].ID().String(): {RecentFinalized: 100},
+		peers[1].ID().String(): {RecentFinalized: 50},
+	}
+	cm.peersFunc = func() []*p2p.Peer { return peers }
+	cm.peerStatsFunc = func() map[string]peerstats.PeerStats { return stats }
+
+	got := cm.GetProtectedSet()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 protected peers, got %d (%v)", len(got), got)
+	}
+	if !got[peers[0].ID().String()] || !got[peers[1].ID().String()] {
+		t.Errorf("expected peers 0 and 1 protected, got %v", got)
+	}
+}
+
 // TestProtectedByPoolPerPoolTopN verifies that the top-N selection runs
 // independently in each of the inbound and dialed pools, not globally.
 // With 10 peers per pool and inclusionProtectionFrac=0.1, exactly 1 peer

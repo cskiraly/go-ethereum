@@ -149,8 +149,9 @@ func newDropper(maxDialPeers, maxInboundPeers int) *dropper {
 	return cm
 }
 
-// Start the dropper. peerStatsFunc is optional (nil disables inclusion
-// protection).
+// Start the dropper. peerStatsFunc is optional (nil disables all
+// stats-based protection categories: inclusion, finalization and
+// request latency).
 func (cm *dropper) Start(srv *p2p.Server, syncingFunc getSyncingFunc, peerStatsFunc getPeerStatsFunc) {
 	cm.peersFunc = srv.Peers
 	cm.syncingFunc = syncingFunc
@@ -272,6 +273,35 @@ func protectedPeersByPool(inbound, dialed []*p2p.Peer, stats map[string]peerstat
 		protectPool(dialed, cat)
 	}
 	return result
+}
+
+// GetProtectedSet returns the IDs of peers currently shielded from
+// drop by inclusion / latency protection. Computed on demand from
+// the same logic the drop loop uses, so the result reflects the
+// current peer roster and the latest peerstats EMAs at call time.
+//
+// Returns an empty map (never nil) when:
+//   - the dropper hasn't been Started yet (peersFunc/peerStatsFunc nil),
+//   - peerstats has no entries (no recent activity),
+//   - or no peer in any pool clears the score>0 cutoff.
+//
+// Used by peerstats_getProtectedSet (eth/peerstats/api.go) to expose
+// the protection set to RPC consumers, e.g. mempool-lens marking
+// protected rows in its Peers tab.
+func (cm *dropper) GetProtectedSet() map[string]bool {
+	out := make(map[string]bool)
+	if cm.peersFunc == nil || cm.peerStatsFunc == nil {
+		return out
+	}
+	peers := cm.peersFunc()
+	if len(peers) == 0 {
+		return out
+	}
+	protected := cm.protectedPeers(peers)
+	for p := range protected {
+		out[p.ID().String()] = true
+	}
+	return out
 }
 
 // randomDuration generates a random duration between min and max.

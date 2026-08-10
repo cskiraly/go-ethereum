@@ -244,6 +244,11 @@ var (
 		Usage:    "Comma separated block number-to-hash mappings to require for peering (<number>=<hash>)",
 		Category: flags.EthCategory,
 	}
+	TxTrackerCaptureFlag = &cli.StringFlag{
+		Name:     "txtracker.capture",
+		Usage:    "Path (file or directory) to mirror every txtracker Observation and StateChange as NDJSON; default off",
+		Category: flags.EthCategory,
+	}
 	BloomFilterSizeFlag = &cli.Uint64Flag{
 		Name:     "bloomfilter.size",
 		Usage:    "Megabytes of memory allocated to bloom-filter for pruning",
@@ -1761,6 +1766,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	setBlobPool(ctx, &cfg.BlobPool)
 	setMiner(ctx, &cfg.Miner)
 	setRequiredBlocks(ctx, cfg)
+	if ctx.IsSet(TxTrackerCaptureFlag.Name) {
+		cfg.TxTrackerCapturePath = ctx.String(TxTrackerCaptureFlag.Name)
+	}
 
 	// Cap the cache allowance and tune the garbage collector against
 	// the effective memory limit (cgroup-imposed when running in a

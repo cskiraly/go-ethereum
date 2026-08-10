@@ -138,6 +138,12 @@ type Config struct {
 	// presence of these blocks for every new peer connection.
 	RequiredBlocks map[uint64]common.Hash `toml:"-"`
 
+	// TxTrackerCapturePath, when non-empty, makes the txtracker mirror every
+	// Observation and StateChange to a rotating NDJSON file (or directory of
+	// rotating files). Used as the server-side ground truth for offline
+	// diagnosis when the lens captures a tx report. Default empty (disabled).
+	TxTrackerCapturePath string `toml:",omitempty"`
+
 	// SlowBlockThreshold is the block execution time threshold beyond which
 	// detailed statistics are logged. Negative means disabled (default), zero
 	// logs all blocks, positive filters by execution time.

@@ -88,6 +88,20 @@ const (
 // PeerStats is the exported per-peer snapshot returned by GetAllPeerStats.
 // It carries exactly the fields the dropper scores on.
 type PeerStats struct {
+	// Cumulative observation counters, one per observation kind that
+	// carries a peer attribution. Sourced from the txtracker via the
+	// Notify{Announced,Delivered,Accepted,Rejected,Dropped} hooks on
+	// StatsConsumer; included / finalized are summed from per-block
+	// deltas in NotifyBlock. Survives across consumer reloads (lives
+	// for the life of the geth process).
+	Announced int64 // Inbound NewPooledTransactionHashes per hash
+	Delivered int64 // Inbound bodies received from this peer
+	Accepted  int64 // Pool accepted a body delivered by this peer
+	Rejected  int64 // Pool rejected a body delivered by this peer
+	Dropped   int64 // Pool entries from this peer later evicted/dropped
+	Included  int64 // Cumulative count of this peer's deliveries that reached chain
+	Finalized int64 // Cumulative count of this peer's deliveries that reached finalization
+	// EMAs and request-latency stats — see field-level docs.
 	RecentFinalized   float64       // EMA of per-block finalization credits (slow)
 	RecentIncluded    float64       // EMA of per-block inclusions (fast)
 	RequestLatencyEMA time.Duration // Slow EMA of tx-request response latency (timeouts count as the timeout value)
@@ -96,6 +110,13 @@ type PeerStats struct {
 
 // peerStats is the internal mutable state per peer.
 type peerStats struct {
+	announced          int64
+	delivered          int64
+	accepted           int64
+	rejected           int64
+	dropped            int64
+	included           int64
+	finalized          int64
 	recentFinalized    float64
 	recentIncluded     float64
 	requestLatencyEMA  time.Duration
@@ -141,12 +162,18 @@ func (s *Stats) NotifyBlock(inclusions, finalized map[string]int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Update inclusion and finalization EMAs for every registered peer. A
-	// peer not present in the respective delta map gets a 0 contribution
-	// — pure decay. Deltas for unregistered peers are ignored entirely.
+	// Update inclusion and finalization EMAs (and the cumulative counters
+	// that mirror them) for every registered peer. A peer not present in
+	// the respective delta map gets a 0 contribution — pure decay on the
+	// EMA, no change on the cumulative. Deltas for unregistered peers are
+	// ignored entirely (don't resurrect dropped peers from historical data).
 	for peer, ps := range s.peers {
-		ps.recentIncluded = (1-emaAlpha)*ps.recentIncluded + emaAlpha*float64(inclusions[peer])
-		ps.recentFinalized = (1-finalizedEMAAlpha)*ps.recentFinalized + finalizedEMAAlpha*float64(finalized[peer])
+		incl := int64(inclusions[peer])
+		fin := int64(finalized[peer])
+		ps.recentIncluded = (1-emaAlpha)*ps.recentIncluded + emaAlpha*float64(incl)
+		ps.recentFinalized = (1-finalizedEMAAlpha)*ps.recentFinalized + finalizedEMAAlpha*float64(fin)
+		ps.included += incl
+		ps.finalized += fin
 
 		// Fold this block's delivery-presence bit (0 or 1) into the activity
 		// rate, then let it decay like the other per-block EMAs. Capping at a
@@ -172,6 +199,74 @@ func (s *Stats) NotifyBlock(inclusions, finalized map[string]int) {
 			ps.requestLatencyEMA = 0
 			ps.hadSuccess = false
 		}
+	}
+}
+
+// NotifyAnnounced records that the peer announced count distinct
+// hashes via NewPooledTransactionHashes. Ignored for peers not
+// currently registered; per-call cost is one map lookup + one
+// int64 add.
+func (s *Stats) NotifyAnnounced(peer string, count int) {
+	if peer == "" || count <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps := s.peers[peer]; ps != nil {
+		ps.announced += int64(count)
+	}
+}
+
+// NotifyDelivered records that the peer delivered count tx bodies
+// (response, broadcast, or cache-hit; any inbound delivery path).
+func (s *Stats) NotifyDelivered(peer string, count int) {
+	if peer == "" || count <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps := s.peers[peer]; ps != nil {
+		ps.delivered += int64(count)
+	}
+}
+
+// NotifyAccepted records that the local pool accepted count
+// deliveries from this peer.
+func (s *Stats) NotifyAccepted(peer string, count int) {
+	if peer == "" || count <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps := s.peers[peer]; ps != nil {
+		ps.accepted += int64(count)
+	}
+}
+
+// NotifyRejected records that the local pool rejected one delivery
+// from this peer.
+func (s *Stats) NotifyRejected(peer string) {
+	if peer == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps := s.peers[peer]; ps != nil {
+		ps.rejected++
+	}
+}
+
+// NotifyDropped records that one of this peer's pool entries was
+// dropped (replaced, evicted, demoted). The tracker attributes the
+// drop to the original deliverer via TxInfo.Deliverer.
+func (s *Stats) NotifyDropped(peer string) {
+	if peer == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps := s.peers[peer]; ps != nil {
+		ps.dropped++
 	}
 }
 
@@ -231,6 +326,13 @@ func (s *Stats) GetAllPeerStats() map[string]PeerStats {
 	result := make(map[string]PeerStats, len(s.peers))
 	for id, ps := range s.peers {
 		result[id] = PeerStats{
+			Announced:         ps.announced,
+			Delivered:         ps.delivered,
+			Accepted:          ps.accepted,
+			Rejected:          ps.rejected,
+			Dropped:           ps.dropped,
+			Included:          ps.included,
+			Finalized:         ps.finalized,
 			RecentFinalized:   ps.recentFinalized,
 			RecentIncluded:    ps.recentIncluded,
 			RequestLatencyEMA: ps.requestLatencyEMA,

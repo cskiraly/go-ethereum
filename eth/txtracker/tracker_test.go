@@ -209,6 +209,11 @@ type mockConsumer struct {
 	mu      sync.Mutex
 	signals []signal
 	// Per-peer counts for the kind-specific hooks.
+	announced map[string]int
+	delivered map[string]int
+	accepted  map[string]int
+	rejected  map[string]int
+	dropped   map[string]int
 }
 
 type signal struct {
@@ -230,6 +235,51 @@ func (c *mockConsumer) NotifyBlock(inclusions, finalized map[string]int) {
 		fn[k] = v
 	}
 	c.signals = append(c.signals, signal{in, fn})
+}
+
+func (c *mockConsumer) NotifyAnnounced(peer string, count int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.announced == nil {
+		c.announced = make(map[string]int)
+	}
+	c.announced[peer] += count
+}
+
+func (c *mockConsumer) NotifyDelivered(peer string, count int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.delivered == nil {
+		c.delivered = make(map[string]int)
+	}
+	c.delivered[peer] += count
+}
+
+func (c *mockConsumer) NotifyAccepted(peer string, count int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.accepted == nil {
+		c.accepted = make(map[string]int)
+	}
+	c.accepted[peer] += count
+}
+
+func (c *mockConsumer) NotifyRejected(peer string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.rejected == nil {
+		c.rejected = make(map[string]int)
+	}
+	c.rejected[peer]++
+}
+
+func (c *mockConsumer) NotifyDropped(peer string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dropped == nil {
+		c.dropped = make(map[string]int)
+	}
+	c.dropped[peer]++
 }
 
 func (c *mockConsumer) last() signal {
@@ -1057,6 +1107,64 @@ func TestPoolEvictBeforeChainHeadEventuallyIncluded(t *testing.T) {
 	info := tr.GetTx(hash)
 	if info.Status != StatusIncluded {
 		t.Errorf("status should rescue to Included, got %v", info.Status)
+	}
+}
+
+// TestStatsConsumerObservationHooks verifies that the per-peer hooks
+// added on the StatsConsumer interface fire from the tracker as
+// expected: NotifyAnnounced/Delivered/Accepted with batched counts,
+// NotifyRejected per single hash, and NotifyDropped credited to the
+// tx's recorded Deliverer (only when the eviction actually fires the
+// state transition; inclusion-driven removals don't credit a drop).
+func TestStatsConsumerObservationHooks(t *testing.T) {
+	tr := New()
+	chain := newMockChain()
+	consumer := &mockConsumer{}
+	tr.Start(chain, consumer)
+	defer tr.Stop()
+
+	tx1, tx2 := makeTx(1), makeTx(2)
+	h1, h2 := tx1.Hash(), tx2.Hash()
+
+	// Inbound announcement of two hashes from peerA.
+	tr.NotifyAnnounced("peerA", []common.Hash{h1, h2}, nil, nil)
+	// Delivery of both bodies from peerA.
+	tr.NotifyReceived("peerA", []*types.Transaction{tx1, tx2})
+	// Pool accepts both.
+	tr.NotifyAccepted("peerA", []common.Hash{h1, h2})
+	// Reject a third hash directly (no prior pool entry).
+	tr.NotifyRejected("peerB", makeTx(3).Hash(), errors.New("underpriced"))
+	// Genuine drop of tx1 (currently Pooled with peerA as deliverer).
+	tr.NotifyDropped(h1, core.RemovalReplaced)
+
+	// Inclusion-driven removal: tx2 reaches Included via the chain
+	// then the pool emits a removal. The drop transition is suppressed
+	// (TestPoolEvictAfterIncludeIsNoop), so the consumer must NOT see
+	// a credit for this one.
+	chain.addBlock(1, []*types.Transaction{tx2})
+	chain.sendHead(1)
+	waitStep(t, tr)
+	tr.NotifyDropped(h2, core.RemovalNonceExpired)
+
+	consumer.mu.Lock()
+	defer consumer.mu.Unlock()
+	if got := consumer.announced["peerA"]; got != 2 {
+		t.Errorf("announced[peerA]: got %d, want 2", got)
+	}
+	if got := consumer.delivered["peerA"]; got != 2 {
+		t.Errorf("delivered[peerA]: got %d, want 2", got)
+	}
+	if got := consumer.accepted["peerA"]; got != 2 {
+		t.Errorf("accepted[peerA]: got %d, want 2", got)
+	}
+	if got := consumer.rejected["peerB"]; got != 1 {
+		t.Errorf("rejected[peerB]: got %d, want 1", got)
+	}
+	// peerA gets the dropped credit for tx1 (genuine drop, deliverer
+	// captured), but NOT for tx2 (inclusion-driven removal — the
+	// transition was suppressed).
+	if got := consumer.dropped["peerA"]; got != 1 {
+		t.Errorf("dropped[peerA]: got %d, want 1 (only tx1, not tx2)", got)
 	}
 }
 

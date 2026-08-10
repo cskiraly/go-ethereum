@@ -391,3 +391,73 @@ func TestTimeoutBootstrapsEMA(t *testing.T) {
 		t.Fatalf("a timeout must not raise activity, got %f", ps.LatencyActivity)
 	}
 }
+
+// TestObservationCounters verifies the per-peer cumulative counters
+// added for the txtracker observation hooks. Each hook bootstraps a
+// peer entry on first call and accumulates across subsequent calls.
+// Empty peer / non-positive counts are no-ops.
+func TestObservationCounters(t *testing.T) {
+	s := New()
+	s.NotifyPeerConnect("peerA")
+
+	s.NotifyAnnounced("peerA", 3)
+	s.NotifyAnnounced("peerA", 2)
+	s.NotifyDelivered("peerA", 4)
+	s.NotifyAccepted("peerA", 4)
+	s.NotifyRejected("peerA")
+	s.NotifyRejected("peerA")
+	s.NotifyDropped("peerA")
+
+	// No-op call paths.
+	s.NotifyAnnounced("", 5)      // empty peer skipped
+	s.NotifyDelivered("peerB", 0) // zero count skipped
+	s.NotifyAccepted("peerB", -1) // negative skipped
+	s.NotifyRejected("")
+	s.NotifyDropped("")
+
+	ps := s.GetAllPeerStats()["peerA"]
+	if ps.Announced != 5 {
+		t.Errorf("Announced: got %d, want 5", ps.Announced)
+	}
+	if ps.Delivered != 4 {
+		t.Errorf("Delivered: got %d, want 4", ps.Delivered)
+	}
+	if ps.Accepted != 4 {
+		t.Errorf("Accepted: got %d, want 4", ps.Accepted)
+	}
+	if ps.Rejected != 2 {
+		t.Errorf("Rejected: got %d, want 2", ps.Rejected)
+	}
+	if ps.Dropped != 1 {
+		t.Errorf("Dropped: got %d, want 1", ps.Dropped)
+	}
+	if _, ok := s.GetAllPeerStats()["peerB"]; ok {
+		t.Error("peerB should not have been bootstrapped by no-op calls")
+	}
+	if _, ok := s.GetAllPeerStats()[""]; ok {
+		t.Error("empty-peer entry should never appear")
+	}
+}
+
+// TestNotifyBlockAccumulatesIncludedFinalized verifies that NotifyBlock
+// not only updates the EMAs but also adds the per-block deltas into
+// the cumulative Included/Finalized counters that GetAllPeerStats
+// exposes.
+func TestNotifyBlockAccumulatesIncludedFinalized(t *testing.T) {
+	s := New()
+	s.NotifyPeerConnect("peerA")
+	// Bootstrap peerA with an initial inclusion delta.
+	s.NotifyBlock(map[string]int{"peerA": 2}, nil)
+	// Subsequent block: 3 more inclusions plus 1 finalization credit.
+	s.NotifyBlock(map[string]int{"peerA": 3}, map[string]int{"peerA": 1})
+	// Block with no peerA inclusions: cumulative stays put, EMA decays.
+	s.NotifyBlock(nil, nil)
+
+	ps := s.GetAllPeerStats()["peerA"]
+	if ps.Included != 5 {
+		t.Errorf("Included: got %d, want 5", ps.Included)
+	}
+	if ps.Finalized != 1 {
+		t.Errorf("Finalized: got %d, want 1", ps.Finalized)
+	}
+}

@@ -85,12 +85,21 @@ type Chain interface {
 	CurrentFinalBlock() *types.Header
 }
 
-// StatsConsumer receives per-block peer signals from the tracker.
-// NotifyBlock fires exactly once per handled chain head with per-peer
-// inclusion / finalization deltas, AFTER the tracker has released its
-// lock so the consumer can take its own locks safely.
+// StatsConsumer receives per-peer signals from the tracker. NotifyBlock
+// fires exactly once per handled chain head with per-peer inclusion /
+// finalization deltas. The Notify{Announced,Delivered,Accepted,
+// Rejected,Dropped} hooks fire as the tracker processes each
+// observation kind that carries a peer attribution; consumers that
+// only care about chain-side credits can stub them as no-ops. All
+// hooks are invoked AFTER the tracker has released its lock so the
+// consumer can take its own locks safely.
 type StatsConsumer interface {
 	NotifyBlock(inclusions, finalized map[string]int)
+	NotifyAnnounced(peer string, count int)
+	NotifyDelivered(peer string, count int)
+	NotifyAccepted(peer string, count int)
+	NotifyRejected(peer string)
+	NotifyDropped(peer string)
 }
 
 // Tracker records per-tx lifecycle state, emits observations and state
@@ -128,6 +137,12 @@ type Tracker struct {
 
 	emitQuit chan struct{} // signals both emit loops to stop
 
+	// capture is an optional NDJSON sink that mirrors every
+	// Observation and StateChange to disk. Set via SetCapturePath
+	// before Start; nil otherwise. Used by the lens's "capture
+	// report" flow as the server-side ground truth.
+	capture *captureSink
+
 	quit     chan struct{}
 	stopOnce sync.Once     // makes Stop idempotent and safe before Start
 	step     chan struct{} // test sync: sent after each chain-head event is processed
@@ -146,6 +161,32 @@ func New() *Tracker {
 		step:       make(chan struct{}, 1),
 	}
 	return t
+}
+
+// SetCapturePath enables NDJSON capture of every Observation and
+// StateChange to the given file or directory. Must be called BEFORE
+// Start so the sink can subscribe before the emit loops fire.
+// Empty path is a no-op (no capture). On error the tracker still
+// runs; capture is left disabled.
+func (t *Tracker) SetCapturePath(path string) error {
+	if path == "" {
+		return nil
+	}
+	sink, err := newCaptureSink(path)
+	if err != nil {
+		return err
+	}
+	t.capture = sink
+	return nil
+}
+
+// CaptureInfo returns a snapshot of the capture sink state, or
+// {Enabled: false} when no capture path has been configured.
+func (t *Tracker) CaptureInfo() CaptureInfo {
+	if t.capture == nil {
+		return CaptureInfo{Enabled: false}
+	}
+	return t.capture.info()
 }
 
 // setMaxTracked overrides the FIFO cap; intended for tests that need
@@ -221,11 +262,17 @@ func (t *Tracker) Start(chain Chain, consumer StatsConsumer) {
 	go t.loop()
 	go t.obsEmitLoop()
 	go t.stateEmitLoop()
+	if t.capture != nil {
+		t.capture.start(t)
+	}
 }
 
 // Stop shuts down the tracker.
 func (t *Tracker) Stop() {
 	t.stopOnce.Do(func() {
+		if t.capture != nil {
+			t.capture.stop()
+		}
 		// sub is nil if Stop races ahead of Start (or Start was never
 		// called); guard so teardown on an error path can't panic.
 		if t.sub != nil {
@@ -351,6 +398,17 @@ func (t *Tracker) NotifyReceived(peer string, txs []*types.Transaction) {
 	t.stateDropped = stateDrops
 	t.mu.Unlock()
 
+	// Per-peer delivered counter. Counts non-nil txs; matches the
+	// observation count emitted on the feed.
+	if t.consumer != nil {
+		count := 0
+		for _, tx := range txs {
+			if tx != nil {
+				count++
+			}
+		}
+		t.consumer.NotifyDelivered(peer, count)
+	}
 }
 
 // NotifyDeliveredOutbound records that we sent a tx body to a peer.
@@ -473,6 +531,14 @@ func (t *Tracker) notifyPeerHashes(peer string, hashes []common.Hash, kind ObsKi
 	t.stateDropped = stateDrops
 	t.mu.Unlock()
 
+	// Per-peer cumulative counts for the peerstats consumer. Only
+	// inbound-pool acceptance has a counter; the other kinds that
+	// route through notifyPeerHashes (announce-outbound,
+	// requested-outbound/inbound, delivered-outbound) don't credit
+	// the per-peer signal counters this hook serves.
+	if t.consumer != nil && kind == ObsPoolAccepted {
+		t.consumer.NotifyAccepted(peer, len(hashes))
+	}
 }
 
 // notifyAnnouncedHashes is the inbound-announcement variant of
@@ -519,6 +585,14 @@ func (t *Tracker) notifyAnnouncedHashes(peer string, hashes []common.Hash, types
 	t.stateDropped = stateDrops
 	t.mu.Unlock()
 
+	// Per-peer cumulative count for the peerstats consumer. Fires
+	// once per inbound-announcement batch with the full observation
+	// count (including duplicate hashes within the batch — that
+	// matches the per-event semantics consumers used to see on the
+	// observations subscription).
+	if t.consumer != nil {
+		t.consumer.NotifyAnnounced(peer, len(hashes))
+	}
 }
 
 // notifyHashReason handles the single-hash, reason-carrying kinds
@@ -532,6 +606,11 @@ func (t *Tracker) notifyHashReason(peer string, hash common.Hash, reason string,
 		hasObs bool
 		hasCh  bool
 	)
+
+	// deliverer captured under the lock when the eviction is genuine,
+	// so the post-unlock consumer hook can attribute the drop without
+	// re-acquiring the tracker lock.
+	var dropDeliverer string
 
 	t.mu.Lock()
 	if kind == ObsPoolEvicted {
@@ -558,6 +637,7 @@ func (t *Tracker) notifyHashReason(peer string, hash common.Hash, reason string,
 		hasCh = true
 		if kind == ObsPoolEvicted && c.NewStatus == StatusDropped {
 			ti.DropReason = reason
+			dropDeliverer = ti.Deliverer
 		}
 	}
 	t.evict()
@@ -577,6 +657,22 @@ func (t *Tracker) notifyHashReason(peer string, hash common.Hash, reason string,
 	t.stateDropped = stateDrops
 	t.mu.Unlock()
 
+	// Per-peer counters for the peerstats consumer. Rejected uses
+	// the directly-supplied peer (the one whose delivery the pool
+	// rejected). Dropped is attributed to the original deliverer
+	// captured under the lock; only credited when the transition
+	// actually fired (an inclusion-driven removal leaves
+	// dropDeliverer empty and the call is skipped).
+	if t.consumer != nil {
+		switch kind {
+		case ObsPoolRejected:
+			t.consumer.NotifyRejected(peer)
+		case ObsPoolEvicted:
+			if dropDeliverer != "" {
+				t.consumer.NotifyDropped(dropDeliverer)
+			}
+		}
+	}
 }
 
 //

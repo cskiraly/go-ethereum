@@ -36,6 +36,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 		StateScheme             string                 `toml:",omitempty"`
 		BinTrieGroupDepth       int                    `toml:",omitempty"`
 		RequiredBlocks          map[uint64]common.Hash `toml:"-"`
+		TxTrackerCapturePath    string                 `toml:",omitempty"`
 		SlowBlockThreshold      time.Duration          `toml:",omitempty"`
 		SkipBcVersionCheck      bool                   `toml:"-"`
 		DatabaseHandles         int                    `toml:"-"`
@@ -93,6 +94,7 @@ func (c Config) MarshalTOML() (interface{}, error) {
 	enc.StateScheme = c.StateScheme
 	enc.BinTrieGroupDepth = c.BinTrieGroupDepth
 	enc.RequiredBlocks = c.RequiredBlocks
+	enc.TxTrackerCapturePath = c.TxTrackerCapturePath
 	enc.SlowBlockThreshold = c.SlowBlockThreshold
 	enc.SkipBcVersionCheck = c.SkipBcVersionCheck
 	enc.DatabaseHandles = c.DatabaseHandles
@@ -154,6 +156,7 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 		StateScheme             *string                `toml:",omitempty"`
 		BinTrieGroupDepth       *int                   `toml:",omitempty"`
 		RequiredBlocks          map[uint64]common.Hash `toml:"-"`
+		TxTrackerCapturePath    *string                `toml:",omitempty"`
 		SlowBlockThreshold      *time.Duration         `toml:",omitempty"`
 		SkipBcVersionCheck      *bool                  `toml:"-"`
 		DatabaseHandles         *int                   `toml:"-"`
@@ -251,6 +254,9 @@ func (c *Config) UnmarshalTOML(unmarshal func(interface{}) error) error {
 	}
 	if dec.RequiredBlocks != nil {
 		c.RequiredBlocks = dec.RequiredBlocks
+	}
+	if dec.TxTrackerCapturePath != nil {
+		c.TxTrackerCapturePath = *dec.TxTrackerCapturePath
 	}
 	if dec.SlowBlockThreshold != nil {
 		c.SlowBlockThreshold = *dec.SlowBlockThreshold

@@ -131,6 +131,10 @@ type handlerConfig struct {
 	SnapV2           bool                   // Whether to advertise and sync via the snap/2 protocol
 	FetchProbability uint64                 // Full blob fetch probability for sparse blobpool (blobFetcher)
 
+	// TxTrackerCapturePath, when non-empty, makes the txtracker mirror every
+	// Observation and StateChange to a rotating NDJSON file (or directory).
+	// Empty disables capture (default). See eth/txtracker/capture.go.
+	TxTrackerCapturePath string
 }
 
 type handler struct {
@@ -224,6 +228,13 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	// Source B for block-classification metrics: ask the peerset whether
 	// any peer knows each chain-included tx. Done via a closure so the
 	// txtracker package stays free of eth-protocol imports.
+	if config.TxTrackerCapturePath != "" {
+		if err := h.txTracker.SetCapturePath(config.TxTrackerCapturePath); err != nil {
+			log.Warn("txtracker capture disabled", "err", err)
+		} else {
+			log.Info("txtracker capture enabled", "path", config.TxTrackerCapturePath)
+		}
+	}
 	h.peerStats = peerstats.New()
 	h.txFetcher = fetcher.NewTxFetcher(h.chain, validateMeta, addTxs, fetchTx, h.removePeer, h.txTracker.NotifyAccepted, h.txTracker.NotifyRejected, h.peerStats.NotifyRequestResult, blobBuffer)
 
