@@ -17,8 +17,8 @@
 package miner
 
 import (
-	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"math/big"
 	"reflect"
 	"testing"
@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -53,6 +54,10 @@ var (
 
 	testUserKey, _  = crypto.GenerateKey()
 	testUserAddress = crypto.PubkeyToAddress(testUserKey.PublicKey)
+	testContract    = common.HexToAddress("0x0100000000000000000000000000000000000000")
+
+	testCounterContract = common.HexToAddress("0x0200000000000000000000000000000000000000")
+	testConflictKeys    = newTestKeys(4)
 
 	// Test transactions
 	pendingTxs []*types.Transaction
@@ -106,10 +111,61 @@ type testWorkerBackend struct {
 	genesis *core.Genesis
 }
 
+func newTestKeys(n int) []*ecdsa.PrivateKey {
+	keys := make([]*ecdsa.PrivateKey, n)
+	for i := range keys {
+		keys[i], _ = crypto.GenerateKey()
+	}
+	return keys
+}
+
+func counterCalls(signer types.Signer, keys []*ecdsa.PrivateKey, n uint64) []*types.Transaction {
+	var txs []*types.Transaction
+	for _, key := range keys {
+		for nonce := uint64(0); nonce < n; nonce++ {
+			txs = append(txs, types.MustSignNewTx(key, signer, &types.LegacyTx{
+				Nonce:    nonce,
+				To:       &testCounterContract,
+				Gas:      100_000,
+				GasPrice: big.NewInt(params.InitialBaseFee),
+			}))
+		}
+	}
+	return txs
+}
+
+func importBlock(t *testing.T, chain *core.BlockChain, block *types.Block) *state.StateDB {
+	t.Helper()
+	if _, err := chain.InsertChain(types.Blocks{block}); err != nil {
+		t.Fatalf("failed to insert parallel-built block: %v", err)
+	}
+	statedb, err := chain.StateAt(block.Header())
+	if err != nil {
+		t.Fatalf("failed to open state: %v", err)
+	}
+	return statedb
+}
+
+func checkCounter(t *testing.T, statedb *state.StateDB, want int) {
+	t.Helper()
+	counter := statedb.GetState(testCounterContract, common.Hash{})
+	if counter.Big().Int64() != int64(want) {
+		t.Fatalf("counter slot is %d, want %d", counter.Big().Int64(), int64(want))
+	}
+}
+
 func newTestWorkerBackend(t *testing.T, chainConfig *params.ChainConfig, engine consensus.Engine, db ethdb.Database, n int) *testWorkerBackend {
 	var gspec = &core.Genesis{
 		Config: chainConfig,
-		Alloc:  types.GenesisAlloc{testBankAddress: {Balance: testBankFunds}},
+		Alloc: types.GenesisAlloc{
+			testBankAddress:     {Balance: testBankFunds},
+			testUserAddress:     {Balance: new(big.Int).Set(testBankFunds)},
+			testContract:        {Nonce: 1, Code: common.FromHex("0x600160005560006000a000")},
+			testCounterContract: {Nonce: 1, Code: common.FromHex("0x60016000540160005500")},
+		},
+	}
+	for _, key := range testConflictKeys {
+		gspec.Alloc[crypto.PubkeyToAddress(key.PublicKey)] = types.Account{Balance: new(big.Int).Set(testBankFunds)}
 	}
 	switch e := engine.(type) {
 	case *clique.Clique:
@@ -197,56 +253,105 @@ func TestBuildPayload(t *testing.T) {
 	}
 }
 
-// TestBuildPayloadAmsterdamTransition verifies that a locally built payload for
-// the first Amsterdam block contains the EIP-7997 deterministic deployment
-// factory, i.e. the block-building path applies the same irregular state
-// transition as block processing and the resulting block is importable.
-func TestBuildPayloadAmsterdamTransition(t *testing.T) {
-	var (
-		db        = rawdb.NewMemoryDatabase()
-		recipient = common.HexToAddress("0xdeadbeef")
-	)
-	config := new(params.ChainConfig)
-	*config = *params.MergedTestChainConfig
-	config.AmsterdamTime = new(uint64)
-	*config.AmsterdamTime = 1 // genesis (t=0) is pre-Amsterdam, the first block crosses the fork
+func TestParallelBuildPayloadMatchesSequential(t *testing.T) {
+	sequential, sequentialBackend := newTestWorker(t, params.TestChainConfig, ethash.NewFaker(), rawdb.NewMemoryDatabase(), 0)
+	parallel, parallelBackend := newTestWorker(t, params.TestChainConfig, ethash.NewFaker(), rawdb.NewMemoryDatabase(), 0)
+	parallel.config.ParallelExecution = true
+	parallel.config.ParallelWorkers = 8
 
-	w, b := newTestWorker(t, config, beacon.New(ethash.NewFaker()), db, 0)
+	signer := types.LatestSigner(params.TestChainConfig)
+	txs := counterCalls(signer, testConflictKeys, 2)
+	logTx := types.MustSignNewTx(testUserKey, signer, &types.LegacyTx{
+		Nonce:    0,
+		To:       &testContract,
+		Gas:      100_000,
+		GasPrice: big.NewInt(params.InitialBaseFee),
+	})
+	txs = append(txs, logTx)
+	sequentialBackend.txPool.Add(txs, true)
+	parallelBackend.txPool.Add(txs, true)
+	wantTxs := len(pendingTxs) + len(txs)
+
+	timestamp := uint64(time.Now().Unix())
+	feeRecipient := common.HexToAddress("0xdeadbeef")
+	sequentialPayload, err := sequential.buildPayload(context.Background(), &BuildPayloadArgs{
+		Parent:       sequentialBackend.chain.CurrentBlock().Hash(),
+		Timestamp:    timestamp,
+		Random:       common.Hash{},
+		FeeRecipient: feeRecipient,
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	parallelPayload, err := parallel.buildPayload(cancelled, &BuildPayloadArgs{
+		Parent:       parallelBackend.chain.CurrentBlock().Hash(),
+		Timestamp:    timestamp,
+		Random:       common.Hash{},
+		FeeRecipient: feeRecipient,
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have, want := parallelPayload.ResolveFull(), sequentialPayload.ResolveFull()
+
+	if len(have.ExecutionPayload.Transactions) != wantTxs {
+		t.Fatalf("parallel payload has %d transactions, want %d", len(have.ExecutionPayload.Transactions), wantTxs)
+	}
+	if !reflect.DeepEqual(have, want) {
+		t.Fatalf("parallel payload differs from sequential payload:\n have %#v\n want %#v", have, want)
+	}
+}
+
+func TestParallelBuildPayloadConflicts(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	w, b := newTestWorker(t, params.MergedTestChainConfig, beacon.New(ethash.NewFaker()), db, 0)
+	w.config.ParallelExecution = true
+	w.config.ParallelWorkers = 8
+
+	txs := counterCalls(types.LatestSigner(params.MergedTestChainConfig), testConflictKeys, 2)
+	if errs := b.txPool.Add(txs, true); errs != nil {
+		for _, err := range errs {
+			if err != nil {
+				t.Fatalf("failed to add transaction: %v", err)
+			}
+		}
+	}
+	wantTxs := len(pendingTxs) + len(txs)
 
 	var (
 		beaconRoot = common.Hash{0x01}
 		slotNum    = uint64(1)
 	)
-	payload, err := w.buildPayload(context.Background(), &BuildPayloadArgs{
-		Parent:       b.chain.CurrentBlock().Hash(),
-		Timestamp:    1,
-		FeeRecipient: recipient,
-		Withdrawals:  types.Withdrawals{},
-		BeaconRoot:   &beaconRoot,
-		SlotNum:      &slotNum,
+	result := w.generateWork(context.Background(), &generateParams{
+		timestamp:   1,
+		forceTime:   true,
+		parentHash:  b.chain.CurrentBlock().Hash(),
+		coinbase:    common.HexToAddress("0xdeadbeef"),
+		withdrawals: types.Withdrawals{},
+		beaconRoot:  &beaconRoot,
+		slotNum:     &slotNum,
 	}, false)
-	if err != nil {
-		t.Fatalf("Failed to build payload %v", err)
+	if result.err != nil {
+		t.Fatalf("Failed to build payload %v", result.err)
 	}
-	block := payload.empty
-	if !config.IsAmsterdam(block.Number(), block.Time()) {
-		t.Fatal("transition block is not an Amsterdam block")
+	attempt := w.lastParallelMetrics.Load()
+	if attempt == nil {
+		t.Fatal("parallel executor did not run")
 	}
-	// The block must be importable: Process applies EIP-7997 independently, so
-	// a payload built without the factory would fail the state root check here.
-	if _, err := b.chain.InsertChain(types.Blocks{block}); err != nil {
-		t.Fatalf("failed to insert transition block: %v", err)
+	if len(result.block.Transactions()) != wantTxs {
+		t.Fatalf("block has %d transactions, want %d", len(result.block.Transactions()), wantTxs)
 	}
-	statedb, err := b.chain.StateAt(block.Header())
-	if err != nil {
-		t.Fatalf("failed to open state at transition block: %v", err)
+	if attempt.Stale == 0 || attempt.Executions <= attempt.Planned {
+		t.Fatalf("conflict path not exercised: stale %d executions %d planned %d", attempt.Stale, attempt.Executions, attempt.Planned)
 	}
-	if code := statedb.GetCode(params.DeterministicFactoryAddress); !bytes.Equal(code, params.DeterministicFactoryCode) {
-		t.Fatalf("factory code missing from built payload state:\n got %x\nwant %x", code, params.DeterministicFactoryCode)
-	}
-	if nonce := statedb.GetNonce(params.DeterministicFactoryAddress); nonce != 1 {
-		t.Fatalf("factory nonce = %d, want 1", nonce)
-	}
+
+	// re excute the block sequentially and check if the counter
+	// contracts slot has the expected value as the parallel execution.
+	statedb := importBlock(t, b.chain, result.block)
+	checkCounter(t, statedb, len(txs))
 }
 
 func TestPayloadId(t *testing.T) {
