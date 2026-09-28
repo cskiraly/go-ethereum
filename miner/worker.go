@@ -76,6 +76,8 @@ type environment struct {
 	bal      *bal.ConstructionBlockAccessList
 
 	witness *stateless.Witness
+
+	benchmark *buildBenchmarkAttempt // nil unless a benchmark build is running
 }
 
 // txFitsSize reports whether the transaction fits into the block size limit.
@@ -113,6 +115,8 @@ type newPayloadResult struct {
 	receipts []*types.Receipt       // Receipts collected during construction
 	requests [][]byte               // Consensus layer requests collected during block construction
 	witness  *stateless.Witness     // Witness is an optional stateless proof
+
+	benchmark *buildBenchmarkAttempt // measurements of this build, nil unless benchmarking
 }
 
 // generateParams wraps various settings for generating sealing task.
@@ -133,7 +137,13 @@ type generateParams struct {
 }
 
 // generateWork generates a sealing block based on the given parameters.
-func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, witness bool) (result *newPayloadResult) {
+func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, witness bool) *newPayloadResult {
+	return miner.generateWorkWithBenchmark(ctx, genParam, witness, nil)
+}
+
+// generateWorkWithBenchmark is generateWork with the build's measurements
+// collected into benchmark, which may be nil.
+func (miner *Miner) generateWorkWithBenchmark(ctx context.Context, genParam *generateParams, witness bool, benchmark *buildBenchmarkAttempt) (result *newPayloadResult) {
 	ctx, span, spanEnd := telemetry.StartSpan(ctx, "miner.generateWork")
 	defer func() {
 		if result != nil && result.err == nil {
@@ -154,6 +164,7 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 		return &newPayloadResult{err: err}
 	}
 	defer work.discard()
+	work.benchmark = benchmark
 
 	// Check withdrawals fit max block size.
 	// Due to the cap on withdrawal count, this can actually never happen, but we still need to
@@ -187,8 +198,12 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 			if errors.Is(err, errBlockInterruptedByTimeout) {
 				log.Warn("Block building is interrupted", "allowance", common.PrettyDuration(miner.config.Recommit))
 			}
+			if benchmark != nil && err != nil {
+				benchmark.termination = err.Error()
+			}
 		}
 	}
+	finalizationStarted := time.Now()
 	// Construct the block body, the withdrawal list should never be null
 	// if Shanghai has been activated.
 	body := types.Body{
@@ -229,14 +244,18 @@ func (miner *Miner) generateWork(ctx context.Context, genParam *generateParams, 
 	block := core.AssembleBlock(miner.chain, work.header, work.state, &body, work.receipts, work.bal)
 	assembleSpanEnd(nil)
 
+	if benchmark != nil {
+		benchmark.finalizationTime = time.Since(finalizationStarted)
+	}
 	return &newPayloadResult{
-		block:    block,
-		fees:     totalFees(block, work.receipts),
-		sidecars: work.sidecars,
-		stateDB:  work.state,
-		receipts: work.receipts,
-		requests: requests,
-		witness:  work.witness,
+		block:     block,
+		fees:      totalFees(block, work.receipts),
+		sidecars:  work.sidecars,
+		stateDB:   work.state,
+		receipts:  work.receipts,
+		requests:  requests,
+		witness:   work.witness,
+		benchmark: benchmark,
 	}
 }
 
@@ -413,7 +432,11 @@ func (miner *Miner) applyTransaction(env *environment, tx *types.Transaction) (*
 		snap = env.state.Snapshot()
 		gp   = env.gasPool.Snapshot()
 	)
+	started := time.Now()
 	receipt, bal, err := core.ApplyTransaction(env.evm, env.gasPool, env.state, env.header, tx)
+	if env.benchmark != nil {
+		env.benchmark.executionTime += time.Since(started)
+	}
 	if err != nil {
 		env.state.RevertToSnapshot(snap)
 		env.gasPool.Set(gp)
@@ -424,7 +447,11 @@ func (miner *Miner) applyTransaction(env *environment, tx *types.Transaction) (*
 }
 
 func (miner *Miner) commitTransactions(ctx context.Context, env *environment, plainTxs, blobTxs *txorder.TransactionsByPriceAndNonce, interrupt *atomic.Int32) error {
-	if miner.config.ParallelExecution {
+	parallel := miner.config.ParallelExecution
+	if env.benchmark != nil && env.benchmark.mode == parallelBenchmarkAlternate {
+		parallel = env.benchmark.parallel()
+	}
+	if parallel {
 		if supported, reason := parallelExecutionSupported(env); supported {
 			return miner.commitTransactionsParallel(ctx, env, plainTxs, blobTxs, interrupt)
 		} else {
@@ -576,13 +603,19 @@ func (miner *Miner) fillTransactions(ctx context.Context, interrupt *atomic.Int3
 	filter.BlobTxs = false
 	pendingPlainTxs, plainTxCount := miner.txpool.Pending(filter)
 
-	filter.BlobTxs = true
-	if miner.chainConfig.IsOsaka(env.header.Number, env.header.Time) {
-		filter.BlobVersion = types.BlobSidecarVersion1
-	} else {
-		filter.BlobVersion = types.BlobSidecarVersion0
+	var (
+		pendingBlobTxs map[common.Address][]*txpool.LazyTransaction
+		blobTxCount    int
+	)
+	if env.benchmark == nil || !env.benchmark.noBlobs {
+		filter.BlobTxs = true
+		if miner.chainConfig.IsOsaka(env.header.Number, env.header.Time) {
+			filter.BlobVersion = types.BlobSidecarVersion1
+		} else {
+			filter.BlobVersion = types.BlobSidecarVersion0
+		}
+		pendingBlobTxs, blobTxCount = miner.txpool.Pending(filter)
 	}
-	pendingBlobTxs, blobTxCount := miner.txpool.Pending(filter)
 	span.SetAttributes(
 		telemetry.IntAttribute("pending.plain.count", plainTxCount),
 		telemetry.IntAttribute("pending.blob.count", blobTxCount),
@@ -602,20 +635,29 @@ func (miner *Miner) fillTransactions(ctx context.Context, interrupt *atomic.Int3
 			prioBlobTxs[account] = txs
 		}
 	}
+	// commitPhase runs one queue pair through the commit loop. The benchmark's
+	// transactionWall covers exactly the commit loops, so it is comparable
+	// between sequential and parallel builds.
+	commitPhase := func(plainTxs, blobTxs *txorder.TransactionsByPriceAndNonce) error {
+		started := time.Now()
+		err := miner.commitTransactions(ctx, env, plainTxs, blobTxs, interrupt)
+		if env.benchmark != nil {
+			env.benchmark.transactionWall += time.Since(started)
+		}
+		return err
+	}
 	// Fill the block with all available pending transactions.
 	if len(prioPlainTxs) > 0 || len(prioBlobTxs) > 0 {
 		plainTxs := txorder.NewTransactionsByPriceAndNonce(env.signer, prioPlainTxs, env.header.BaseFee)
 		blobTxs := txorder.NewTransactionsByPriceAndNonce(env.signer, prioBlobTxs, env.header.BaseFee)
-
-		if err := miner.commitTransactions(ctx, env, plainTxs, blobTxs, interrupt); err != nil {
+		if err := commitPhase(plainTxs, blobTxs); err != nil {
 			return err
 		}
 	}
 	if len(normalPlainTxs) > 0 || len(normalBlobTxs) > 0 {
 		plainTxs := txorder.NewTransactionsByPriceAndNonce(env.signer, normalPlainTxs, env.header.BaseFee)
 		blobTxs := txorder.NewTransactionsByPriceAndNonce(env.signer, normalBlobTxs, env.header.BaseFee)
-
-		if err := miner.commitTransactions(ctx, env, plainTxs, blobTxs, interrupt); err != nil {
+		if err := commitPhase(plainTxs, blobTxs); err != nil {
 			return err
 		}
 	}
