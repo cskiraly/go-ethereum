@@ -39,7 +39,8 @@ func main() {
 	var (
 		port     = flag.Int("port", 9111, "TCP (libp2p) and UDP (discv5) port")
 		peers    = flag.Int("peers", 20, "target peer count")
-		fork     = flag.String("fork", "fulu", "current fork name, for decoding updates")
+		fork     = flag.String("fork", "", "current fork name, for decoding updates (default: from the network config)")
+		network  = flag.String("network", "mainnet", "mainnet or sepolia")
 		duration = flag.Duration("duration", 10*time.Minute, "how long to run")
 		verb     = flag.Int("verbosity", 3, "log level")
 		digestHx = flag.String("forkdigest", "", "fork digest override (hex, e.g. for a devnet)")
@@ -48,17 +49,25 @@ func main() {
 	flag.Parse()
 	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.FromLegacyLevel(*verb), true)))
 
+	cfg := params.MainnetLightConfig
+	if *network == "sepolia" {
+		cfg = params.SepoliaLightConfig
+	}
+	net := p2p.Networks[cfg.GenesisValidatorsRoot]
 	var boot []*enode.Node
-	for _, s := range p2p.MainnetBootnodes {
+	for _, s := range net.Bootnodes {
 		if n, err := enode.Parse(enode.ValidSchemes, s); err == nil {
 			boot = append(boot, n)
 		}
 	}
 	start := time.Now()
 	var opt, fin int
-	cfg := params.MainnetLightConfig
 	epoch := uint64(time.Now().Unix()-int64(cfg.GenesisTime)) / 12 / params.EpochLength
-	digest, version := p2p.ForkDigest(cfg, p2p.MainnetBlobSchedule, p2p.MainnetElectraBlobs, epoch)
+	digest, version := p2p.ForkDigest(cfg, net.BlobSchedule, net.ElectraBlobs, epoch)
+	nextVersion, nextEpoch := p2p.NextFork(cfg, epoch)
+	if *fork == "" {
+		*fork = strings.ToLower(cfg.ForkAtEpoch(epoch).Name)
+	}
 	if *digestHx != "" {
 		b, err := hex.DecodeString(strings.TrimPrefix(*digestHx, "0x"))
 		if err != nil || len(b) != 4 {
@@ -68,7 +77,7 @@ func main() {
 	}
 	node, err := p2p.New(p2p.Config{
 		Bootnodes: boot, ListenPort: *port, TargetPeers: *peers, ForkName: *fork,
-		ForkDigest: digest, ForkVersion: version,
+		ForkDigest: digest, ForkVersion: version, NextForkVersion: nextVersion, NextForkEpoch: nextEpoch,
 		OnOptimisticUpdate: func(from peer.ID, u types.OptimisticUpdate) {
 			opt++
 			log.Info("Optimistic update", "attested", u.Attested.Slot, "signature", u.SignatureSlot,

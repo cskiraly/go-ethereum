@@ -38,3 +38,18 @@ func TestMainnetForkDigest(t *testing.T) {
 		}
 	}
 }
+
+// TestSepoliaForkDigest checks Sepolia's current digest and next fork (Gloas), as in the
+// ENR of Lodestar's Sepolia node on 2026-10-01: 74d01459 90000076 0x56300.
+func TestSepoliaForkDigest(t *testing.T) {
+	net := Networks[params.SepoliaLightConfig.GenesisValidatorsRoot]
+	const epoch = 350000
+	d, _ := ForkDigest(params.SepoliaLightConfig, net.BlobSchedule, net.ElectraBlobs, epoch)
+	if got := hex.EncodeToString(d[:]); got != "74d01459" {
+		t.Errorf("digest %s, want 74d01459", got)
+	}
+	v, e := NextFork(params.SepoliaLightConfig, epoch)
+	if got := hex.EncodeToString(v[:]); got != "90000076" || e != 353024 {
+		t.Errorf("next fork %s at %d, want 90000076 at 353024", got, e)
+	}
+}

@@ -27,6 +27,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net"
 	"sort"
 	"strings"
@@ -82,6 +83,10 @@ type Config struct {
 	// unreliable, since many nodes' ENRs are stale).
 	ForkDigest  [4]byte
 	ForkVersion [4]byte
+	// NextForkVersion and NextForkEpoch describe the next scheduled fork, for the ENR
+	// (zero epoch: none known).
+	NextForkVersion [4]byte
+	NextForkEpoch   uint64
 
 	OnOptimisticUpdate func(peer.ID, types.OptimisticUpdate)
 	OnFinalityUpdate   func(peer.ID, types.FinalityUpdate)
@@ -207,9 +212,13 @@ func (n *Node) Start() error {
 		n.local.Set(enr.WithEntry(enrLightClientKey, []byte{0x01}))
 	}
 	if n.cfg.ForkDigest != ([4]byte{}) {
-		// ENRForkID: fork digest, next fork version, next fork epoch (none known here)
-		eth2 := append(append(n.cfg.ForkDigest[:0:0], n.cfg.ForkDigest[:]...), n.cfg.ForkVersion[:]...)
-		n.setEth2(append(eth2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+		// ENRForkID: fork digest, next fork version, next fork epoch
+		next, nextEpoch := n.cfg.NextForkVersion, n.cfg.NextForkEpoch
+		if nextEpoch == 0 {
+			next, nextEpoch = n.cfg.ForkVersion, math.MaxUint64
+		}
+		eth2 := append(append(n.cfg.ForkDigest[:0:0], n.cfg.ForkDigest[:]...), next[:]...)
+		n.setEth2(binary.LittleEndian.AppendUint64(eth2, nextEpoch))
 	}
 	n.disc, err = discover.ListenV5(conn, n.local, discover.Config{PrivateKey: n.key, Bootnodes: n.cfg.Bootnodes})
 	if err != nil {

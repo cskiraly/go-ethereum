@@ -19,7 +19,10 @@ package p2p
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"math"
 	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/ethereum/go-ethereum/beacon/params"
 )
@@ -33,6 +36,41 @@ var (
 	MainnetBlobSchedule = []BlobParams{{412672, 15}, {419072, 21}}
 	MainnetElectraBlobs = BlobParams{364032, 9}
 )
+
+// Network holds what the light client needs to know of a network beyond its beacon chain
+// config: where to start discovery, and the blob schedule (for the fork digest).
+type Network struct {
+	Name         string
+	Bootnodes    []string
+	BlobSchedule []BlobParams
+	ElectraBlobs BlobParams // MAX_BLOBS_PER_BLOCK_ELECTRA from ELECTRA_FORK_EPOCH
+}
+
+// Networks are the built-in networks, by genesis validators root.
+var Networks = map[common.Hash]Network{
+	params.MainnetLightConfig.GenesisValidatorsRoot: {
+		Name: "mainnet", Bootnodes: MainnetBootnodes,
+		BlobSchedule: MainnetBlobSchedule, ElectraBlobs: MainnetElectraBlobs,
+	},
+	params.SepoliaLightConfig.GenesisValidatorsRoot: {
+		Name: "sepolia", Bootnodes: SepoliaBootnodes,
+		BlobSchedule: []BlobParams{{274176, 15}, {275712, 21}}, ElectraBlobs: BlobParams{222464, 9},
+	},
+}
+
+// NextFork returns the version and epoch of the first fork after epoch in the config, for
+// the ENR's `eth2` entry (the current version and FAR_FUTURE_EPOCH if there is none).
+func NextFork(config *params.ChainConfig, epoch uint64) (version [4]byte, forkEpoch uint64) {
+	copy(version[:], config.ForkAtEpoch(epoch).Version)
+	forkEpoch = math.MaxUint64
+	for _, f := range config.Forks {
+		if f.Epoch > epoch && f.Epoch < forkEpoch {
+			forkEpoch = f.Epoch
+			copy(version[:], f.Version)
+		}
+	}
+	return version, forkEpoch
+}
 
 // ForkDigest computes the fork digest at an epoch: the first 4 bytes of the fork data root
 // (fork version, genesis validators root), from Fulu on XORed with the hash of the blob

@@ -42,7 +42,7 @@ const (
 	protoLCFinality   = protoPrefix + "light_client_finality_update/1/ssz_snappy"
 	protoLCOptimistic = protoPrefix + "light_client_optimistic_update/1/ssz_snappy"
 	maxUpdatesPerCall = 128 // MAX_REQUEST_LIGHT_CLIENT_UPDATES
-	peerTries         = 3
+	peerTries         = 8   // not every consensus node serves light client data (Prysm: off by default)
 )
 
 // Server makes the light client's p2p node a request server for blsync: gossiped
