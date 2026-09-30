@@ -492,7 +492,13 @@ func (d *Downloader) syncToHead(beaconPing chan struct{}) (err error) {
 				headers := d.readHeaderRange(oldest, count)
 				if len(headers) == count {
 					pivot = headers[len(headers)-1]
-					log.Warn("Retrieved pivot header from local", "number", pivot.Number, "hash", pivot.Hash(), "latest", latest.Number, "oldest", oldest.Number)
+					// Expected outside snap sync, where the pivot is unused: a synced node
+					// following heads it only learns by hash runs one short cycle per head.
+					logger := log.Debug
+					if mode == ethconfig.SnapSync {
+						logger = log.Warn
+					}
+					logger("Retrieved pivot header from local", "number", pivot.Number, "hash", pivot.Hash(), "latest", latest.Number, "oldest", oldest.Number)
 				}
 			}
 		}
