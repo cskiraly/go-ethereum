@@ -309,7 +309,7 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 		for _, line := range strings.Split(banner, "\n") {
 			log.Warn(line)
 		}
-	} else if ctx.IsSet(utils.BeaconApiFlag.Name) {
+	} else if ctx.IsSet(utils.BeaconApiFlag.Name) || ctx.Bool(utils.BeaconP2PFlag.Name) {
 		// Start blsync mode.
 		srv := rpc.NewServer()
 		srv.RegisterName("engine", catalyst.NewConsensusAPI(eth))

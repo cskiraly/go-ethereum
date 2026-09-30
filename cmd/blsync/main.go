@@ -40,6 +40,8 @@ func main() {
 		utils.BeaconThresholdFlag,
 		utils.BeaconNoFilterFlag,
 		utils.BeaconP2PBlocksFlag,
+		utils.BeaconP2PFlag,
+		utils.BeaconP2PPortFlag,
 		utils.BeaconConfigFlag,
 		utils.BeaconGenesisRootFlag,
 		utils.BeaconGenesisTimeFlag,

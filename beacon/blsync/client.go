@@ -17,10 +17,13 @@
 package blsync
 
 import (
+	"errors"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/light"
 	"github.com/ethereum/go-ethereum/beacon/light/api"
+	"github.com/ethereum/go-ethereum/beacon/light/p2p"
 	"github.com/ethereum/go-ethereum/beacon/light/request"
 	"github.com/ethereum/go-ethereum/beacon/light/sync"
 	"github.com/ethereum/go-ethereum/beacon/params"
@@ -30,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -43,6 +47,7 @@ type Client struct {
 
 	chainHeadSub event.Subscription
 	engineClient *engineClient
+	p2pNode      *p2p.Node
 }
 
 func NewClient(config params.ClientConfig) *Client {
@@ -96,10 +101,49 @@ func (c *Client) Start() error {
 		beaconApi := api.NewBeaconLightApi(url, c.customHeader)
 		c.scheduler.RegisterServer(request.NewServer(api.NewApiServer(beaconApi), &mclock.System{}))
 	}
+	if c.config.P2P {
+		if err := c.startP2P(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// startP2P joins the consensus layer's libp2p network and registers it as a server.
+func (c *Client) startP2P() error {
+	var boot []*enode.Node
+	if c.config.GenesisValidatorsRoot == params.MainnetLightConfig.GenesisValidatorsRoot {
+		for _, s := range p2p.MainnetBootnodes {
+			if n, err := enode.Parse(enode.ValidSchemes, s); err == nil {
+				boot = append(boot, n)
+			}
+		}
+	}
+	if len(boot) == 0 {
+		return errors.New("--beacon.p2p: no consensus bootnodes for this network (mainnet only so far)")
+	}
+	epoch := uint64(time.Now().Unix()-int64(c.config.GenesisTime)) / 12 / params.EpochLength
+	node, err := p2p.New(p2p.Config{
+		Bootnodes:  boot,
+		ListenPort: c.config.P2PPort,
+		ForkName:   strings.ToLower(c.config.ForkAtEpoch(epoch).Name),
+	})
+	if err != nil {
+		return err
+	}
+	c.scheduler.RegisterServer(request.NewServer(p2p.NewServer(node), &mclock.System{}))
+	if err := node.Start(); err != nil {
+		return err
+	}
+	c.p2pNode = node
+	log.Info("Following the consensus layer's libp2p network", "port", c.config.P2PPort)
 	return nil
 }
 
 func (c *Client) Stop() error {
+	if c.p2pNode != nil {
+		c.p2pNode.Stop()
+	}
 	c.engineClient.stop()
 	c.chainHeadSub.Unsubscribe()
 	c.scheduler.Stop()
