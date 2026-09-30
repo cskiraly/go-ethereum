@@ -49,6 +49,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/assert"
@@ -4790,6 +4791,122 @@ func testRestartDuringInterruptedHeadersBeforeCutoff(t *testing.T, disk bool) {
 	if n, h := chain.HistoryPruningCutoff(); n != cutoff.NumberU64() || h != cutoff.Hash() {
 		t.Fatalf("unexpected history pruning cutoff: want %d %x, got %d %x", cutoff.NumberU64(), cutoff.Hash(), n, h)
 	}
+}
+
+// Tests that the repair also covers the first batch of headers before the
+// cutoff, whose interrupted range starts at the genesis block written when the
+// ancient store was initialized.
+func TestRestartDuringFirstHeadersBeforeCutoff(t *testing.T) {
+	t.Run("memory", func(t *testing.T) { testRestartDuringFirstHeadersBeforeCutoff(t, false) })
+	t.Run("disk", func(t *testing.T) { testRestartDuringFirstHeadersBeforeCutoff(t, true) })
+}
+
+func testRestartDuringFirstHeadersBeforeCutoff(t *testing.T, disk bool) {
+	var (
+		gspec = &Genesis{
+			Config:  params.TestChainConfig,
+			BaseFee: big.NewInt(params.InitialBaseFee),
+		}
+		engine = beacon.New(ethash.NewFaker())
+		mem    ethdb.KeyValueStore
+		dir    = t.TempDir()
+	)
+	if !disk {
+		mem = rawdb.NewMemoryDatabase()
+	}
+	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, 64, nil)
+	cutoff := blocks[31] // block #32
+	cfg := cutoffConfig(cutoff)
+
+	db := cutoffTestDB(t, mem, dir)
+	chain, err := NewBlockChain(db, gspec, engine, cfg)
+	if err != nil {
+		t.Fatalf("failed to create chain: %v", err)
+	}
+	genesis := chain.Genesis()
+	chain.Stop()
+
+	var headers []*types.Header
+	for _, b := range blocks[:8] {
+		headers = append(headers, b.Header())
+	}
+	// Replay the first batch up to its tail truncation: the ancient store is
+	// initialized with the genesis block, which carries a real body, and the
+	// headers are appended behind it with nil placeholders.
+	if _, err := rawdb.WriteAncientBlocks(db, []*types.Block{genesis}, []rlp.RawValue{rlp.EmptyList}); err != nil {
+		t.Fatalf("failed to write genesis to ancient store: %v", err)
+	}
+	if _, err := rawdb.WriteAncientHeaderChain(db, headers); err != nil {
+		t.Fatalf("failed to write headers to ancient store: %v", err)
+	}
+	batch := db.NewBatch()
+	for _, header := range headers {
+		rawdb.WriteHeaderNumber(batch, header.Hash(), header.Number.Uint64())
+	}
+	rawdb.WriteHeadHeaderHash(batch, headers[7].Hash())
+	rawdb.WriteHeadFastBlockHash(batch, headers[7].Hash())
+	if err := batch.Write(); err != nil {
+		t.Fatalf("failed to write head markers: %v", err)
+	}
+	frozen, _ := db.Ancients()
+	tail, _ := db.Tail(rawdb.ChainFreezerBlockDataGroup)
+	if frozen != 9 || tail != 0 {
+		t.Fatalf("ancient store: want frozen 9 and tail 0, got %d and %d", frozen, tail)
+	}
+	if disk {
+		// Reopen the database from disk; the memory freezer can only be reused.
+		db.Close()
+		db = cutoffTestDB(t, mem, dir)
+	}
+	defer db.Close()
+
+	chain, err = NewBlockChain(db, gspec, engine, cfg)
+	if err != nil {
+		t.Fatalf("failed to restart chain after interrupted header insertion before cutoff: %v", err)
+	}
+	defer chain.Stop()
+
+	if n := chain.CurrentHeader().Number.Uint64(); n != 8 {
+		t.Errorf("head header: want 8, got %d", n)
+	}
+	frozen, _ = db.Ancients()
+	tail, _ = db.Tail(rawdb.ChainFreezerBlockDataGroup)
+	if frozen != 9 || tail != 9 {
+		t.Errorf("ancient store: want frozen 9 and tail 9, got %d and %d", frozen, tail)
+	}
+}
+
+// Tests that a node interrupted after the ancient store was initialized with
+// the genesis block, but before the first batch of headers before the cutoff
+// was written, can still be restarted.
+func TestRestartAfterAncientGenesis(t *testing.T) {
+	var (
+		gspec = &Genesis{
+			Config:  params.TestChainConfig,
+			BaseFee: big.NewInt(params.InitialBaseFee),
+		}
+		engine = beacon.New(ethash.NewFaker())
+	)
+	_, blocks, _ := GenerateChainWithGenesis(gspec, engine, 64, nil)
+	cfg := cutoffConfig(blocks[31])
+
+	db := cutoffTestDB(t, rawdb.NewMemoryDatabase(), "")
+	defer db.Close()
+	chain, err := NewBlockChain(db, gspec, engine, cfg)
+	if err != nil {
+		t.Fatalf("failed to create chain: %v", err)
+	}
+	genesis := chain.Genesis()
+	chain.Stop()
+
+	if _, err := rawdb.WriteAncientBlocks(db, []*types.Block{genesis}, []rlp.RawValue{rlp.EmptyList}); err != nil {
+		t.Fatalf("failed to write genesis to ancient store: %v", err)
+	}
+	chain, err = NewBlockChain(db, gspec, engine, cfg)
+	if err != nil {
+		t.Fatalf("failed to restart chain after the ancient store was initialized: %v", err)
+	}
+	chain.Stop()
 }
 
 // Tests that a node whose head is inside an ancient store holding real block

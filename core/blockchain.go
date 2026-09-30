@@ -771,9 +771,11 @@ func (bc *BlockChain) initializeHistoryPruning(latest uint64) error {
 			// truncation leaves it behind. The entries in between are then the
 			// nil placeholders written alongside the headers, at most a batch
 			// of them, so they are all checked and the tail is repaired, as no
-			// later insertion moves it otherwise.
+			// later insertion moves it otherwise. Genesis is skipped: it is
+			// written with a real body when the ancient store is initialized,
+			// and a completed batch truncates it away along with the rest.
 			if freezerTail < frozen {
-				for number := freezerTail; number < frozen; number++ {
+				for number := max(freezerTail, 1); number < frozen; number++ {
 					body, err := bc.db.Ancient(rawdb.ChainFreezerBodiesTable, number)
 					if err != nil {
 						return fmt.Errorf("failed to read block body %d: %w", number, err)
