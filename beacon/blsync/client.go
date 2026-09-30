@@ -114,18 +114,25 @@ func (c *Client) Start() error {
 // startP2P joins the consensus layer's libp2p network and registers it as a server.
 func (c *Client) startP2P() error {
 	var boot []*enode.Node
-	if c.config.GenesisValidatorsRoot == params.MainnetLightConfig.GenesisValidatorsRoot {
-		for _, s := range p2p.MainnetBootnodes {
+	enrs := c.config.P2PBootnodes
+	if len(enrs) == 0 && c.config.GenesisValidatorsRoot == params.MainnetLightConfig.GenesisValidatorsRoot {
+		enrs = p2p.MainnetBootnodes
+	}
+	{
+		for _, s := range enrs {
 			if n, err := enode.Parse(enode.ValidSchemes, s); err == nil {
 				boot = append(boot, n)
 			}
 		}
 	}
 	if len(boot) == 0 {
-		return errors.New("--beacon.p2p: no consensus bootnodes for this network (mainnet only so far)")
+		return errors.New("--beacon.p2p: no consensus bootnodes for this network (built in for mainnet; --beacon.p2p.bootnodes)")
 	}
 	epoch := uint64(time.Now().Unix()-int64(c.config.GenesisTime)) / 12 / params.EpochLength
 	digest, version := p2p.ForkDigest(&c.config.ChainConfig, p2p.MainnetBlobSchedule, p2p.MainnetElectraBlobs, epoch)
+	if len(c.config.P2PDigest) == 4 {
+		copy(digest[:], c.config.P2PDigest)
+	}
 	node, err := p2p.New(p2p.Config{
 		Bootnodes:   boot,
 		ListenPort:  c.config.P2PPort,

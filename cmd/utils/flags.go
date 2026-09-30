@@ -390,6 +390,16 @@ var (
 		Value:    9000,
 		Category: flags.BeaconCategory,
 	}
+	BeaconP2PBootnodesFlag = &cli.StringSliceFlag{
+		Name:     "beacon.p2p.bootnodes",
+		Usage:    "Consensus layer discv5 bootnodes (ENRs) for --beacon.p2p (default: built in for mainnet)",
+		Category: flags.BeaconCategory,
+	}
+	BeaconP2PDigestFlag = &cli.StringFlag{
+		Name:     "beacon.p2p.forkdigest",
+		Usage:    "Fork digest for --beacon.p2p (hex; default: computed, mainnet's blob schedule)",
+		Category: flags.BeaconCategory,
+	}
 	BeaconConfigFlag = &cli.StringFlag{
 		Name:     "beacon.config",
 		Usage:    "Beacon chain config YAML file",
@@ -2221,6 +2231,14 @@ func MakeBeaconLightConfig(ctx *cli.Context) bparams.ClientConfig {
 	config.P2PBlocks = ctx.Bool(BeaconP2PBlocksFlag.Name)
 	config.P2P = ctx.Bool(BeaconP2PFlag.Name)
 	config.P2PPort = ctx.Int(BeaconP2PPortFlag.Name)
+	config.P2PBootnodes = ctx.StringSlice(BeaconP2PBootnodesFlag.Name)
+	if s := ctx.String(BeaconP2PDigestFlag.Name); s != "" {
+		d, err := hexutil.Decode(s)
+		if err != nil || len(d) != 4 {
+			Fatalf("Invalid --%s: %s", BeaconP2PDigestFlag.Name, s)
+		}
+		config.P2PDigest = d
+	}
 	return config
 }
 

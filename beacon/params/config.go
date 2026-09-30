@@ -47,9 +47,11 @@ type ClientConfig struct {
 	CustomHeader map[string]string
 	Threshold    int
 	NoFilter     bool
-	P2PBlocks    bool // leave fetching execution blocks to the execution client (by hash)
-	P2P          bool // follow the consensus layer's libp2p network as a light client
-	P2PPort      int  // its TCP (libp2p) and UDP (discv5) port
+	P2PBlocks    bool     // leave fetching execution blocks to the execution client (by hash)
+	P2P          bool     // follow the consensus layer's libp2p network as a light client
+	P2PPort      int      // its TCP (libp2p) and UDP (discv5) port
+	P2PBootnodes []string // consensus discv5 bootnodes (ENRs); default: built in for mainnet
+	P2PDigest    []byte   // fork digest override (4 bytes); default: computed
 }
 
 // ChainConfig contains the beacon chain configuration.

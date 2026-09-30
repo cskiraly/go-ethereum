@@ -28,6 +28,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -201,6 +203,26 @@ func (n *Node) Start() error {
 	return nil
 }
 
+// clientCounts summarizes the connected peers by client (from their identify agent version).
+func (n *Node) clientCounts() string {
+	counts := make(map[string]int)
+	for _, id := range n.host.Network().Peers() {
+		agent := "unknown"
+		if v, err := n.host.Peerstore().Get(id, "AgentVersion"); err == nil {
+			if a, ok := v.(string); ok && a != "" {
+				agent = strings.ToLower(strings.SplitN(a, "/", 2)[0])
+			}
+		}
+		counts[agent]++
+	}
+	names := make([]string, 0, len(counts))
+	for a, c := range counts {
+		names = append(names, fmt.Sprintf("%s:%d", a, c))
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
 // statsLoop logs peers, gossip and bandwidth every two minutes.
 func (n *Node) statsLoop() {
 	defer n.wg.Done()
@@ -212,7 +234,7 @@ func (n *Node) statsLoop() {
 			return
 		case <-t.C:
 			in, out := n.Bandwidth()
-			log.Info("Consensus p2p light client", "peers", n.Peers(), "gossipKB", n.GossipBytes()>>10,
+			log.Info("Consensus p2p light client", "peers", n.Peers(), "clients", n.clientCounts(), "gossipKB", n.GossipBytes()>>10,
 				"forwarded", n.Forwarded(), "served", n.served.Load(), "inKB", in>>10, "outKB", out>>10)
 		}
 	}
@@ -274,6 +296,21 @@ func (n *Node) dialLoop() {
 		learnt = n.Digest() != [4]byte{}
 		joined bool
 	)
+	if learnt {
+		// Known digest: join now and dial the bootnodes on it right away (on a small
+		// network, random lookups may never return them).
+		if err := n.joinGossip(); err != nil {
+			log.Error("Failed to join gossip", "err", err)
+			return
+		}
+		joined = true
+		d := n.Digest()
+		for _, nd := range n.cfg.Bootnodes {
+			if eth2 := nodeEth2(nd); eth2 != nil && [4]byte(eth2[:4]) == d && nd.TCP() != 0 && nd.IP() != nil {
+				n.dial(nd)
+			}
+		}
+	}
 	for it.Next() {
 		if n.ctx.Err() != nil {
 			return

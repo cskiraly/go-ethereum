@@ -42,6 +42,8 @@ func main() {
 		utils.BeaconP2PBlocksFlag,
 		utils.BeaconP2PFlag,
 		utils.BeaconP2PPortFlag,
+		utils.BeaconP2PBootnodesFlag,
+		utils.BeaconP2PDigestFlag,
 		utils.BeaconConfigFlag,
 		utils.BeaconGenesisRootFlag,
 		utils.BeaconGenesisTimeFlag,

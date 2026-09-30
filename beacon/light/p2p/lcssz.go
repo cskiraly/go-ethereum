@@ -108,6 +108,9 @@ func decodeSyncAggregate(b []byte) types.SyncAggregate {
 
 // DecodeOptimisticUpdate decodes an SSZ LightClientOptimisticUpdate of the given fork.
 func DecodeOptimisticUpdate(fork string, b []byte) (types.OptimisticUpdate, error) {
+	if fork == "gloas" {
+		return decodeGloasOptimistic(b)
+	}
 	if !supportedFork(fork) {
 		return types.OptimisticUpdate{}, fmt.Errorf("light client updates of fork %q are not supported", fork)
 	}
@@ -130,6 +133,9 @@ func DecodeOptimisticUpdate(fork string, b []byte) (types.OptimisticUpdate, erro
 
 // DecodeFinalityUpdate decodes an SSZ LightClientFinalityUpdate of the given fork.
 func DecodeFinalityUpdate(fork string, b []byte) (types.FinalityUpdate, error) {
+	if fork == "gloas" {
+		return decodeGloasFinality(b)
+	}
 	if !supportedFork(fork) {
 		return types.FinalityUpdate{}, fmt.Errorf("light client updates of fork %q are not supported", fork)
 	}
@@ -177,6 +183,9 @@ func committeeBranchDepth(fork string) int {
 // DecodeUpdate decodes an SSZ LightClientUpdate of the given fork, and returns it
 // with the next sync committee it announces.
 func DecodeUpdate(fork string, b []byte) (*types.LightClientUpdate, *types.SerializedSyncCommittee, error) {
+	if fork == "gloas" {
+		return decodeGloasUpdate(b)
+	}
 	if !supportedFork(fork) {
 		return nil, nil, fmt.Errorf("light client updates of fork %q are not supported", fork)
 	}
@@ -227,6 +236,9 @@ func DecodeUpdate(fork string, b []byte) (*types.LightClientUpdate, *types.Seria
 
 // DecodeBootstrap decodes an SSZ LightClientBootstrap of the given fork.
 func DecodeBootstrap(fork string, b []byte) (*types.BootstrapData, error) {
+	if fork == "gloas" {
+		return decodeGloasBootstrap(b)
+	}
 	if !supportedFork(fork) {
 		return nil, fmt.Errorf("light client bootstrap of fork %q is not supported", fork)
 	}
@@ -250,5 +262,101 @@ func DecodeBootstrap(fork string, b []byte) (*types.BootstrapData, error) {
 		CommitteeRoot:   committee.Root(),
 		Committee:       committee,
 		CommitteeBranch: decodeBranch(b[4+types.SerializedSyncCommitteeSize:fixed], depth),
+	}, nil
+}
+
+// Gloas: the LightClientHeader carries only the execution block hash (EIP-7732), and the
+// state proofs are deeper (EIP-7688). All its containers are fixed-size then: no offsets.
+const (
+	gloasExecDepth      = 11 // floorlog2(EXECUTION_BLOCK_HASH_GINDEX_GLOAS)
+	gloasFinalityDepth  = 9  // floorlog2(FINALIZED_ROOT_GINDEX_GLOAS)
+	gloasCommitteeDepth = 11 // floorlog2((NEXT|CURRENT)_SYNC_COMMITTEE_GINDEX_GLOAS)
+	gloasHeaderSize     = beaconHeaderSize + 32 + gloasExecDepth*32
+)
+
+func decodeGloasHeader(b []byte) types.HeaderWithExecProof {
+	var hash common.Hash
+	copy(hash[:], b[beaconHeaderSize:beaconHeaderSize+32])
+	return types.HeaderWithExecProof{
+		Header: decodeBeaconHeader(b[:beaconHeaderSize]),
+		Proof: &types.GloasExecutionProof{
+			ExecutionBlockHash: hash,
+			Branch:             decodeBranch(b[beaconHeaderSize+32:gloasHeaderSize], gloasExecDepth),
+		},
+	}
+}
+
+func decodeGloasOptimistic(b []byte) (types.OptimisticUpdate, error) {
+	if len(b) != gloasHeaderSize+syncAggregateSize+8 {
+		return types.OptimisticUpdate{}, fmt.Errorf("ssz: gloas optimistic update of %d bytes", len(b))
+	}
+	p := gloasHeaderSize
+	return types.OptimisticUpdate{
+		Attested:      decodeGloasHeader(b),
+		Signature:     decodeSyncAggregate(b[p : p+syncAggregateSize]),
+		SignatureSlot: binary.LittleEndian.Uint64(b[p+syncAggregateSize:]),
+	}, nil
+}
+
+func decodeGloasFinality(b []byte) (types.FinalityUpdate, error) {
+	pBranch := 2 * gloasHeaderSize
+	pAgg := pBranch + gloasFinalityDepth*32
+	if len(b) != pAgg+syncAggregateSize+8 {
+		return types.FinalityUpdate{}, fmt.Errorf("ssz: gloas finality update of %d bytes", len(b))
+	}
+	return types.FinalityUpdate{
+		Version:        "gloas",
+		Attested:       decodeGloasHeader(b),
+		Finalized:      decodeGloasHeader(b[gloasHeaderSize:]),
+		FinalityBranch: decodeBranch(b[pBranch:pAgg], gloasFinalityDepth),
+		Signature:      decodeSyncAggregate(b[pAgg : pAgg+syncAggregateSize]),
+		SignatureSlot:  binary.LittleEndian.Uint64(b[pAgg+syncAggregateSize:]),
+	}, nil
+}
+
+func decodeGloasUpdate(b []byte) (*types.LightClientUpdate, *types.SerializedSyncCommittee, error) {
+	var (
+		pCommittee = gloasHeaderSize
+		pCBranch   = pCommittee + types.SerializedSyncCommitteeSize
+		pFinalized = pCBranch + gloasCommitteeDepth*32
+		pFBranch   = pFinalized + gloasHeaderSize
+		pAgg       = pFBranch + gloasFinalityDepth*32
+		size       = pAgg + syncAggregateSize + 8
+	)
+	if len(b) != size {
+		return nil, nil, fmt.Errorf("ssz: gloas update of %d bytes, want %d", len(b), size)
+	}
+	committee := new(types.SerializedSyncCommittee)
+	copy(committee[:], b[pCommittee:pCBranch])
+	update := &types.LightClientUpdate{
+		Version: "gloas",
+		AttestedHeader: types.SignedHeader{
+			Header:        decodeBeaconHeader(b[:beaconHeaderSize]),
+			Signature:     decodeSyncAggregate(b[pAgg : pAgg+syncAggregateSize]),
+			SignatureSlot: binary.LittleEndian.Uint64(b[pAgg+syncAggregateSize:]),
+		},
+		NextSyncCommitteeRoot:   committee.Root(),
+		NextSyncCommitteeBranch: decodeBranch(b[pCBranch:pFinalized], gloasCommitteeDepth),
+		FinalityBranch:          decodeBranch(b[pFBranch:pAgg], gloasFinalityDepth),
+	}
+	if fh := decodeBeaconHeader(b[pFinalized : pFinalized+beaconHeaderSize]); fh != (types.Header{}) {
+		update.FinalizedHeader = &fh
+	}
+	return update, committee, nil
+}
+
+func decodeGloasBootstrap(b []byte) (*types.BootstrapData, error) {
+	size := gloasHeaderSize + types.SerializedSyncCommitteeSize + gloasCommitteeDepth*32
+	if len(b) != size {
+		return nil, fmt.Errorf("ssz: gloas bootstrap of %d bytes, want %d", len(b), size)
+	}
+	committee := new(types.SerializedSyncCommittee)
+	copy(committee[:], b[gloasHeaderSize:gloasHeaderSize+types.SerializedSyncCommitteeSize])
+	return &types.BootstrapData{
+		Version:         "gloas",
+		Header:          decodeBeaconHeader(b[:beaconHeaderSize]),
+		CommitteeRoot:   committee.Root(),
+		Committee:       committee,
+		CommitteeBranch: decodeBranch(b[gloasHeaderSize+types.SerializedSyncCommitteeSize:], gloasCommitteeDepth),
 	}, nil
 }
