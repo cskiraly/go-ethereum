@@ -147,10 +147,16 @@ func orderCandidates(peers []peer.ID, protocols func(peer.ID) []protocol.ID, pro
 	return append(serving, unknown...)
 }
 
+// chunk is a response chunk: the SSZ payload and the fork of its context bytes.
+type chunk struct {
+	fork string
+	ssz  []byte
+}
+
 // request sends a req/resp request to candidate peers, up to parallelTries at a time,
 // until one answers with chunks that accept takes (accept decodes and keeps the result;
 // it is called for one try at a time, and after a success for no other).
-func (n *Node) request(proto string, body []byte, chunks int, accept func(chunks [][]byte) error) error {
+func (n *Node) request(proto string, body []byte, chunks int, accept func(chunks []chunk) error) error {
 	// Right after start (blsync asks for the bootstrap first) there may be no peer yet.
 	cands := n.candidates(proto)
 	for wait := 0; len(cands) == 0 && wait < 20; wait++ {
@@ -219,7 +225,7 @@ loop:
 }
 
 // requestPeer sends one request to a peer and returns the response chunks (up to chunks).
-func (n *Node) requestPeer(ctx context.Context, id peer.ID, proto string, body []byte, chunks int) ([][]byte, error) {
+func (n *Node) requestPeer(ctx context.Context, id peer.ID, proto string, body []byte, chunks int) ([]chunk, error) {
 	ctx, cancel := context.WithTimeout(ctx, tryTimeout+time.Duration(chunks)*perChunkTime)
 	defer cancel()
 	s, err := n.host.NewStream(ctx, id, protocol.ID(proto))
@@ -239,16 +245,16 @@ func (n *Node) requestPeer(ctx context.Context, id peer.ID, proto string, body [
 	}
 	s.CloseWrite()
 	r := bufio.NewReader(s)
-	var res [][]byte
+	var res []chunk
 	for len(res) < chunks {
-		_, ssz, err := readResponse(r, 4)
+		context, ssz, err := readResponse(r, 4)
 		if err == io.EOF && len(res) > 0 {
 			break
 		}
 		if err != nil {
 			return nil, err
 		}
-		res = append(res, ssz)
+		res = append(res, chunk{fork: n.forkOf([4]byte(context)), ssz: ssz})
 	}
 	if len(res) == 0 {
 		return nil, errors.New("empty response")
@@ -266,13 +272,13 @@ func (n *Node) UpdatesByRange(first, count uint64) (sync.RespUpdates, error) {
 	binary.LittleEndian.PutUint64(body[0:8], first)
 	binary.LittleEndian.PutUint64(body[8:16], count)
 	var resp sync.RespUpdates
-	err := n.request(protoLCUpdates, body[:], int(count), func(chunks [][]byte) error {
+	err := n.request(protoLCUpdates, body[:], int(count), func(chunks []chunk) error {
 		if uint64(len(chunks)) != count {
 			return fmt.Errorf("got %d updates of %d", len(chunks), count)
 		}
 		var r sync.RespUpdates
-		for _, ssz := range chunks {
-			u, c, err := DecodeUpdate(n.cfg.ForkName, ssz)
+		for _, ch := range chunks {
+			u, c, err := DecodeUpdate(ch.fork, ch.ssz)
 			if err != nil {
 				return err
 			}
@@ -288,8 +294,8 @@ func (n *Node) UpdatesByRange(first, count uint64) (sync.RespUpdates, error) {
 // Bootstrap fetches the light client bootstrap for a (finalized, epoch boundary) block root.
 func (n *Node) Bootstrap(root common.Hash) (*types.BootstrapData, error) {
 	var boot *types.BootstrapData
-	err := n.request(protoLCBootstrap, root[:], 1, func(chunks [][]byte) error {
-		b, err := DecodeBootstrap(n.cfg.ForkName, chunks[0])
+	err := n.request(protoLCBootstrap, root[:], 1, func(chunks []chunk) error {
+		b, err := DecodeBootstrap(chunks[0].fork, chunks[0].ssz)
 		if err == nil && b.Header.Hash() != root {
 			err = fmt.Errorf("bootstrap for %x, asked for %x", b.Header.Hash(), root)
 		}
@@ -304,8 +310,8 @@ func (n *Node) Bootstrap(root common.Hash) (*types.BootstrapData, error) {
 // FinalityUpdate fetches the latest light client finality update.
 func (n *Node) FinalityUpdate() (types.FinalityUpdate, error) {
 	var u types.FinalityUpdate
-	err := n.request(protoLCFinality, nil, 1, func(chunks [][]byte) error {
-		f, err := DecodeFinalityUpdate(n.cfg.ForkName, chunks[0])
+	err := n.request(protoLCFinality, nil, 1, func(chunks []chunk) error {
+		f, err := DecodeFinalityUpdate(chunks[0].fork, chunks[0].ssz)
 		if err == nil {
 			u = f
 		}
@@ -335,14 +341,14 @@ func (n *Node) AskLatest(addr string) (types.OptimisticUpdate, types.FinalityUpd
 	}
 	chunks, err := n.requestPeer(n.ctx, info.ID, protoLCOptimistic, nil, 1)
 	if err == nil {
-		opt, err = DecodeOptimisticUpdate(n.cfg.ForkName, chunks[0])
+		opt, err = DecodeOptimisticUpdate(chunks[0].fork, chunks[0].ssz)
 	}
 	if err != nil {
 		return opt, fin, fmt.Errorf("optimistic update: %v", err)
 	}
 	chunks, err = n.requestPeer(n.ctx, info.ID, protoLCFinality, nil, 1)
 	if err == nil {
-		fin, err = DecodeFinalityUpdate(n.cfg.ForkName, chunks[0])
+		fin, err = DecodeFinalityUpdate(chunks[0].fork, chunks[0].ssz)
 	}
 	if err != nil {
 		return opt, fin, fmt.Errorf("finality update: %v", err)

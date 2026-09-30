@@ -18,8 +18,9 @@ package blsync
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/light"
 	"github.com/ethereum/go-ethereum/beacon/light/api"
@@ -129,23 +130,30 @@ func (c *Client) startP2P() error {
 	if len(boot) == 0 {
 		return errors.New("--beacon.p2p: no consensus bootnodes for this network (built in for mainnet and sepolia; --beacon.p2p.bootnodes)")
 	}
-	epoch := uint64(time.Now().Unix()-int64(c.config.GenesisTime)) / 12 / params.EpochLength
-	if !known && len(c.config.P2PDigest) != 4 {
-		return errors.New("--beacon.p2p: unknown network, its blob schedule is needed for the fork digest (--beacon.p2p.forkdigest)")
+	if !known && c.config.ChainConfigFile != "" {
+		// a custom network: its blob schedule from its config file
+		file, err := os.ReadFile(c.config.ChainConfigFile)
+		if err != nil {
+			return err
+		}
+		net, err := p2p.ParseNetwork(file)
+		if err != nil {
+			return fmt.Errorf("--beacon.p2p: blob schedule of %s: %v", c.config.ChainConfigFile, err)
+		}
+		network.BlobSchedule, network.ElectraBlobs, known = net.BlobSchedule, net.ElectraBlobs, true
 	}
-	digest, version := p2p.ForkDigest(&c.config.ChainConfig, network.BlobSchedule, network.ElectraBlobs, epoch)
+	var override [4]byte
 	if len(c.config.P2PDigest) == 4 {
-		copy(digest[:], c.config.P2PDigest)
+		copy(override[:], c.config.P2PDigest)
+	} else if !known {
+		return errors.New("--beacon.p2p: unknown network, its blob schedule is needed for the fork digest (--beacon.config, or --beacon.p2p.forkdigest)")
 	}
-	nextVersion, nextEpoch := p2p.NextFork(&c.config.ChainConfig, epoch)
 	node, err := p2p.New(p2p.Config{
-		Bootnodes:       boot,
-		ListenPort:      c.config.P2PPort,
-		ForkName:        strings.ToLower(c.config.ForkAtEpoch(epoch).Name),
-		ForkDigest:      digest,
-		ForkVersion:     version,
-		NextForkVersion: nextVersion,
-		NextForkEpoch:   nextEpoch,
+		Bootnodes:      boot,
+		ListenPort:     c.config.P2PPort,
+		Chain:          &c.config.ChainConfig,
+		Network:        network,
+		DigestOverride: override,
 		VerifyHeader: func(h types.SignedHeader) (bool, error) {
 			ok, _, err := c.committees.VerifySignedHeader(h)
 			return ok, err

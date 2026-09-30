@@ -39,7 +39,6 @@ func main() {
 	var (
 		port     = flag.Int("port", 9111, "TCP (libp2p) and UDP (discv5) port")
 		peers    = flag.Int("peers", 20, "target peer count")
-		fork     = flag.String("fork", "", "current fork name, for decoding updates (default: from the network config)")
 		network  = flag.String("network", "mainnet", "mainnet or sepolia")
 		duration = flag.Duration("duration", 10*time.Minute, "how long to run")
 		verb     = flag.Int("verbosity", 3, "log level")
@@ -62,22 +61,17 @@ func main() {
 	}
 	start := time.Now()
 	var opt, fin int
-	epoch := uint64(time.Now().Unix()-int64(cfg.GenesisTime)) / 12 / params.EpochLength
-	digest, version := p2p.ForkDigest(cfg, net.BlobSchedule, net.ElectraBlobs, epoch)
-	nextVersion, nextEpoch := p2p.NextFork(cfg, epoch)
-	if *fork == "" {
-		*fork = strings.ToLower(cfg.ForkAtEpoch(epoch).Name)
-	}
+	var override [4]byte
 	if *digestHx != "" {
 		b, err := hex.DecodeString(strings.TrimPrefix(*digestHx, "0x"))
 		if err != nil || len(b) != 4 {
 			log.Crit("Bad --forkdigest", "value", *digestHx)
 		}
-		copy(digest[:], b)
+		copy(override[:], b)
 	}
 	node, err := p2p.New(p2p.Config{
-		Bootnodes: boot, ListenPort: *port, TargetPeers: *peers, ForkName: *fork,
-		ForkDigest: digest, ForkVersion: version, NextForkVersion: nextVersion, NextForkEpoch: nextEpoch,
+		Bootnodes: boot, ListenPort: *port, TargetPeers: *peers,
+		Chain: cfg, Network: net, DigestOverride: override,
 		OnOptimisticUpdate: func(from peer.ID, u types.OptimisticUpdate) {
 			opt++
 			log.Info("Optimistic update", "attested", u.Attested.Slot, "signature", u.SignatureSlot,

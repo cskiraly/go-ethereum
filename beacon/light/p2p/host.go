@@ -25,10 +25,10 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/binary"
-	"encoding/hex"
+	"errors"
 	"fmt"
-	"math"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/light/request"
+	"github.com/ethereum/go-ethereum/beacon/params"
 	"github.com/ethereum/go-ethereum/beacon/types"
 	gcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
@@ -76,17 +77,14 @@ type Config struct {
 	Bootnodes   []*enode.Node
 	ListenPort  int // TCP (libp2p) and UDP (discv5) port, and +1 UDP (libp2p over QUIC); 0: random
 	TargetPeers int
-	// ForkName names the current fork, for decoding the updates ("fulu", ...).
-	ForkName string
-	// ForkDigest is the current fork digest (see ForkDigest), ForkVersion the current fork
-	// version. Zero digest: learned from the ENRs of discovered nodes (the most common one;
-	// unreliable, since many nodes' ENRs are stale).
-	ForkDigest  [4]byte
-	ForkVersion [4]byte
-	// NextForkVersion and NextForkEpoch describe the next scheduled fork, for the ENR
-	// (zero epoch: none known).
-	NextForkVersion [4]byte
-	NextForkEpoch   uint64
+	// Chain is the beacon chain config (forks), Network the blob schedule: together they
+	// give the fork digests over time, and the node switches digest (topics, status, ENR)
+	// at each change without a restart.
+	Chain   *params.ChainConfig
+	Network Network
+	// DigestOverride, if set, is the one digest used (for a network whose blob schedule is
+	// unknown): no transitions then.
+	DigestOverride [4]byte
 
 	OnOptimisticUpdate func(peer.ID, types.OptimisticUpdate)
 	OnFinalityUpdate   func(peer.ID, types.FinalityUpdate)
@@ -108,17 +106,21 @@ type Node struct {
 	ps    *pubsub.PubSub
 	bw    *metrics.BandwidthCounter
 
+	sched        []forkDigest       // the network's digests over time
+	forkByDigest map[[4]byte]string // for decoding by gossip topic or response context bytes
+
 	mu       sync.Mutex
-	eth2     []byte // our ENR `eth2` entry (fork digest, next fork version, next fork epoch)
-	digest   [4]byte
+	current  forkDigest // the digest in force (status, ENR, dialing)
+	accepted [][4]byte  // digests whose topics we are subscribed to (current ± transition)
+	subs     map[[4]byte]*digestSubs
 	status   []byte // status we send: the last one a peer returned, with our digest
 	dialing  map[peer.ID]bool
 	received atomic.Int64
 
 	fwdMu                 sync.Mutex
-	fwdOptimistic, fwdFin uint64 // attested / finalized slot of the last update forwarded
-	lastOptimistic        []byte // SSZ of the last optimistic update forwarded, served on request
-	lastFinality          []byte // same for the finality update
+	fwdOptimistic, fwdFin uint64       // attested / finalized slot of the last update forwarded
+	lastOptimistic        servedUpdate // the last optimistic update forwarded, served on request
+	lastFinality          servedUpdate // same for the finality update
 	forwarded             atomic.Int64
 	served                atomic.Int64
 
@@ -133,6 +135,18 @@ type Node struct {
 func New(cfg Config) (*Node, error) {
 	if cfg.TargetPeers == 0 {
 		cfg.TargetPeers = 20
+	}
+	if cfg.Chain == nil {
+		return nil, errors.New("no beacon chain config")
+	}
+	sched := digestSchedule(cfg.Chain, cfg.Network)
+	if cfg.DigestOverride != ([4]byte{}) {
+		fork := strings.ToLower(cfg.Chain.ForkAtEpoch(epochAt(cfg.Chain.GenesisTime, time.Now())).Name)
+		sched = []forkDigest{{epoch: 0, digest: cfg.DigestOverride, fork: fork}}
+	}
+	forkByDigest := make(map[[4]byte]string)
+	for _, fd := range sched {
+		forkByDigest[fd.digest] = fd.fork
 	}
 	key, err := gcrypto.GenerateKey()
 	if err != nil {
@@ -166,7 +180,8 @@ func New(cfg Config) (*Node, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	n := &Node{cfg: cfg, key: key, host: h, bw: bw, dialing: make(map[peer.ID]bool), ctx: ctx, cancel: cancel}
+	n := &Node{cfg: cfg, key: key, host: h, bw: bw, sched: sched, forkByDigest: forkByDigest,
+		subs: make(map[[4]byte]*digestSubs), dialing: make(map[peer.ID]bool), ctx: ctx, cancel: cancel}
 	for _, p := range []string{protoStatus1, protoStatus2} {
 		h.SetStreamHandler(protocol.ID(p), n.handleStatus)
 	}
@@ -211,23 +226,26 @@ func (n *Node) Start() error {
 	if n.cfg.VerifyHeader != nil { // only a node that verifies updates keeps any to serve
 		n.local.Set(enr.WithEntry(enrLightClientKey, []byte{0x01}))
 	}
-	if n.cfg.ForkDigest != ([4]byte{}) {
-		// ENRForkID: fork digest, next fork version, next fork epoch
-		next, nextEpoch := n.cfg.NextForkVersion, n.cfg.NextForkEpoch
-		if nextEpoch == 0 {
-			next, nextEpoch = n.cfg.ForkVersion, math.MaxUint64
-		}
-		eth2 := append(append(n.cfg.ForkDigest[:0:0], n.cfg.ForkDigest[:]...), next[:]...)
-		n.setEth2(binary.LittleEndian.AppendUint64(eth2, nextEpoch))
+	n.ps, err = pubsub.NewGossipSub(n.ctx, n.host,
+		pubsub.WithMessageIdFn(func(m *pb.Message) string { return gossipMessageID(m.GetTopic(), m.Data) }),
+		pubsub.WithMessageSignaturePolicy(pubsub.StrictNoSign),
+		pubsub.WithNoAuthor(),
+		pubsub.WithPeerOutboundQueueSize(256),
+		pubsub.WithValidateQueueSize(256),
+	)
+	if err != nil {
+		return err
 	}
+	n.reconcile(epochAt(n.cfg.Chain.GenesisTime, time.Now())) // digest, ENR, topics
 	n.disc, err = discover.ListenV5(conn, n.local, discover.Config{PrivateKey: n.key, Bootnodes: n.cfg.Bootnodes})
 	if err != nil {
 		return err
 	}
 	log.Info("Consensus p2p light client listening", "addr", fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", port, n.host.ID()))
-	n.wg.Add(2)
+	n.wg.Add(3)
 	go n.dialLoop()
 	go n.statsLoop()
+	go n.forkLoop()
 	return nil
 }
 
@@ -287,19 +305,29 @@ func (n *Node) Bandwidth() (in, out int64) {
 	return t.TotalIn, t.TotalOut
 }
 
-// Digest returns the fork digest in use (zero until learned).
+// Digest returns the fork digest in force.
 func (n *Node) Digest() [4]byte {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.digest
+	return n.current.digest
 }
 
-func (n *Node) setEth2(eth2 []byte) {
+// acceptsDigest reports whether a peer on digest d is useful now: the digest in force, or
+// the neighbouring one within the transition window around a change.
+func (n *Node) acceptsDigest(d [4]byte) bool {
 	n.mu.Lock()
-	n.eth2 = eth2
-	copy(n.digest[:], eth2[:4])
-	n.mu.Unlock()
-	n.local.Set(enr.WithEntry("eth2", eth2))
+	defer n.mu.Unlock()
+	return slices.Contains(n.accepted, d)
+}
+
+// forkOf returns the fork of a digest (for decoding), or the current fork.
+func (n *Node) forkOf(d [4]byte) string {
+	if f, ok := n.forkByDigest[d]; ok {
+		return f
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.current.fork
 }
 
 // nodeEth2 returns the `eth2` ENR entry of a node, if it has one.
@@ -311,32 +339,22 @@ func nodeEth2(nd *enode.Node) []byte {
 	return eth2
 }
 
-// dialLoop walks discovered nodes, learns the fork digest if needed, and keeps
-// TargetPeers connections to nodes on it.
+// dialLoop dials the bootnodes, then walks discovered nodes and keeps TargetPeers
+// connections to nodes on an accepted digest.
 func (n *Node) dialLoop() {
 	defer n.wg.Done()
 	it := n.disc.RandomNodes()
 	defer it.Close()
 	go func() { <-n.ctx.Done(); it.Close() }() // unblocks it.Next on Stop
-	var (
-		seen   = make(map[string]int)    // eth2 entry → count (while learning)
-		sample = make(map[string][]byte) // eth2 entry
-		learnt = n.Digest() != [4]byte{}
-		joined bool
-	)
-	if learnt {
-		// Known digest: join now and dial the bootnodes on it right away (on a small
-		// network, random lookups may never return them).
-		if err := n.joinGossip(); err != nil {
-			log.Error("Failed to join gossip", "err", err)
-			return
-		}
-		joined = true
-		d := n.Digest()
-		for _, nd := range n.cfg.Bootnodes {
-			if eth2 := nodeEth2(nd); eth2 != nil && [4]byte(eth2[:4]) == d && nd.TCP() != 0 && nd.IP() != nil {
-				n.dial(nd)
-			}
+
+	usable := func(nd *enode.Node) bool {
+		eth2 := nodeEth2(nd)
+		return eth2 != nil && nd.TCP() != 0 && nd.IP() != nil && n.acceptsDigest([4]byte(eth2[:4]))
+	}
+	// On a small network, random lookups may never return the bootnodes themselves.
+	for _, nd := range n.cfg.Bootnodes {
+		if usable(nd) {
+			n.dial(nd)
 		}
 	}
 	for it.Next() {
@@ -344,36 +362,7 @@ func (n *Node) dialLoop() {
 			return
 		}
 		nd := it.Node()
-		eth2 := nodeEth2(nd)
-		if eth2 == nil || nd.TCP() == 0 || nd.IP() == nil {
-			continue
-		}
-		if !learnt {
-			k := hex.EncodeToString(eth2[:16])
-			seen[k]++
-			sample[k] = eth2[:16]
-			if len(seen) > 0 && sum(seen) >= 20 {
-				best := ""
-				for k, c := range seen {
-					if best == "" || c > seen[best] {
-						best = k
-					}
-				}
-				n.setEth2(sample[best])
-				log.Info("Learned the fork digest from discovered nodes", "digest", hex.EncodeToString(sample[best][:4]), "votes", seen[best], "of", sum(seen))
-				learnt = true
-			}
-			continue
-		}
-		if !joined {
-			if err := n.joinGossip(); err != nil {
-				log.Error("Failed to join gossip", "err", err)
-				return
-			}
-			joined = true
-		}
-		d := n.Digest()
-		if [4]byte(eth2[:4]) != d {
+		if !usable(nd) {
 			continue
 		}
 		for n.Peers() >= n.cfg.TargetPeers {
@@ -385,13 +374,6 @@ func (n *Node) dialLoop() {
 		}
 		n.dial(nd)
 	}
-}
-
-func sum(m map[string]int) (s int) {
-	for _, c := range m {
-		s += c
-	}
-	return
 }
 
 // dial connects to a discovered node in the background and exchanges status.
@@ -451,7 +433,7 @@ func (n *Node) ourStatus(v2 bool) []byte {
 	if n.status != nil {
 		copy(st, n.status[:84])
 	}
-	copy(st[0:4], n.digest[:])
+	copy(st[0:4], n.current.digest[:])
 	if v2 {
 		// earliest_available_slot: we store no blocks; claim our head slot
 		st = st[:92]
@@ -482,8 +464,7 @@ func (n *Node) exchangeStatus(id peer.ID) error {
 	if len(resp) < 84 {
 		return fmt.Errorf("short status (%d bytes)", len(resp))
 	}
-	d := n.Digest()
-	if [4]byte(resp[:4]) != d {
+	if !n.acceptsDigest([4]byte(resp[:4])) {
 		return fmt.Errorf("peer on fork digest %x", resp[:4])
 	}
 	n.mu.Lock()
@@ -533,37 +514,37 @@ func (n *Node) handleGoodbye(s network.Stream) {
 	}
 }
 
-// joinGossip subscribes to the light client update topics of the current fork digest.
-func (n *Node) joinGossip() error {
-	ps, err := pubsub.NewGossipSub(n.ctx, n.host,
-		pubsub.WithMessageIdFn(func(m *pb.Message) string { return gossipMessageID(m.GetTopic(), m.Data) }),
-		pubsub.WithMessageSignaturePolicy(pubsub.StrictNoSign),
-		pubsub.WithNoAuthor(),
-		pubsub.WithPeerOutboundQueueSize(256),
-		pubsub.WithValidateQueueSize(256),
-	)
-	if err != nil {
-		return err
-	}
-	n.ps = ps
-	d := n.Digest()
-	for name, handle := range map[string]func(peer.ID, []byte) (forward func() bool, err error){
-		"light_client_optimistic_update": n.onOptimistic,
-		"light_client_finality_update":   n.onFinality,
-	} {
+// digestSubs are the gossip subscriptions of one digest.
+type digestSubs struct {
+	topics []*pubsub.Topic
+	subs   []*pubsub.Subscription
+}
+
+var lightClientTopics = []string{"light_client_optimistic_update", "light_client_finality_update"}
+
+// subscribeDigest subscribes to the light client update topics of a digest; messages on
+// them are decoded with that digest's fork.
+func (n *Node) subscribeDigest(d [4]byte) (*digestSubs, error) {
+	fork := n.forkOf(d)
+	ds := new(digestSubs)
+	for _, name := range lightClientTopics {
+		handle := n.onOptimistic
+		if name == "light_client_finality_update" {
+			handle = n.onFinality
+		}
 		topic := fmt.Sprintf("/eth2/%x/%s/ssz_snappy", d[:], name)
 		// Updates are handed to blsync (which verifies them itself) and forwarded only if
 		// they pass the gossip checks here; anything else is ignored, not rejected, so a
 		// lagging committee chain of ours never penalizes honest peers.
-		if err := ps.RegisterTopicValidator(topic, func(_ context.Context, from peer.ID, m *pubsub.Message) pubsub.ValidationResult {
+		if err := n.ps.RegisterTopicValidator(topic, func(_ context.Context, from peer.ID, m *pubsub.Message) pubsub.ValidationResult {
 			ssz, err := decodeGossip(m.Data)
 			if err != nil {
 				return pubsub.ValidationReject
 			}
 			n.received.Add(int64(len(m.Data)))
-			forward, err := handle(m.ReceivedFrom, ssz)
+			forward, err := handle(m.ReceivedFrom, fork, d, ssz)
 			if err != nil {
-				log.Debug("Bad light client update", "topic", name, "peer", m.ReceivedFrom, "err", err)
+				log.Debug("Bad light client update", "topic", topic, "peer", m.ReceivedFrom, "err", err)
 				return pubsub.ValidationReject
 			}
 			if forward() {
@@ -572,16 +553,23 @@ func (n *Node) joinGossip() error {
 			}
 			return pubsub.ValidationIgnore
 		}); err != nil {
-			return err
+			n.unsubscribe(ds)
+			return nil, err
 		}
-		t, err := ps.Join(topic)
+		t, err := n.ps.Join(topic)
 		if err != nil {
-			return err
+			n.ps.UnregisterTopicValidator(topic)
+			n.unsubscribe(ds)
+			return nil, err
 		}
 		sub, err := t.Subscribe()
 		if err != nil {
-			return err
+			t.Close()
+			n.ps.UnregisterTopicValidator(topic)
+			n.unsubscribe(ds)
+			return nil, err
 		}
+		ds.topics, ds.subs = append(ds.topics, t), append(ds.subs, sub)
 		n.wg.Add(1)
 		go func() { // drain: messages are handled in the validator
 			defer n.wg.Done()
@@ -591,13 +579,88 @@ func (n *Node) joinGossip() error {
 				}
 			}
 		}()
-		log.Info("Subscribed to light client gossip", "topic", topic)
 	}
-	return nil
+	log.Info("Subscribed to light client gossip", "digest", fmt.Sprintf("%x", d), "fork", fork)
+	return ds, nil
 }
 
-func (n *Node) onOptimistic(from peer.ID, ssz []byte) (func() bool, error) {
-	u, err := DecodeOptimisticUpdate(n.cfg.ForkName, ssz)
+// unsubscribe cancels a digest's subscriptions and leaves its topics.
+func (n *Node) unsubscribe(ds *digestSubs) {
+	for _, sub := range ds.subs {
+		sub.Cancel()
+	}
+	for _, t := range ds.topics {
+		n.ps.UnregisterTopicValidator(t.String())
+		t.Close()
+	}
+}
+
+// reconcile brings the node to the state an epoch calls for: the digest in force (status,
+// ENR with the next fork) and the gossip subscriptions, including the transition window
+// around a digest change.
+func (n *Node) reconcile(epoch uint64) {
+	current, want := topicsAt(n.sched, epoch)
+	n.mu.Lock()
+	switched := current.digest != n.current.digest
+	prev := n.current
+	n.current, n.accepted = current, want
+	n.mu.Unlock()
+	if switched {
+		nextVersion, nextEpoch := NextFork(n.cfg.Chain, epoch)
+		if n.cfg.DigestOverride != ([4]byte{}) {
+			nextVersion, nextEpoch = [4]byte(n.cfg.Chain.ForkAtEpoch(epoch).Version), farFutureEpoch
+		}
+		eth2 := append(append([]byte{}, current.digest[:]...), nextVersion[:]...)
+		n.local.Set(enr.WithEntry("eth2", binary.LittleEndian.AppendUint64(eth2, nextEpoch)))
+		if prev.digest != ([4]byte{}) {
+			log.Info("Switched to the next fork digest", "epoch", epoch, "digest", fmt.Sprintf("%x", current.digest), "fork", current.fork, "previous", fmt.Sprintf("%x", prev.digest))
+		}
+	}
+	for _, d := range want {
+		if n.subs[d] != nil {
+			continue
+		}
+		ds, err := n.subscribeDigest(d)
+		if err != nil {
+			log.Error("Failed to subscribe to light client gossip", "digest", fmt.Sprintf("%x", d), "err", err)
+			continue
+		}
+		n.subs[d] = ds
+	}
+	for d, ds := range n.subs {
+		if !slices.Contains(want, d) {
+			n.unsubscribe(ds)
+			delete(n.subs, d)
+			log.Info("Left light client gossip", "digest", fmt.Sprintf("%x", d))
+		}
+	}
+}
+
+// forkLoop reconciles the node with the epoch once per slot.
+func (n *Node) forkLoop() {
+	defer n.wg.Done()
+	t := time.NewTicker(12 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case now := <-t.C:
+			n.reconcile(epochAt(n.cfg.Chain.GenesisTime, now))
+		}
+	}
+}
+
+// epochAt is the epoch at a time, for a genesis time.
+func epochAt(genesis uint64, t time.Time) uint64 {
+	if t.Unix() < int64(genesis) {
+		return 0
+	}
+	return uint64(t.Unix()-int64(genesis)) / 12 / params.EpochLength
+}
+
+func (n *Node) onOptimistic(from peer.ID, fork string, digest [4]byte, ssz []byte) (func() bool, error) {
+	u, err := DecodeOptimisticUpdate(fork, ssz)
 	if err != nil {
 		return nil, err
 	}
@@ -605,12 +668,12 @@ func (n *Node) onOptimistic(from peer.ID, ssz []byte) (func() bool, error) {
 		cb(from, u)
 	}
 	return func() bool {
-		return n.forwardable(u.SignedHeader(), u.Attested.Slot, &n.fwdOptimistic, &n.lastOptimistic, ssz)
+		return n.forwardable(u.SignedHeader(), u.Attested.Slot, &n.fwdOptimistic, &n.lastOptimistic, servedUpdate{digest, ssz})
 	}, nil
 }
 
-func (n *Node) onFinality(from peer.ID, ssz []byte) (func() bool, error) {
-	u, err := DecodeFinalityUpdate(n.cfg.ForkName, ssz)
+func (n *Node) onFinality(from peer.ID, fork string, digest [4]byte, ssz []byte) (func() bool, error) {
+	u, err := DecodeFinalityUpdate(fork, ssz)
 	if err != nil {
 		return nil, err
 	}
@@ -618,7 +681,7 @@ func (n *Node) onFinality(from peer.ID, ssz []byte) (func() bool, error) {
 		cb(from, u)
 	}
 	return func() bool {
-		return n.forwardable(u.SignedHeader(), u.Finalized.Slot, &n.fwdFin, &n.lastFinality, ssz)
+		return n.forwardable(u.SignedHeader(), u.Finalized.Slot, &n.fwdFin, &n.lastFinality, servedUpdate{digest, ssz})
 	}, nil
 }
 
@@ -626,7 +689,7 @@ func (n *Node) onFinality(from peer.ID, ssz []byte) (func() bool, error) {
 // a third of the signature slot (allowing for clock disparity), newer than the last one
 // forwarded on the topic (key: attested slot, or finalized slot), and signed by the sync
 // committee. It records the update as forwarded if so.
-func (n *Node) forwardable(head types.SignedHeader, key uint64, last *uint64, keep *[]byte, ssz []byte) bool {
+func (n *Node) forwardable(head types.SignedHeader, key uint64, last *uint64, keep *servedUpdate, u servedUpdate) bool {
 	if n.cfg.VerifyHeader == nil {
 		return false
 	}
@@ -643,7 +706,7 @@ func (n *Node) forwardable(head types.SignedHeader, key uint64, last *uint64, ke
 		return false
 	}
 	*last = key
-	*keep = ssz
+	*keep = u
 	return true
 }
 
@@ -652,22 +715,28 @@ func (n *Node) forwardable(head types.SignedHeader, key uint64, last *uint64, ke
 // bootstraps: not served yet). Not a consensus-spec key: other clients ignore it.
 const enrLightClientKey = "lc"
 
+// servedUpdate is a light client update kept for serving: its SSZ and the digest of the
+// topic it came on (the response's context bytes).
+type servedUpdate struct {
+	digest [4]byte
+	ssz    []byte
+}
+
 // serveLatest answers a light client optimistic or finality update request with the last
 // verified update of that kind, or "resource unavailable" (3) without one.
-func (n *Node) serveLatest(s network.Stream, keep *[]byte) {
+func (n *Node) serveLatest(s network.Stream, keep *servedUpdate) {
 	defer s.Close()
 	s.SetDeadline(time.Now().Add(respTimeout))
 	n.fwdMu.Lock()
-	ssz := *keep
+	u := *keep
 	n.fwdMu.Unlock()
-	d := n.Digest()
-	if ssz == nil {
+	if u.ssz == nil {
 		s.Write([]byte{3})
 		writeSSZ(s, []byte("no update yet"))
 		return
 	}
 	n.served.Add(1)
-	writeResponse(s, d[:], ssz)
+	writeResponse(s, u.digest[:], u.ssz)
 }
 
 // Forwarded returns the number of light client updates forwarded to other peers.

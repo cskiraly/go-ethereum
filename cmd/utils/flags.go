@@ -2183,6 +2183,7 @@ func MakeBeaconLightConfig(ctx *cli.Context) bparams.ClientConfig {
 			Fatalf("Could not load beacon chain config '%s': %v", configPath, err)
 		}
 		log.Info("Using custom beacon chain config", "file", configPath)
+		config.ChainConfigFile = configPath
 	} else {
 		if ctx.IsSet(BeaconGenesisRootFlag.Name) {
 			Fatalf("Genesis root is specified but custom beacon chain config is missing")

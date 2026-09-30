@@ -52,6 +52,8 @@ type ClientConfig struct {
 	P2PPort      int      // its TCP (libp2p) and UDP (discv5) port
 	P2PBootnodes []string // consensus discv5 bootnodes (ENRs); default: built in for mainnet
 	P2PDigest    []byte   // fork digest override (4 bytes); default: computed
+
+	ChainConfigFile string // the beacon chain config file of a custom network (--beacon.config)
 }
 
 // ChainConfig contains the beacon chain configuration.
