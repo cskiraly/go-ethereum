@@ -25,6 +25,8 @@ import (
 	"io"
 	"math/rand"
 	"reflect"
+	"slices"
+	stdsync "sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/light/request"
@@ -105,66 +107,153 @@ func (s *Server) SendRequest(id request.ID, req request.Request) {
 	}()
 }
 
-// request sends a req/resp request to a connected peer (trying a few) and returns
-// the response chunks, each with its 4 context bytes. read decodes one chunk.
-func (n *Node) request(proto string, body []byte, chunks int, read func(ssz []byte) error) error {
-	peers := n.host.Network().Peers()
+// Timing of blsync's requests over req/resp. blsync cancels a request after 10 s
+// (request.hardRequestTimeout), so all tries of one request fit in requestDeadline.
+const (
+	requestDeadline = 8 * time.Second
+	tryTimeout      = 3 * time.Second        // per peer, plus perChunkTime per expected chunk
+	perChunkTime    = 100 * time.Millisecond // an update is ~25 KB
+	parallelTries   = 3
+)
+
+// candidates returns the connected peers to ask for proto, in random order: first those
+// whose identify protocol list includes it, then those whose list isn't known yet. Peers
+// known not to support it (many nodes run no light client server) are left out.
+func (n *Node) candidates(proto string) []peer.ID {
+	return orderCandidates(n.host.Network().Peers(), func(id peer.ID) []protocol.ID {
+		protos, err := n.host.Peerstore().GetProtocols(id)
+		if err != nil {
+			return nil
+		}
+		return protos
+	}, protocol.ID(proto))
+}
+
+// orderCandidates orders peers for proto: the ones listing it (shuffled), then the ones
+// with no protocol list yet (shuffled); the ones whose list lacks it are dropped.
+func orderCandidates(peers []peer.ID, protocols func(peer.ID) []protocol.ID, proto protocol.ID) []peer.ID {
+	var serving, unknown []peer.ID
+	for _, id := range peers {
+		protos := protocols(id)
+		switch {
+		case len(protos) == 0:
+			unknown = append(unknown, id)
+		case slices.Contains(protos, proto):
+			serving = append(serving, id)
+		}
+	}
+	rand.Shuffle(len(serving), func(i, j int) { serving[i], serving[j] = serving[j], serving[i] })
+	rand.Shuffle(len(unknown), func(i, j int) { unknown[i], unknown[j] = unknown[j], unknown[i] })
+	return append(serving, unknown...)
+}
+
+// request sends a req/resp request to candidate peers, up to parallelTries at a time,
+// until one answers with chunks that accept takes (accept decodes and keeps the result;
+// it is called for one try at a time, and after a success for no other).
+func (n *Node) request(proto string, body []byte, chunks int, accept func(chunks [][]byte) error) error {
 	// Right after start (blsync asks for the bootstrap first) there may be no peer yet.
-	for wait := 0; len(peers) == 0 && wait < 20; wait++ {
+	cands := n.candidates(proto)
+	for wait := 0; len(cands) == 0 && wait < 20; wait++ {
 		select {
 		case <-n.ctx.Done():
 			return n.ctx.Err()
 		case <-time.After(time.Second):
 		}
-		peers = n.host.Network().Peers()
+		cands = n.candidates(proto)
 	}
-	if len(peers) == 0 {
-		return errors.New("no peers")
+	if len(cands) == 0 {
+		return fmt.Errorf("no peer serves %s", proto)
 	}
-	rand.Shuffle(len(peers), func(i, j int) { peers[i], peers[j] = peers[j], peers[i] })
-	var lastErr error
-	for i := 0; i < len(peers) && i < peerTries; i++ {
-		if lastErr = n.requestPeer(peers[i], proto, body, chunks, read); lastErr == nil {
-			return nil
+	ctx, cancel := context.WithTimeout(n.ctx, requestDeadline)
+	defer cancel()
+	var (
+		mu      stdsync.Mutex
+		done    bool
+		lastErr error
+		wg      stdsync.WaitGroup
+		slots   = make(chan struct{}, parallelTries)
+	)
+loop:
+	for _, id := range cands {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			break loop
 		}
-		log.Debug("Consensus p2p request to peer failed", "proto", proto, "peer", peers[i], "err", lastErr)
+		mu.Lock()
+		finished := done
+		mu.Unlock()
+		if finished {
+			break
+		}
+		wg.Add(1)
+		go func(id peer.ID) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			res, err := n.requestPeer(ctx, id, proto, body, chunks)
+			mu.Lock()
+			defer mu.Unlock()
+			if done {
+				return
+			}
+			if err == nil {
+				err = accept(res)
+			}
+			if err == nil {
+				done = true
+				cancel() // stop the other tries
+				return
+			}
+			lastErr = err
+			log.Debug("Consensus p2p request to peer failed", "proto", proto, "peer", id, "err", err)
+		}(id)
+	}
+	wg.Wait()
+	if done {
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = ctx.Err()
 	}
 	return lastErr
 }
 
-func (n *Node) requestPeer(id peer.ID, proto string, body []byte, chunks int, read func([]byte) error) error {
-	ctx, cancel := context.WithTimeout(n.ctx, respTimeout)
+// requestPeer sends one request to a peer and returns the response chunks (up to chunks).
+func (n *Node) requestPeer(ctx context.Context, id peer.ID, proto string, body []byte, chunks int) ([][]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, tryTimeout+time.Duration(chunks)*perChunkTime)
 	defer cancel()
 	s, err := n.host.NewStream(ctx, id, protocol.ID(proto))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer s.Close()
-	s.SetDeadline(time.Now().Add(respTimeout))
+	if dl, ok := ctx.Deadline(); ok {
+		s.SetDeadline(dl)
+	}
+	stop := context.AfterFunc(ctx, func() { s.Reset() }) // cancelled: unblock the reads
+	defer stop()
 	if body != nil {
 		if err := writeSSZ(s, body); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	s.CloseWrite()
 	r := bufio.NewReader(s)
-	got := 0
-	for ; got < chunks; got++ {
+	var res [][]byte
+	for len(res) < chunks {
 		_, ssz, err := readResponse(r, 4)
-		if err == io.EOF && got > 0 {
+		if err == io.EOF && len(res) > 0 {
 			break
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if err := read(ssz); err != nil {
-			return err
-		}
+		res = append(res, ssz)
 	}
-	if got == 0 {
-		return errors.New("empty response")
+	if len(res) == 0 {
+		return nil, errors.New("empty response")
 	}
-	return nil
+	return res, nil
 }
 
 // UpdatesByRange fetches the best light client updates of count periods from first,
@@ -177,26 +266,36 @@ func (n *Node) UpdatesByRange(first, count uint64) (sync.RespUpdates, error) {
 	binary.LittleEndian.PutUint64(body[0:8], first)
 	binary.LittleEndian.PutUint64(body[8:16], count)
 	var resp sync.RespUpdates
-	err := n.request(protoLCUpdates, body[:], int(count), func(ssz []byte) error {
-		u, c, err := DecodeUpdate(n.cfg.ForkName, ssz)
-		if err != nil {
-			return err
+	err := n.request(protoLCUpdates, body[:], int(count), func(chunks [][]byte) error {
+		if uint64(len(chunks)) != count {
+			return fmt.Errorf("got %d updates of %d", len(chunks), count)
 		}
-		resp.Updates = append(resp.Updates, u)
-		resp.Committees = append(resp.Committees, c)
+		var r sync.RespUpdates
+		for _, ssz := range chunks {
+			u, c, err := DecodeUpdate(n.cfg.ForkName, ssz)
+			if err != nil {
+				return err
+			}
+			r.Updates = append(r.Updates, u)
+			r.Committees = append(r.Committees, c)
+		}
+		resp = r
 		return nil
 	})
-	if err == nil && uint64(len(resp.Updates)) != count {
-		err = fmt.Errorf("got %d updates of %d", len(resp.Updates), count)
-	}
 	return resp, err
 }
 
 // Bootstrap fetches the light client bootstrap for a (finalized, epoch boundary) block root.
 func (n *Node) Bootstrap(root common.Hash) (*types.BootstrapData, error) {
 	var boot *types.BootstrapData
-	err := n.request(protoLCBootstrap, root[:], 1, func(ssz []byte) (err error) {
-		boot, err = DecodeBootstrap(n.cfg.ForkName, ssz)
+	err := n.request(protoLCBootstrap, root[:], 1, func(chunks [][]byte) error {
+		b, err := DecodeBootstrap(n.cfg.ForkName, chunks[0])
+		if err == nil && b.Header.Hash() != root {
+			err = fmt.Errorf("bootstrap for %x, asked for %x", b.Header.Hash(), root)
+		}
+		if err == nil {
+			boot = b
+		}
 		return err
 	})
 	return boot, err
@@ -205,8 +304,11 @@ func (n *Node) Bootstrap(root common.Hash) (*types.BootstrapData, error) {
 // FinalityUpdate fetches the latest light client finality update.
 func (n *Node) FinalityUpdate() (types.FinalityUpdate, error) {
 	var u types.FinalityUpdate
-	err := n.request(protoLCFinality, nil, 1, func(ssz []byte) (err error) {
-		u, err = DecodeFinalityUpdate(n.cfg.ForkName, ssz)
+	err := n.request(protoLCFinality, nil, 1, func(chunks [][]byte) error {
+		f, err := DecodeFinalityUpdate(n.cfg.ForkName, chunks[0])
+		if err == nil {
+			u = f
+		}
 		return err
 	})
 	return u, err
@@ -231,17 +333,17 @@ func (n *Node) AskLatest(addr string) (types.OptimisticUpdate, types.FinalityUpd
 	if err := n.exchangeStatus(info.ID); err != nil {
 		return opt, fin, fmt.Errorf("status: %v", err)
 	}
-	err = n.requestPeer(info.ID, protoLCOptimistic, nil, 1, func(ssz []byte) (err error) {
-		opt, err = DecodeOptimisticUpdate(n.cfg.ForkName, ssz)
-		return err
-	})
+	chunks, err := n.requestPeer(n.ctx, info.ID, protoLCOptimistic, nil, 1)
+	if err == nil {
+		opt, err = DecodeOptimisticUpdate(n.cfg.ForkName, chunks[0])
+	}
 	if err != nil {
 		return opt, fin, fmt.Errorf("optimistic update: %v", err)
 	}
-	err = n.requestPeer(info.ID, protoLCFinality, nil, 1, func(ssz []byte) (err error) {
-		fin, err = DecodeFinalityUpdate(n.cfg.ForkName, ssz)
-		return err
-	})
+	chunks, err = n.requestPeer(n.ctx, info.ID, protoLCFinality, nil, 1)
+	if err == nil {
+		fin, err = DecodeFinalityUpdate(n.cfg.ForkName, chunks[0])
+	}
 	if err != nil {
 		return opt, fin, fmt.Errorf("finality update: %v", err)
 	}
