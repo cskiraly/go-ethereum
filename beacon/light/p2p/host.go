@@ -42,6 +42,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/libp2p/go-libp2p"
+	mplex "github.com/libp2p/go-libp2p-mplex"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	pb "github.com/libp2p/go-libp2p-pubsub/pb"
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -52,6 +53,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/muxer/yamux"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
+	quic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	ma "github.com/multiformats/go-multiaddr"
 )
@@ -71,7 +73,7 @@ const (
 // Config configures the light client's p2p node.
 type Config struct {
 	Bootnodes   []*enode.Node
-	ListenPort  int // TCP (libp2p) and UDP (discv5) port; 0: random
+	ListenPort  int // TCP (libp2p) and UDP (discv5) port, and +1 UDP (libp2p over QUIC); 0: random
 	TargetPeers int
 	// ForkName names the current fork, for decoding the updates ("fulu", ...).
 	ForkName string
@@ -136,12 +138,21 @@ func New(cfg Config) (*Node, error) {
 		return nil, err
 	}
 	bw := metrics.NewBandwidthCounter()
+	quicPort := 0
+	if cfg.ListenPort != 0 {
+		quicPort = cfg.ListenPort + 1
+	}
+	// QUIC as well as TCP: the consensus p2p spec prefers it, and it multiplexes by itself.
+	// Over TCP both muxers: yamux, and mplex (outside go-libp2p proper), which some clients
+	// (Lodestar) require.
 	h, err := libp2p.New(
 		libp2p.Identity(lkey),
-		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", cfg.ListenPort)),
+		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", cfg.ListenPort), fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", quicPort)),
 		libp2p.Transport(tcp.NewTCPTransport),
+		libp2p.Transport(quic.NewTransport),
 		libp2p.Security(noise.ID, noise.New),
 		libp2p.Muxer(yamux.ID, yamux.DefaultTransport),
+		libp2p.Muxer(mplex.ID, mplex.DefaultTransport), // some clients (Lodestar) only speak mplex over TCP
 		libp2p.BandwidthReporter(bw),
 		libp2p.DisableRelay(),
 		libp2p.UserAgent("geth-blsync/p2p"),
@@ -165,10 +176,15 @@ func New(cfg Config) (*Node, error) {
 
 // Start begins discovery, dialing and the gossip subscriptions.
 func (n *Node) Start() error {
-	port := n.cfg.ListenPort
-	if port == 0 {
-		if p, err := n.host.Addrs()[0].ValueForProtocol(ma.P_TCP); err == nil {
+	port, quicPort := n.cfg.ListenPort, 0
+	for _, a := range n.host.Addrs() {
+		if p, err := a.ValueForProtocol(ma.P_TCP); err == nil && port == 0 {
 			fmt.Sscan(p, &port)
+		}
+		if _, err := a.ValueForProtocol(ma.P_QUIC_V1); err == nil {
+			if p, err := a.ValueForProtocol(ma.P_UDP); err == nil {
+				fmt.Sscan(p, &quicPort)
+			}
 		}
 	}
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: port})
@@ -181,6 +197,9 @@ func (n *Node) Start() error {
 	}
 	n.local = enode.NewLocalNode(db, n.key)
 	n.local.Set(enr.TCP(port))
+	if quicPort != 0 {
+		n.local.Set(enr.WithEntry("quic", uint16(quicPort)))
+	}
 	n.local.Set(enr.UDP(conn.LocalAddr().(*net.UDPAddr).Port))
 	n.local.Set(enr.WithEntry("attnets", make([]byte, 8)))
 	n.local.Set(enr.WithEntry("syncnets", make([]byte, 1)))
@@ -387,15 +406,21 @@ func (n *Node) dial(nd *enode.Node) {
 	}
 	n.dialing[id] = true
 	n.mu.Unlock()
-	addr, err := ma.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/%d", nd.IP(), nd.TCP()))
-	if err != nil {
-		return
+	addrs := make([]ma.Multiaddr, 0, 2)
+	var quicPort uint16
+	if nd.Load(enr.WithEntry("quic", &quicPort)) == nil && quicPort != 0 {
+		if a, err := ma.NewMultiaddr(fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", nd.IP(), quicPort)); err == nil {
+			addrs = append(addrs, a)
+		}
+	}
+	if a, err := ma.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/%d", nd.IP(), nd.TCP())); err == nil {
+		addrs = append(addrs, a)
 	}
 	go func() {
 		defer func() { n.mu.Lock(); delete(n.dialing, id); n.mu.Unlock() }()
 		ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
 		defer cancel()
-		if err := n.host.Connect(ctx, peer.AddrInfo{ID: id, Addrs: []ma.Multiaddr{addr}}); err != nil {
+		if err := n.host.Connect(ctx, peer.AddrInfo{ID: id, Addrs: addrs}); err != nil {
 			log.Trace("Dial failed", "peer", id, "err", err)
 			return
 		}

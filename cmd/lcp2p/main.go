@@ -19,10 +19,12 @@
 package main
 
 import (
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/light/p2p"
@@ -40,6 +42,7 @@ func main() {
 		fork     = flag.String("fork", "fulu", "current fork name, for decoding updates")
 		duration = flag.Duration("duration", 10*time.Minute, "how long to run")
 		verb     = flag.Int("verbosity", 3, "log level")
+		digestHx = flag.String("forkdigest", "", "fork digest override (hex, e.g. for a devnet)")
 		ask      = flag.String("peer", "", "multiaddr (with /p2p/<id>) of a node to ask for its latest light client updates, then exit")
 	)
 	flag.Parse()
@@ -56,6 +59,13 @@ func main() {
 	cfg := params.MainnetLightConfig
 	epoch := uint64(time.Now().Unix()-int64(cfg.GenesisTime)) / 12 / params.EpochLength
 	digest, version := p2p.ForkDigest(cfg, p2p.MainnetBlobSchedule, p2p.MainnetElectraBlobs, epoch)
+	if *digestHx != "" {
+		b, err := hex.DecodeString(strings.TrimPrefix(*digestHx, "0x"))
+		if err != nil || len(b) != 4 {
+			log.Crit("Bad --forkdigest", "value", *digestHx)
+		}
+		copy(digest[:], b)
+	}
 	node, err := p2p.New(p2p.Config{
 		Bootnodes: boot, ListenPort: *port, TargetPeers: *peers, ForkName: *fork,
 		ForkDigest: digest, ForkVersion: version,
