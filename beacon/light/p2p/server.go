@@ -108,6 +108,15 @@ func (s *Server) SendRequest(id request.ID, req request.Request) {
 // the response chunks, each with its 4 context bytes. read decodes one chunk.
 func (n *Node) request(proto string, body []byte, chunks int, read func(ssz []byte) error) error {
 	peers := n.host.Network().Peers()
+	// Right after start (blsync asks for the bootstrap first) there may be no peer yet.
+	for wait := 0; len(peers) == 0 && wait < 20; wait++ {
+		select {
+		case <-n.ctx.Done():
+			return n.ctx.Err()
+		case <-time.After(time.Second):
+		}
+		peers = n.host.Network().Peers()
+	}
 	if len(peers) == 0 {
 		return errors.New("no peers")
 	}
