@@ -129,10 +129,14 @@ type ConsensusAPI struct {
 	newPayloadLock sync.Mutex // Lock for the NewPayload method
 
 	// Unknown forkchoice heads are fetched from the network in the background, one at a
-	// time; a head requested meanwhile replaces the waiting one.
+	// time; a head requested meanwhile replaces the waiting one. A fetched head is only
+	// synced to if it is still the head of the latest forkchoice update (fcuHead).
 	headFetchLock sync.Mutex
 	headFetching  bool
 	headFetchNext *headFetch
+	fcuHead       common.Hash // head of the latest forkchoice update; protected by forkchoiceLock
+
+	syncTo func(head, finalized *types.Header) error // starts a beacon sync (replaced in tests)
 }
 
 // NewConsensusAPI creates a new consensus api for the given backend.
@@ -197,11 +201,26 @@ func (api *ConsensusAPI) fetchHead(head, finalized common.Hash) {
 				continue
 			}
 			api.remoteBlocks.put(header.Hash(), header)
-			if err := api.beaconSync(header, req.finalized); err != nil {
-				log.Warn("Failed to sync to the forkchoice head", "hash", req.head, "err", err)
-			}
+			api.syncFetchedHead(header, req.finalized)
 		}
 	}()
+}
+
+// syncFetchedHead syncs to a head fetched in the background, unless a later forkchoice update
+// has moved to another head meanwhile: syncing to the old one would restart the sync onto an
+// abandoned branch. The check and the sync happen under the forkchoice lock, like a sync that
+// the update itself starts.
+func (api *ConsensusAPI) syncFetchedHead(header *types.Header, finalizedHash common.Hash) {
+	api.forkchoiceLock.Lock()
+	defer api.forkchoiceLock.Unlock()
+
+	if api.fcuHead != header.Hash() {
+		log.Debug("Dropping fetched forkchoice head, superseded", "hash", header.Hash(), "head", api.fcuHead)
+		return
+	}
+	if err := api.beaconSync(header, finalizedHash); err != nil {
+		log.Warn("Failed to sync to the forkchoice head", "hash", header.Hash(), "err", err)
+	}
 }
 
 // beaconSync starts syncing to a forkchoice head whose header is known.
@@ -221,6 +240,9 @@ func (api *ConsensusAPI) beaconSync(header *types.Header, finalizedHash common.H
 		}
 	}
 	log.Info("Forkchoice requested sync to new head", context...)
+	if api.syncTo != nil {
+		return api.syncTo(header, finalized)
+	}
 	return api.eth.Downloader().BeaconSync(header, finalized)
 }
 
@@ -318,6 +340,7 @@ func (api *ConsensusAPI) forkchoiceUpdated(ctx context.Context, update engine.Fo
 	defer api.forkchoiceLock.Unlock()
 
 	log.Trace("Engine API request received", "method", "ForkchoiceUpdated", "head", update.HeadBlockHash, "finalized", update.FinalizedBlockHash, "safe", update.SafeBlockHash)
+	api.fcuHead = update.HeadBlockHash
 	if update.HeadBlockHash == (common.Hash{}) {
 		log.Warn("Forkchoice requested update to zero hash")
 		return engine.STATUS_INVALID, nil // TODO(karalabe): Why does someone send us this?
