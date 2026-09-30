@@ -73,12 +73,20 @@ type Config struct {
 	TargetPeers int
 	// ForkName names the current fork, for decoding the updates ("fulu", ...).
 	ForkName string
-	// ForkDigest is the current fork digest. Zero: learned from the ENRs of discovered
-	// nodes (the most common one), together with the rest of their `eth2` entry.
-	ForkDigest [4]byte
+	// ForkDigest is the current fork digest (see ForkDigest), ForkVersion the current fork
+	// version. Zero digest: learned from the ENRs of discovered nodes (the most common one;
+	// unreliable, since many nodes' ENRs are stale).
+	ForkDigest  [4]byte
+	ForkVersion [4]byte
 
 	OnOptimisticUpdate func(peer.ID, types.OptimisticUpdate)
 	OnFinalityUpdate   func(peer.ID, types.FinalityUpdate)
+
+	// VerifyHeader checks a signed header against the sync committee (blsync's committee
+	// chain). With it, gossiped updates that pass the checks are forwarded to other peers;
+	// without it, none are.
+	VerifyHeader func(types.SignedHeader) (bool, error)
+	GenesisTime  uint64
 }
 
 // Node is a light client's node on the consensus layer's libp2p network.
@@ -97,6 +105,13 @@ type Node struct {
 	status   []byte // status we send: the last one a peer returned, with our digest
 	dialing  map[peer.ID]bool
 	received atomic.Int64
+
+	fwdMu                 sync.Mutex
+	fwdOptimistic, fwdFin uint64 // attested / finalized slot of the last update forwarded
+	lastOptimistic        []byte // SSZ of the last optimistic update forwarded, served on request
+	lastFinality          []byte // same for the finality update
+	forwarded             atomic.Int64
+	served                atomic.Int64
 
 	eventCallback func(request.Event) // set by Server.Subscribe
 
@@ -141,6 +156,8 @@ func New(cfg Config) (*Node, error) {
 	h.SetStreamHandler(protoMetadata2, n.handleMetadata)
 	h.SetStreamHandler(protoMetadata3, n.handleMetadata)
 	h.SetStreamHandler(protoGoodbye, n.handleGoodbye)
+	h.SetStreamHandler(protoLCOptimistic, func(s network.Stream) { n.serveLatest(s, &n.lastOptimistic) })
+	h.SetStreamHandler(protoLCFinality, func(s network.Stream) { n.serveLatest(s, &n.lastFinality) })
 	return n, nil
 }
 
@@ -165,16 +182,40 @@ func (n *Node) Start() error {
 	n.local.Set(enr.UDP(conn.LocalAddr().(*net.UDPAddr).Port))
 	n.local.Set(enr.WithEntry("attnets", make([]byte, 8)))
 	n.local.Set(enr.WithEntry("syncnets", make([]byte, 1)))
+	if n.cfg.VerifyHeader != nil { // only a node that verifies updates keeps any to serve
+		n.local.Set(enr.WithEntry(enrLightClientKey, []byte{0x01}))
+	}
 	if n.cfg.ForkDigest != ([4]byte{}) {
-		n.setEth2(append(n.cfg.ForkDigest[:], make([]byte, 12)...))
+		// ENRForkID: fork digest, next fork version, next fork epoch (none known here)
+		eth2 := append(append(n.cfg.ForkDigest[:0:0], n.cfg.ForkDigest[:]...), n.cfg.ForkVersion[:]...)
+		n.setEth2(append(eth2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
 	}
 	n.disc, err = discover.ListenV5(conn, n.local, discover.Config{PrivateKey: n.key, Bootnodes: n.cfg.Bootnodes})
 	if err != nil {
 		return err
 	}
-	n.wg.Add(1)
+	log.Info("Consensus p2p light client listening", "addr", fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", port, n.host.ID()))
+	n.wg.Add(2)
 	go n.dialLoop()
+	go n.statsLoop()
 	return nil
+}
+
+// statsLoop logs peers, gossip and bandwidth every two minutes.
+func (n *Node) statsLoop() {
+	defer n.wg.Done()
+	t := time.NewTicker(2 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-t.C:
+			in, out := n.Bandwidth()
+			log.Info("Consensus p2p light client", "peers", n.Peers(), "gossipKB", n.GossipBytes()>>10,
+				"forwarded", n.Forwarded(), "served", n.served.Load(), "inKB", in>>10, "outKB", out>>10)
+		}
+	}
 }
 
 // Stop shuts the node down.
@@ -435,22 +476,28 @@ func (n *Node) joinGossip() error {
 	}
 	n.ps = ps
 	d := n.Digest()
-	for name, handle := range map[string]func(peer.ID, []byte) error{
+	for name, handle := range map[string]func(peer.ID, []byte) (forward func() bool, err error){
 		"light_client_optimistic_update": n.onOptimistic,
 		"light_client_finality_update":   n.onFinality,
 	} {
 		topic := fmt.Sprintf("/eth2/%x/%s/ssz_snappy", d[:], name)
-		// The updates are only decoded here, not verified against the sync committee
-		// (blsync does that): so they are not forwarded (ValidationIgnore).
+		// Updates are handed to blsync (which verifies them itself) and forwarded only if
+		// they pass the gossip checks here; anything else is ignored, not rejected, so a
+		// lagging committee chain of ours never penalizes honest peers.
 		if err := ps.RegisterTopicValidator(topic, func(_ context.Context, from peer.ID, m *pubsub.Message) pubsub.ValidationResult {
 			ssz, err := decodeGossip(m.Data)
 			if err != nil {
 				return pubsub.ValidationReject
 			}
 			n.received.Add(int64(len(m.Data)))
-			if err := handle(m.ReceivedFrom, ssz); err != nil {
+			forward, err := handle(m.ReceivedFrom, ssz)
+			if err != nil {
 				log.Debug("Bad light client update", "topic", name, "peer", m.ReceivedFrom, "err", err)
 				return pubsub.ValidationReject
+			}
+			if forward() {
+				n.forwarded.Add(1)
+				return pubsub.ValidationAccept
 			}
 			return pubsub.ValidationIgnore
 		}); err != nil {
@@ -478,27 +525,82 @@ func (n *Node) joinGossip() error {
 	return nil
 }
 
-func (n *Node) onOptimistic(from peer.ID, ssz []byte) error {
+func (n *Node) onOptimistic(from peer.ID, ssz []byte) (func() bool, error) {
 	u, err := DecodeOptimisticUpdate(n.cfg.ForkName, ssz)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if n.cfg.OnOptimisticUpdate != nil {
-		n.cfg.OnOptimisticUpdate(from, u)
+	if cb := n.cfg.OnOptimisticUpdate; cb != nil {
+		cb(from, u)
 	}
-	return nil
+	return func() bool {
+		return n.forwardable(u.SignedHeader(), u.Attested.Slot, &n.fwdOptimistic, &n.lastOptimistic, ssz)
+	}, nil
 }
 
-func (n *Node) onFinality(from peer.ID, ssz []byte) error {
+func (n *Node) onFinality(from peer.ID, ssz []byte) (func() bool, error) {
 	u, err := DecodeFinalityUpdate(n.cfg.ForkName, ssz)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if n.cfg.OnFinalityUpdate != nil {
-		n.cfg.OnFinalityUpdate(from, u)
+	if cb := n.cfg.OnFinalityUpdate; cb != nil {
+		cb(from, u)
 	}
-	return nil
+	return func() bool {
+		return n.forwardable(u.SignedHeader(), u.Finalized.Slot, &n.fwdFin, &n.lastFinality, ssz)
+	}, nil
 }
+
+// forwardable applies the gossip rules for light client updates: received no earlier than
+// a third of the signature slot (allowing for clock disparity), newer than the last one
+// forwarded on the topic (key: attested slot, or finalized slot), and signed by the sync
+// committee. It records the update as forwarded if so.
+func (n *Node) forwardable(head types.SignedHeader, key uint64, last *uint64, keep *[]byte, ssz []byte) bool {
+	if n.cfg.VerifyHeader == nil {
+		return false
+	}
+	due := time.Unix(int64(n.cfg.GenesisTime+head.SignatureSlot*12), 0).Add(4*time.Second - 500*time.Millisecond)
+	if time.Now().Before(due) {
+		return false
+	}
+	n.fwdMu.Lock()
+	defer n.fwdMu.Unlock()
+	if key <= *last {
+		return false
+	}
+	if ok, err := n.cfg.VerifyHeader(head); err != nil || !ok {
+		return false
+	}
+	*last = key
+	*keep = ssz
+	return true
+}
+
+// ENR key advertising which light client data this node serves over req/resp: a bitfield,
+// bit 0 the latest optimistic and finality updates (bit 1 updates by range, bit 2
+// bootstraps: not served yet). Not a consensus-spec key: other clients ignore it.
+const enrLightClientKey = "lc"
+
+// serveLatest answers a light client optimistic or finality update request with the last
+// verified update of that kind, or "resource unavailable" (3) without one.
+func (n *Node) serveLatest(s network.Stream, keep *[]byte) {
+	defer s.Close()
+	s.SetDeadline(time.Now().Add(respTimeout))
+	n.fwdMu.Lock()
+	ssz := *keep
+	n.fwdMu.Unlock()
+	d := n.Digest()
+	if ssz == nil {
+		s.Write([]byte{3})
+		writeSSZ(s, []byte("no update yet"))
+		return
+	}
+	n.served.Add(1)
+	writeResponse(s, d[:], ssz)
+}
+
+// Forwarded returns the number of light client updates forwarded to other peers.
+func (n *Node) Forwarded() int64 { return n.forwarded.Load() }
 
 // GossipBytes returns the compressed bytes of light client gossip received.
 func (n *Node) GossipBytes() int64 { return n.received.Load() }

@@ -40,6 +40,7 @@ const (
 	protoLCBootstrap  = protoPrefix + "light_client_bootstrap/1/ssz_snappy"
 	protoLCUpdates    = protoPrefix + "light_client_updates_by_range/1/ssz_snappy"
 	protoLCFinality   = protoPrefix + "light_client_finality_update/1/ssz_snappy"
+	protoLCOptimistic = protoPrefix + "light_client_optimistic_update/1/ssz_snappy"
 	maxUpdatesPerCall = 128 // MAX_REQUEST_LIGHT_CLIENT_UPDATES
 	peerTries         = 3
 )
@@ -209,4 +210,40 @@ func (n *Node) FinalityUpdate() (types.FinalityUpdate, error) {
 		return err
 	})
 	return u, err
+}
+
+// AskLatest connects to the node at a multiaddr (with /p2p/<id>) and requests its latest
+// light client optimistic and finality updates (for testing a serving node).
+func (n *Node) AskLatest(addr string) (types.OptimisticUpdate, types.FinalityUpdate, error) {
+	var (
+		opt types.OptimisticUpdate
+		fin types.FinalityUpdate
+	)
+	info, err := peer.AddrInfoFromString(addr)
+	if err != nil {
+		return opt, fin, err
+	}
+	ctx, cancel := context.WithTimeout(n.ctx, respTimeout)
+	defer cancel()
+	if err := n.host.Connect(ctx, *info); err != nil {
+		return opt, fin, err
+	}
+	if err := n.exchangeStatus(info.ID); err != nil {
+		return opt, fin, fmt.Errorf("status: %v", err)
+	}
+	err = n.requestPeer(info.ID, protoLCOptimistic, nil, 1, func(ssz []byte) (err error) {
+		opt, err = DecodeOptimisticUpdate(n.cfg.ForkName, ssz)
+		return err
+	})
+	if err != nil {
+		return opt, fin, fmt.Errorf("optimistic update: %v", err)
+	}
+	err = n.requestPeer(info.ID, protoLCFinality, nil, 1, func(ssz []byte) (err error) {
+		fin, err = DecodeFinalityUpdate(n.cfg.ForkName, ssz)
+		return err
+	})
+	if err != nil {
+		return opt, fin, fmt.Errorf("finality update: %v", err)
+	}
+	return opt, fin, nil
 }

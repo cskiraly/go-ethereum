@@ -43,6 +43,7 @@ type Client struct {
 	config       *params.ClientConfig
 	scheduler    *request.Scheduler
 	blockSync    *beaconBlockSync
+	committees   *light.CommitteeChain
 	engineRPC    *rpc.Client
 
 	chainHeadSub event.Subscription
@@ -84,6 +85,7 @@ func NewClient(config params.ClientConfig) *Client {
 		customHeader: config.CustomHeader,
 		config:       &config,
 		blockSync:    beaconBlockSync,
+		committees:   committeeChain,
 	}
 }
 
@@ -123,10 +125,18 @@ func (c *Client) startP2P() error {
 		return errors.New("--beacon.p2p: no consensus bootnodes for this network (mainnet only so far)")
 	}
 	epoch := uint64(time.Now().Unix()-int64(c.config.GenesisTime)) / 12 / params.EpochLength
+	digest, version := p2p.ForkDigest(&c.config.ChainConfig, p2p.MainnetBlobSchedule, p2p.MainnetElectraBlobs, epoch)
 	node, err := p2p.New(p2p.Config{
-		Bootnodes:  boot,
-		ListenPort: c.config.P2PPort,
-		ForkName:   strings.ToLower(c.config.ForkAtEpoch(epoch).Name),
+		Bootnodes:   boot,
+		ListenPort:  c.config.P2PPort,
+		ForkName:    strings.ToLower(c.config.ForkAtEpoch(epoch).Name),
+		ForkDigest:  digest,
+		ForkVersion: version,
+		VerifyHeader: func(h types.SignedHeader) (bool, error) {
+			ok, _, err := c.committees.VerifySignedHeader(h)
+			return ok, err
+		},
+		GenesisTime: c.config.GenesisTime,
 	})
 	if err != nil {
 		return err

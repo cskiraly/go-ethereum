@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/light/p2p"
+	"github.com/ethereum/go-ethereum/beacon/params"
 	"github.com/ethereum/go-ethereum/beacon/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p/enode"
@@ -39,6 +40,7 @@ func main() {
 		fork     = flag.String("fork", "fulu", "current fork name, for decoding updates")
 		duration = flag.Duration("duration", 10*time.Minute, "how long to run")
 		verb     = flag.Int("verbosity", 3, "log level")
+		ask      = flag.String("peer", "", "multiaddr (with /p2p/<id>) of a node to ask for its latest light client updates, then exit")
 	)
 	flag.Parse()
 	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.FromLegacyLevel(*verb), true)))
@@ -51,8 +53,12 @@ func main() {
 	}
 	start := time.Now()
 	var opt, fin int
+	cfg := params.MainnetLightConfig
+	epoch := uint64(time.Now().Unix()-int64(cfg.GenesisTime)) / 12 / params.EpochLength
+	digest, version := p2p.ForkDigest(cfg, p2p.MainnetBlobSchedule, p2p.MainnetElectraBlobs, epoch)
 	node, err := p2p.New(p2p.Config{
 		Bootnodes: boot, ListenPort: *port, TargetPeers: *peers, ForkName: *fork,
+		ForkDigest: digest, ForkVersion: version,
 		OnOptimisticUpdate: func(from peer.ID, u types.OptimisticUpdate) {
 			opt++
 			log.Info("Optimistic update", "attested", u.Attested.Slot, "signature", u.SignatureSlot,
@@ -69,6 +75,16 @@ func main() {
 	}
 	if err := node.Start(); err != nil {
 		log.Crit("Failed to start node", "err", err)
+	}
+	if *ask != "" {
+		opt, fin, err := node.AskLatest(*ask)
+		if err != nil {
+			log.Crit("Asking the peer failed", "err", err)
+		}
+		log.Info("Served optimistic update", "attested", opt.Attested.Slot, "signature", opt.SignatureSlot, "exec", opt.Attested.BlockHash(), "signers", opt.Signature.SignerCount())
+		log.Info("Served finality update", "attested", fin.Attested.Slot, "finalized", fin.Finalized.Slot, "exec", fin.Finalized.BlockHash())
+		node.Stop()
+		return
 	}
 	stats := func() {
 		in, out := node.Bandwidth()
