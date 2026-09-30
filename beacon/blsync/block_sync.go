@@ -38,6 +38,11 @@ type beaconBlockSync struct {
 	serverHeads  map[request.Server]common.Hash
 	headTracker  headTracker
 	p2pBlocks    bool
+	// prefetch reports whether the block at a slot may be fetched before it is validated
+	// (nil: always). From Gloas on, the execution payload envelope is published later in the
+	// slot than the block: fetching it at the head announcement fails, and each failure also
+	// delays the server.
+	prefetch func(slot uint64) bool
 
 	lastHeadInfo  types.HeadInfo
 	chainHeadFeed event.FeedOf[types.ChainHeadEvent]
@@ -94,8 +99,9 @@ func (s *beaconBlockSync) Process(requester request.Requester, events []request.
 		s.tryRequestBlock(requester, vh.Attested.Hash(), false)
 	}
 	// request prefetch head if the given server has announced it
-	if prefetchHead := s.headTracker.PrefetchHead().BlockRoot; prefetchHead != (common.Hash{}) {
-		s.tryRequestBlock(requester, prefetchHead, true)
+	if prefetchHead := s.headTracker.PrefetchHead(); prefetchHead.BlockRoot != (common.Hash{}) &&
+		(s.prefetch == nil || s.prefetch(prefetchHead.Slot)) {
+		s.tryRequestBlock(requester, prefetchHead.BlockRoot, true)
 	}
 }
 
