@@ -379,6 +379,27 @@ var (
 		Usage:    "Fetch execution blocks from execution-layer peers instead of the beacon API (only light client updates are downloaded)",
 		Category: flags.BeaconCategory,
 	}
+	BeaconP2PFlag = &cli.BoolFlag{
+		Name:     "beacon.p2p",
+		Usage:    "Get light client data from the consensus layer's libp2p network (with or instead of --beacon.api)",
+		Category: flags.BeaconCategory,
+	}
+	BeaconP2PPortFlag = &cli.IntFlag{
+		Name:     "beacon.p2p.port",
+		Usage:    "TCP and UDP port of the consensus layer light client (--beacon.p2p)",
+		Value:    9000,
+		Category: flags.BeaconCategory,
+	}
+	BeaconP2PBootnodesFlag = &cli.StringSliceFlag{
+		Name:     "beacon.p2p.bootnodes",
+		Usage:    "Consensus layer discv5 bootnodes (ENRs) for --beacon.p2p (default: built in for mainnet)",
+		Category: flags.BeaconCategory,
+	}
+	BeaconP2PDigestFlag = &cli.StringFlag{
+		Name:     "beacon.p2p.forkdigest",
+		Usage:    "Fork digest for --beacon.p2p (hex; default: computed, mainnet's blob schedule)",
+		Category: flags.BeaconCategory,
+	}
 	BeaconConfigFlag = &cli.StringFlag{
 		Name:     "beacon.config",
 		Usage:    "Beacon chain config YAML file",
@@ -2162,6 +2183,7 @@ func MakeBeaconLightConfig(ctx *cli.Context) bparams.ClientConfig {
 			Fatalf("Could not load beacon chain config '%s': %v", configPath, err)
 		}
 		log.Info("Using custom beacon chain config", "file", configPath)
+		config.ChainConfigFile = configPath
 	} else {
 		if ctx.IsSet(BeaconGenesisRootFlag.Name) {
 			Fatalf("Genesis root is specified but custom beacon chain config is missing")
@@ -2194,8 +2216,8 @@ func MakeBeaconLightConfig(ctx *cli.Context) bparams.ClientConfig {
 		Fatalf("Beacon checkpoint not specified")
 	}
 	config.Apis = ctx.StringSlice(BeaconApiFlag.Name)
-	if config.Apis == nil {
-		Fatalf("Beacon node light client API URL not specified")
+	if config.Apis == nil && !ctx.Bool(BeaconP2PFlag.Name) {
+		Fatalf("Beacon node light client API URL not specified (--beacon.api, or --beacon.p2p)")
 	}
 	config.CustomHeader = make(map[string]string)
 	for _, s := range ctx.StringSlice(BeaconApiHeaderFlag.Name) {
@@ -2208,6 +2230,16 @@ func MakeBeaconLightConfig(ctx *cli.Context) bparams.ClientConfig {
 	config.Threshold = ctx.Int(BeaconThresholdFlag.Name)
 	config.NoFilter = ctx.Bool(BeaconNoFilterFlag.Name)
 	config.P2PBlocks = ctx.Bool(BeaconP2PBlocksFlag.Name)
+	config.P2P = ctx.Bool(BeaconP2PFlag.Name)
+	config.P2PPort = ctx.Int(BeaconP2PPortFlag.Name)
+	config.P2PBootnodes = ctx.StringSlice(BeaconP2PBootnodesFlag.Name)
+	if s := ctx.String(BeaconP2PDigestFlag.Name); s != "" {
+		d, err := hexutil.Decode(s)
+		if err != nil || len(d) != 4 {
+			Fatalf("Invalid --%s: %s", BeaconP2PDigestFlag.Name, s)
+		}
+		config.P2PDigest = d
+	}
 	return config
 }
 

@@ -17,10 +17,14 @@
 package blsync
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/beacon/light"
 	"github.com/ethereum/go-ethereum/beacon/light/api"
+	"github.com/ethereum/go-ethereum/beacon/light/p2p"
 	"github.com/ethereum/go-ethereum/beacon/light/request"
 	"github.com/ethereum/go-ethereum/beacon/light/sync"
 	"github.com/ethereum/go-ethereum/beacon/params"
@@ -30,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -39,10 +44,12 @@ type Client struct {
 	config       *params.ClientConfig
 	scheduler    *request.Scheduler
 	blockSync    *beaconBlockSync
+	committees   *light.CommitteeChain
 	engineRPC    *rpc.Client
 
 	chainHeadSub event.Subscription
 	engineClient *engineClient
+	p2pNode      *p2p.Node
 }
 
 func NewClient(config params.ClientConfig) *Client {
@@ -83,6 +90,7 @@ func NewClient(config params.ClientConfig) *Client {
 		customHeader: config.CustomHeader,
 		config:       &config,
 		blockSync:    beaconBlockSync,
+		committees:   committeeChain,
 	}
 }
 
@@ -104,10 +112,78 @@ func (c *Client) Start() error {
 		beaconApi := api.NewBeaconLightApi(url, c.customHeader)
 		c.scheduler.RegisterServer(request.NewServer(api.NewApiServer(beaconApi), &mclock.System{}))
 	}
+	if c.config.P2P {
+		if err := c.startP2P(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// startP2P joins the consensus layer's libp2p network and registers it as a server.
+func (c *Client) startP2P() error {
+	var boot []*enode.Node
+	network, known := p2p.Networks[c.config.GenesisValidatorsRoot]
+	enrs := c.config.P2PBootnodes
+	if len(enrs) == 0 {
+		enrs = network.Bootnodes
+	}
+	{
+		for _, s := range enrs {
+			if n, err := enode.Parse(enode.ValidSchemes, s); err == nil {
+				boot = append(boot, n)
+			}
+		}
+	}
+	if len(boot) == 0 {
+		return errors.New("--beacon.p2p: no consensus bootnodes for this network (built in for mainnet and sepolia; --beacon.p2p.bootnodes)")
+	}
+	if !known && c.config.ChainConfigFile != "" {
+		// a custom network: its blob schedule from its config file
+		file, err := os.ReadFile(c.config.ChainConfigFile)
+		if err != nil {
+			return err
+		}
+		net, err := p2p.ParseNetwork(file)
+		if err != nil {
+			return fmt.Errorf("--beacon.p2p: blob schedule of %s: %v", c.config.ChainConfigFile, err)
+		}
+		network.BlobSchedule, network.ElectraBlobs, known = net.BlobSchedule, net.ElectraBlobs, true
+	}
+	var override [4]byte
+	if len(c.config.P2PDigest) == 4 {
+		copy(override[:], c.config.P2PDigest)
+	} else if !known {
+		return errors.New("--beacon.p2p: unknown network, its blob schedule is needed for the fork digest (--beacon.config, or --beacon.p2p.forkdigest)")
+	}
+	node, err := p2p.New(p2p.Config{
+		Bootnodes:      boot,
+		ListenPort:     c.config.P2PPort,
+		Chain:          &c.config.ChainConfig,
+		Network:        network,
+		DigestOverride: override,
+		VerifyHeader: func(h types.SignedHeader) (bool, error) {
+			ok, _, err := c.committees.VerifySignedHeader(h)
+			return ok, err
+		},
+		GenesisTime: c.config.GenesisTime,
+	})
+	if err != nil {
+		return err
+	}
+	c.scheduler.RegisterServer(request.NewServer(p2p.NewServer(node), &mclock.System{}))
+	if err := node.Start(); err != nil {
+		return err
+	}
+	c.p2pNode = node
+	log.Info("Following the consensus layer's libp2p network", "port", c.config.P2PPort)
 	return nil
 }
 
 func (c *Client) Stop() error {
+	if c.p2pNode != nil {
+		c.p2pNode.Stop()
+	}
 	c.engineClient.stop()
 	c.chainHeadSub.Unsubscribe()
 	c.scheduler.Stop()
