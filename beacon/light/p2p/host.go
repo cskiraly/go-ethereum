@@ -126,6 +126,7 @@ type Node struct {
 	subs     map[[4]byte]*digestSubs
 	status   []byte // the last status a peer returned (ours until updates are verified)
 	dialing  map[peer.ID]bool
+	lastDial time.Time
 	backoff  map[peer.ID]time.Time // peers not to dial before a time (they turned us away)
 	received atomic.Int64
 
@@ -456,21 +457,25 @@ func (n *Node) dialLoop() {
 	}
 }
 
-// canDial reports whether to dial another node: below the peer target, with at most the
-// target's number of dials in progress (most fail, or end in a "too many peers" goodbye).
-// At the target, a peer that serves no light client data makes room.
-func (n *Node) canDial() bool {
-	if n.Peers() < n.cfg.TargetPeers {
-		return n.dials() < n.cfg.TargetPeers
-	}
-	return n.dropNonServing()
-}
+// dialInterval is the pace of dialing above half the peer target.
+const dialInterval = 10 * time.Second
 
-// dials returns the number of dials in progress.
-func (n *Node) dials() int {
+// canDial reports whether to dial another node. Below half the peer target, up to the
+// target's number of dials run at a time; above it, one every dialInterval: most nodes
+// (full ones at their peer limit) end the connection with a "too many peers" goodbye, and
+// each try costs the handshakes' traffic, which then makes up most of the node's. At the
+// target, a peer that serves no light client data makes room.
+func (n *Node) canDial() bool {
+	peers := n.Peers()
+	if peers >= n.cfg.TargetPeers {
+		return n.dropNonServing()
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return len(n.dialing)
+	if peers >= n.cfg.TargetPeers/2 {
+		return len(n.dialing) == 0 && time.Since(n.lastDial) >= dialInterval
+	}
+	return len(n.dialing) < n.cfg.TargetPeers
 }
 
 // servingPeers counts the connected peers that serve light client data: those whose
@@ -545,6 +550,7 @@ func (n *Node) dial(nd *enode.Node) {
 		return
 	}
 	n.dialing[id] = true
+	n.lastDial = time.Now()
 	n.mu.Unlock()
 	addrs := make([]ma.Multiaddr, 0, 2)
 	var quicPort uint16
