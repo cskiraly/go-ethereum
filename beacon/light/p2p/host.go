@@ -714,8 +714,9 @@ var (
 	topicScoreParams = &pubsub.TopicScoreParams{
 		SkipAtomicValidation:           true,
 		TopicWeight:                    1,
-		InvalidMessageDeliveriesWeight: -100,  // times the count squared: 13 reach the graylist
-		InvalidMessageDeliveriesDecay:  0.997, // per slot: the count halves in about 45 minutes
+		TimeInMeshQuantum:              12 * time.Second, // unused (no weight), but gossipsub divides by it
+		InvalidMessageDeliveriesWeight: -100,             // times the count squared: 13 reach the graylist
+		InvalidMessageDeliveriesDecay:  0.997,            // per slot: the count halves in about 45 minutes
 	}
 )
 

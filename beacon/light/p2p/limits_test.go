@@ -206,4 +206,15 @@ func TestTwoNodes(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+	// Once each sees the other on the topic, gossipsub meshes them at its next heartbeat
+	// and scores them from then on: let a few heartbeats run.
+	topic := fmt.Sprintf("/eth2/%x/%s/ssz_snappy", a.Digest(), lightClientTopics[0])
+	for len(a.ps.ListPeers(topic)) == 0 || len(b.ps.ListPeers(topic)) == 0 {
+		select {
+		case <-ctx.Done():
+			t.Fatal("peers not on the light client topic")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	time.Sleep(3 * time.Second)
 }
