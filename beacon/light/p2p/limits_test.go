@@ -19,12 +19,17 @@ package p2p
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/params"
+	"github.com/ethereum/go-ethereum/beacon/types"
 	"github.com/golang/snappy"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 func TestReadSSZLimits(t *testing.T) {
@@ -119,4 +124,86 @@ func TestStartStop(t *testing.T) {
 		t.Error("no gossip subscriptions")
 	}
 	n.Stop()
+}
+
+// TestOurStatus checks the status built from the verified updates, and the peer's status
+// mirrored before those.
+func TestOurStatus(t *testing.T) {
+	n := new(Node)
+	if st := n.ourStatus(true); len(st) != 92 || !bytes.Equal(st, make([]byte, 92)) {
+		t.Fatalf("status before any: %x", st)
+	}
+	peerStatus := bytes.Repeat([]byte{9}, 84)
+	n.status = peerStatus
+	if st := n.ourStatus(false); !bytes.Equal(st[4:], peerStatus[4:]) {
+		t.Fatalf("status before verified updates: %x, want the peer's", st)
+	}
+	n.finality.header = types.Header{Slot: 32*100 + 5, ProposerIndex: 1} // epoch 100's first slots empty
+	n.optimistic.header = types.Header{Slot: 32*102 + 7, ProposerIndex: 2}
+	st := n.ourStatus(true)
+	fin, head := n.finality.header.Hash(), n.optimistic.header.Hash()
+	if !bytes.Equal(st[4:36], fin[:]) || binary.LittleEndian.Uint64(st[36:44]) != 101 ||
+		!bytes.Equal(st[44:76], head[:]) || binary.LittleEndian.Uint64(st[76:84]) != 32*102+7 ||
+		binary.LittleEndian.Uint64(st[84:92]) != 32*102+7 {
+		t.Fatalf("status %x", st)
+	}
+	n.finality.header.Slot = 32 * 101 // the epoch's first block
+	if st := n.ourStatus(false); binary.LittleEndian.Uint64(st[36:44]) != 101 {
+		t.Fatalf("finalized epoch %d, want 101", binary.LittleEndian.Uint64(st[36:44]))
+	}
+}
+
+func TestLoadOrCreateKey(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "geth", "beacon-p2p-nodekey")
+	k1, err := LoadOrCreateKey(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2, err := LoadOrCreateKey(file)
+	if err != nil || !k1.Equal(k2) {
+		t.Fatalf("key not kept: %v", err)
+	}
+}
+
+// TestTwoNodes connects two nodes on localhost: the status exchange, the metadata (with
+// the custody group count peers require) and the serving peer count.
+func TestTwoNodes(t *testing.T) {
+	cfg := params.MainnetLightConfig
+	start := func() *Node {
+		n, err := New(Config{Chain: cfg, Network: Networks[cfg.GenesisValidatorsRoot], GenesisTime: cfg.GenesisTime,
+			VerifyHeader: func(types.SignedHeader) (bool, error) { return true, nil }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := n.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(n.Stop)
+		return n
+	}
+	a, b := start(), start()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := b.host.Connect(ctx, peer.AddrInfo{ID: a.host.ID(), Addrs: a.host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.exchangeStatus(a.host.ID()); err != nil {
+		t.Fatal("status:", err)
+	}
+	s, err := b.host.NewStream(ctx, a.host.ID(), protoMetadata3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.CloseWrite()
+	_, md, err := readResponse(bufio.NewReader(s), 0, 25)
+	if err != nil || len(md) != 25 || binary.LittleEndian.Uint64(md[17:]) != custodyRequirement {
+		t.Fatalf("metadata %x, err %v", md, err)
+	}
+	for b.servingPeers() != 1 { // identify runs after the connection
+		select {
+		case <-ctx.Done():
+			t.Fatal("peer not seen as serving light client data")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }

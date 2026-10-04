@@ -78,9 +78,10 @@ const (
 
 // Config configures the light client's p2p node.
 type Config struct {
+	PrivateKey  *ecdsa.PrivateKey // the node's identity (discv5 and libp2p); random if nil
 	Bootnodes   []*enode.Node
 	ListenPort  int // TCP (libp2p) and UDP (discv5) port, and +1 UDP (libp2p over QUIC); 0: random
-	TargetPeers int
+	TargetPeers int // peers to keep (default 10)
 	// Chain is the beacon chain config (forks), Network the blob schedule: together they
 	// give the fork digests over time, and the node switches digest (topics, status, ENR)
 	// at each change without a restart.
@@ -120,8 +121,9 @@ type Node struct {
 	current  forkDigest // the digest in force (status, ENR, dialing)
 	accepted [][4]byte  // digests whose topics we are subscribed to (current ± transition)
 	subs     map[[4]byte]*digestSubs
-	status   []byte // status we send: the last one a peer returned, with our digest
+	status   []byte // the last status a peer returned (ours until updates are verified)
 	dialing  map[peer.ID]bool
+	backoff  map[peer.ID]time.Time // peers not to dial before a time (they turned us away)
 	received atomic.Int64
 
 	fwdMu      sync.Mutex
@@ -140,7 +142,7 @@ type Node struct {
 // New creates the node; Start begins discovery and dialing.
 func New(cfg Config) (*Node, error) {
 	if cfg.TargetPeers == 0 {
-		cfg.TargetPeers = 20
+		cfg.TargetPeers = 10
 	}
 	if cfg.Chain == nil {
 		return nil, errors.New("no beacon chain config")
@@ -154,9 +156,12 @@ func New(cfg Config) (*Node, error) {
 	for _, fd := range sched {
 		forkByDigest[fd.digest] = fd.fork
 	}
-	key, err := gcrypto.GenerateKey()
-	if err != nil {
-		return nil, err
+	key := cfg.PrivateKey
+	if key == nil {
+		var err error
+		if key, err = gcrypto.GenerateKey(); err != nil {
+			return nil, err
+		}
 	}
 	lkey, err := crypto.UnmarshalSecp256k1PrivateKey(gcrypto.FromECDSA(key))
 	if err != nil {
@@ -206,7 +211,8 @@ func New(cfg Config) (*Node, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{cfg: cfg, key: key, host: h, bw: bw, sched: sched, forkByDigest: forkByDigest,
-		subs: make(map[[4]byte]*digestSubs), dialing: make(map[peer.ID]bool), ctx: ctx, cancel: cancel}
+		subs: make(map[[4]byte]*digestSubs), dialing: make(map[peer.ID]bool), backoff: make(map[peer.ID]time.Time),
+		ctx: ctx, cancel: cancel}
 	n.callbacks.Store(&callbacks{optimistic: cfg.OnOptimisticUpdate, finality: cfg.OnFinalityUpdate})
 	handlers := map[string]network.StreamHandler{
 		protoStatus1:      n.handleStatus,
@@ -275,6 +281,7 @@ func (n *Node) Start() error {
 	n.local.Set(enr.UDP(conn.LocalAddr().(*net.UDPAddr).Port))
 	n.local.Set(enr.WithEntry("attnets", make([]byte, 8)))
 	n.local.Set(enr.WithEntry("syncnets", make([]byte, 1)))
+	n.local.Set(enr.WithEntry("cgc", uint64(custodyRequirement)))
 	if n.cfg.VerifyHeader != nil { // only a node that verifies updates keeps any to serve
 		n.local.Set(enr.WithEntry(enrLightClientKey, []byte{0x01}))
 	}
@@ -347,7 +354,7 @@ func (n *Node) statsLoop() {
 			return
 		case <-t.C:
 			in, out := n.Bandwidth()
-			log.Info("Consensus p2p light client", "peers", n.Peers(), "clients", n.clientCounts(), "gossipKB", n.GossipBytes()>>10,
+			log.Info("Consensus p2p light client", "peers", n.Peers(), "serving", n.servingPeers(), "clients", n.clientCounts(), "gossipKB", n.GossipBytes()>>10,
 				"forwarded", n.Forwarded(), "served", n.served.Load(), "inKB", in>>10, "outKB", out>>10)
 		}
 	}
@@ -435,7 +442,7 @@ func (n *Node) dialLoop() {
 		if !usable(nd) {
 			continue
 		}
-		for n.Peers() >= n.cfg.TargetPeers {
+		for n.Peers() >= n.cfg.TargetPeers && !n.dropNonServing() {
 			select {
 			case <-n.ctx.Done():
 				return
@@ -444,6 +451,53 @@ func (n *Node) dialLoop() {
 		}
 		n.dial(nd)
 	}
+}
+
+// servingPeers counts the connected peers that serve light client data (by their
+// identify protocol list).
+func (n *Node) servingPeers() (count int) {
+	for _, id := range n.host.Network().Peers() {
+		if protos, err := n.host.Peerstore().GetProtocols(id); err == nil && slices.Contains(protos, protocol.ID(protoLCFinality)) {
+			count++
+		}
+	}
+	return count
+}
+
+// dropNonServing disconnects a peer that serves no light client data (connected for a
+// minute, and its identify protocol list lacks the light client protocols), to make room
+// for one that does; it isn't dialed again for an hour. Such peers (many nodes don't run
+// a light client server) don't carry the light client topics either.
+func (n *Node) dropNonServing() bool {
+	for _, id := range n.host.Network().Peers() {
+		conns := n.host.Network().ConnsToPeer(id)
+		if len(conns) == 0 || time.Since(conns[0].Stat().Opened) < time.Minute {
+			continue
+		}
+		protos, err := n.host.Peerstore().GetProtocols(id)
+		if err != nil || len(protos) == 0 || slices.Contains(protos, protocol.ID(protoLCFinality)) {
+			continue
+		}
+		n.avoid(id, time.Hour)
+		n.host.Network().ClosePeer(id)
+		return true
+	}
+	return false
+}
+
+// avoid keeps a peer from being dialed for a while.
+func (n *Node) avoid(id peer.ID, d time.Duration) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if len(n.backoff) >= 10000 {
+		now := time.Now()
+		for id, until := range n.backoff {
+			if now.After(until) {
+				delete(n.backoff, id)
+			}
+		}
+	}
+	n.backoff[id] = time.Now().Add(d)
 }
 
 // dial connects to a discovered node in the background and exchanges status.
@@ -461,7 +515,7 @@ func (n *Node) dial(nd *enode.Node) {
 		return
 	}
 	n.mu.Lock()
-	if n.dialing[id] {
+	if n.dialing[id] || time.Now().Before(n.backoff[id]) {
 		n.mu.Unlock()
 		return
 	}
@@ -490,6 +544,7 @@ func (n *Node) dial(nd *enode.Node) {
 		}
 		if err := n.exchangeStatus(id); err != nil {
 			log.Debug("Status exchange failed", "peer", id, "err", err)
+			n.avoid(id, 10*time.Minute)
 			n.host.Network().ClosePeer(id)
 			return
 		}
@@ -497,13 +552,27 @@ func (n *Node) dial(nd *enode.Node) {
 	}()
 }
 
-// ourStatus is the status we send: the fields of the last status a peer sent us (so
-// finality and head match the network), or genesis values before the first one.
+// ourStatus is the status we send: the finalized checkpoint and the head of the last
+// verified light client updates; before those, the fields of the last status a peer sent
+// us, or genesis values before the first one.
 func (n *Node) ourStatus(v2 bool) []byte {
+	n.fwdMu.Lock()
+	fin, head := n.finality.header, n.optimistic.header
+	n.fwdMu.Unlock()
+
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	st := make([]byte, 84, 92)
-	if n.status != nil {
+	if fin != (types.Header{}) && head != (types.Header{}) {
+		// The checkpoint's epoch is the first starting at or after the finalized block
+		// (the checkpoint root is the last block at the epoch's start).
+		root := fin.Hash()
+		copy(st[4:36], root[:])
+		binary.LittleEndian.PutUint64(st[36:44], (fin.Slot+params.EpochLength-1)/params.EpochLength)
+		root = head.Hash()
+		copy(st[44:76], root[:])
+		binary.LittleEndian.PutUint64(st[76:84], head.Slot)
+	} else if n.status != nil {
 		copy(st, n.status[:84])
 	}
 	copy(st[0:4], n.current.digest[:])
@@ -571,11 +640,11 @@ func (n *Node) handlePing(s network.Stream) {
 func (n *Node) handleMetadata(s network.Stream) {
 	defer s.Close()
 	s.SetDeadline(time.Now().Add(respTimeout))
-	// seq_number, attnets (8 bytes), syncnets (1), and from v3 custody_group_count (0)
+	// seq_number, attnets (8 bytes), syncnets (1), and from v3 custody_group_count
 	md := make([]byte, 17, 25)
 	binary.LittleEndian.PutUint64(md[0:8], 1)
 	if s.Protocol() == protoMetadata3 {
-		md = md[:25]
+		md = binary.LittleEndian.AppendUint64(md, custodyRequirement)
 	}
 	writeResponse(s, nil, md)
 }
@@ -584,9 +653,24 @@ func (n *Node) handleGoodbye(s network.Stream) {
 	defer s.Close()
 	s.SetDeadline(time.Now().Add(respTimeout))
 	if b, err := readSSZ(bufio.NewReader(s), maxPingSize); err == nil && len(b) == 8 {
-		log.Debug("Peer said goodbye", "peer", s.Conn().RemotePeer(), "reason", binary.LittleEndian.Uint64(b))
+		reason := binary.LittleEndian.Uint64(b)
+		log.Debug("Peer said goodbye", "peer", s.Conn().RemotePeer(), "reason", reason)
+		backoff := time.Hour // irrelevant network, fault, bad score, banned...
+		switch reason {
+		case 1: // client shut down
+			backoff = time.Minute
+		case 129: // too many peers
+			backoff = 10 * time.Minute
+		}
+		n.avoid(s.Conn().RemotePeer(), backoff)
 	}
 }
+
+// custodyRequirement is CUSTODY_REQUIREMENT, the fewest custody groups a node may
+// advertise from Fulu on: peers (Lighthouse) disconnect and ban a node advertising fewer.
+// This node stores no data columns; ProbeLab's Hermes, another node without data,
+// advertises the same.
+const custodyRequirement = 4
 
 // digestSubs are the gossip subscriptions of one digest.
 type digestSubs struct {
@@ -787,7 +871,7 @@ func (n *Node) onOptimistic(from peer.ID, fork string, digest [4]byte, ssz []byt
 	if err != nil {
 		return pubsub.ValidationReject, err
 	}
-	res, deliver, err := n.check(&n.optimistic, u.SignedHeader(), u.Attested.Slot, false, servedUpdate{digest, ssz})
+	res, deliver, err := n.check(&n.optimistic, u.SignedHeader(), u.Attested.Header, false, servedUpdate{digest, ssz})
 	if cb := n.callbacks.Load().optimistic; deliver && cb != nil {
 		cb(from, u)
 	}
@@ -804,7 +888,7 @@ func (n *Node) onFinality(from peer.ID, fork string, digest [4]byte, ssz []byte)
 		return pubsub.ValidationReject, err
 	}
 	super := u.Signature.SignerCount() >= params.SyncCommitteeSupermajority
-	res, deliver, err := n.check(&n.finality, u.SignedHeader(), u.Finalized.Slot, super, servedUpdate{digest, ssz})
+	res, deliver, err := n.check(&n.finality, u.SignedHeader(), u.Finalized.Header, super, servedUpdate{digest, ssz})
 	if cb := n.callbacks.Load().finality; deliver && cb != nil {
 		cb(from, u)
 	}
@@ -814,6 +898,7 @@ func (n *Node) onFinality(from peer.ID, fork string, digest [4]byte, ssz []byte)
 // gossipState is what the gossip rules of a light client update topic remember.
 type gossipState struct {
 	forwarded uint64       // key of the last update forwarded
+	header    types.Header // the header of that key (status)
 	super     bool         // that update had a sync committee supermajority
 	pending   uint64       // key of the last update handed on unverified
 	served    servedUpdate // the last update forwarded, served on request
@@ -842,7 +927,8 @@ var (
 // committee of its period isn't known (blsync still syncing its committee chain, or no
 // committee chain at all), a new update is handed on once per key, unverified, and not
 // forwarded: blsync keeps it until it can verify it.
-func (n *Node) check(st *gossipState, head types.SignedHeader, key uint64, super bool, u servedUpdate) (res pubsub.ValidationResult, deliver bool, err error) {
+func (n *Node) check(st *gossipState, head types.SignedHeader, header types.Header, super bool, u servedUpdate) (res pubsub.ValidationResult, deliver bool, err error) {
+	key := header.Slot
 	due := time.Unix(int64(n.cfg.GenesisTime+head.SignatureSlot*12), 0).Add(4*time.Second - maxClockDisparity)
 	if time.Now().Before(due) {
 		return pubsub.ValidationIgnore, false, nil
@@ -866,7 +952,7 @@ func (n *Node) check(st *gossipState, head types.SignedHeader, key uint64, super
 	case !ok:
 		return pubsub.ValidationReject, false, errBadSignature
 	}
-	st.forwarded, st.super, st.served = key, super, u
+	st.forwarded, st.header, st.super, st.served = key, header, super, u
 	return pubsub.ValidationAccept, true, nil
 }
 
