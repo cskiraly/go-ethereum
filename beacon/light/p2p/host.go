@@ -177,14 +177,14 @@ func New(cfg Config) (*Node, error) {
 	}
 	// libp2p's default limits scale with the machine (an eighth of its memory, half of the
 	// file descriptor limit); in geth's process this node gets a small fixed budget, and
-	// the connection manager trims connections to the peer target.
+	// the connection manager trims connections above twice the peer target.
 	limits := rcmgr.DefaultLimits
 	libp2p.SetDefaultServiceLimits(&limits)
 	rm, err := rcmgr.NewResourceManager(rcmgr.NewFixedLimiter(limits.Scale(128<<20, 512)))
 	if err != nil {
 		return nil, err
 	}
-	cm, err := connmgr.NewConnManager(cfg.TargetPeers, cfg.TargetPeers+cfg.TargetPeers/2+1, connmgr.WithGracePeriod(time.Minute))
+	cm, err := connmgr.NewConnManager(cfg.TargetPeers, 2*cfg.TargetPeers, connmgr.WithGracePeriod(time.Minute))
 	if err != nil {
 		rm.Close()
 		return nil, err
@@ -445,19 +445,28 @@ func (n *Node) dialLoop() {
 		if !usable(nd) {
 			continue
 		}
-		for n.Peers()+n.dials() >= n.cfg.TargetPeers && !n.dropNonServing() {
+		for !n.canDial() {
 			select {
 			case <-n.ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(time.Second):
 			}
 		}
 		n.dial(nd)
 	}
 }
 
-// dials returns the number of dials in progress (counted towards the peer target, so the
-// node doesn't overshoot it and churn: the connection manager would trim the excess).
+// canDial reports whether to dial another node: below the peer target, with at most the
+// target's number of dials in progress (most fail, or end in a "too many peers" goodbye).
+// At the target, a peer that serves no light client data makes room.
+func (n *Node) canDial() bool {
+	if n.Peers() < n.cfg.TargetPeers {
+		return n.dials() < n.cfg.TargetPeers
+	}
+	return n.dropNonServing()
+}
+
+// dials returns the number of dials in progress.
 func (n *Node) dials() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
