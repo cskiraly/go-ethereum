@@ -70,7 +70,6 @@ const (
 	protoStatus2   = protoPrefix + "status/2/ssz_snappy"
 	protoPing      = protoPrefix + "ping/1/ssz_snappy"
 	protoMetadata2 = protoPrefix + "metadata/2/ssz_snappy"
-	protoMetadata3 = protoPrefix + "metadata/3/ssz_snappy"
 	protoGoodbye   = protoPrefix + "goodbye/1/ssz_snappy"
 
 	respTimeout = 10 * time.Second
@@ -223,7 +222,6 @@ func New(cfg Config) (*Node, error) {
 		protoStatus2:      n.handleStatus,
 		protoPing:         n.handlePing,
 		protoMetadata2:    n.handleMetadata,
-		protoMetadata3:    n.handleMetadata,
 		protoGoodbye:      n.handleGoodbye,
 		protoLCOptimistic: func(s network.Stream) { n.serveLatest(s, &n.optimistic) },
 		protoLCFinality:   func(s network.Stream) { n.serveLatest(s, &n.finality) },
@@ -285,7 +283,6 @@ func (n *Node) Start() error {
 	n.local.Set(enr.UDP(conn.LocalAddr().(*net.UDPAddr).Port))
 	n.local.Set(enr.WithEntry("attnets", make([]byte, 8)))
 	n.local.Set(enr.WithEntry("syncnets", make([]byte, 1)))
-	n.local.Set(enr.WithEntry("cgc", uint64(custodyRequirement)))
 	if n.cfg.VerifyHeader != nil { // only a node that verifies updates keeps any to serve
 		n.local.Set(enr.WithEntry(enrLightClientKey, []byte{0x01}))
 	}
@@ -668,15 +665,17 @@ func (n *Node) handlePing(s network.Stream) {
 	writeResponse(s, nil, seq[:])
 }
 
+// handleMetadata answers metadata in version 2 (seq_number, attnets, syncnets), without
+// the custody group count Fulu added in version 3, and the ENR has no `cgc` either: the
+// node custodies no data columns, and a count below CUSTODY_REQUIREMENT gets it rejected
+// (Lighthouse bans it as faulty for 12 hours), so it makes no claim. Peers then assume
+// their default: Lighthouse asks for version 3, 2 or 1; Prysm and Nimbus fall back to
+// CUSTODY_REQUIREMENT.
 func (n *Node) handleMetadata(s network.Stream) {
 	defer s.Close()
 	s.SetDeadline(time.Now().Add(respTimeout))
-	// seq_number, attnets (8 bytes), syncnets (1), and from v3 custody_group_count
-	md := make([]byte, 17, 25)
+	md := make([]byte, 17)
 	binary.LittleEndian.PutUint64(md[0:8], 1)
-	if s.Protocol() == protoMetadata3 {
-		md = binary.LittleEndian.AppendUint64(md, custodyRequirement)
-	}
 	writeResponse(s, nil, md)
 }
 
@@ -696,12 +695,6 @@ func (n *Node) handleGoodbye(s network.Stream) {
 		n.avoid(s.Conn().RemotePeer(), backoff)
 	}
 }
-
-// custodyRequirement is CUSTODY_REQUIREMENT, the fewest custody groups a node may
-// advertise from Fulu on: peers (Lighthouse) disconnect and ban a node advertising fewer.
-// This node stores no data columns; ProbeLab's Hermes, another node without data,
-// advertises the same.
-const custodyRequirement = 4
 
 // digestSubs are the gossip subscriptions of one digest.
 type digestSubs struct {
