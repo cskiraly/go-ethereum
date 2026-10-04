@@ -173,9 +173,6 @@ func DecodeFinalityUpdate(fork string, b []byte) (types.FinalityUpdate, error) {
 	}, nil
 }
 
-// execHash returns the execution block hash proven by a header, or zero.
-func execHash(h types.HeaderWithExecProof) common.Hash { return h.BlockHash() }
-
 // committeeBranchDepth is the depth of the (next) sync committee proof in a fork's state.
 func committeeBranchDepth(fork string) int {
 	switch fork {
