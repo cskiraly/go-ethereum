@@ -62,19 +62,21 @@ func (s *Server) Name() string { return "consensus-p2p" }
 
 // Subscribe implements request.requestServer.
 func (s *Server) Subscribe(cb func(request.Event)) {
-	s.node.cfg.OnOptimisticUpdate = func(_ peer.ID, u types.OptimisticUpdate) {
-		cb(request.Event{Type: sync.EvNewHead, Data: types.HeadInfo{Slot: u.Attested.Slot, BlockRoot: u.Attested.Hash()}})
-		cb(request.Event{Type: sync.EvNewOptimisticUpdate, Data: u})
-	}
-	s.node.cfg.OnFinalityUpdate = func(_ peer.ID, u types.FinalityUpdate) {
-		cb(request.Event{Type: sync.EvNewFinalityUpdate, Data: u})
-	}
-	s.node.eventCallback = cb
+	s.node.callbacks.Store(&callbacks{
+		optimistic: func(_ peer.ID, u types.OptimisticUpdate) {
+			cb(request.Event{Type: sync.EvNewHead, Data: types.HeadInfo{Slot: u.Attested.Slot, BlockRoot: u.Attested.Hash()}})
+			cb(request.Event{Type: sync.EvNewOptimisticUpdate, Data: u})
+		},
+		finality: func(_ peer.ID, u types.FinalityUpdate) {
+			cb(request.Event{Type: sync.EvNewFinalityUpdate, Data: u})
+		},
+		event: cb,
+	})
 }
 
 // Unsubscribe implements request.requestServer.
 func (s *Server) Unsubscribe() {
-	s.node.cfg.OnOptimisticUpdate, s.node.cfg.OnFinalityUpdate = nil, nil
+	s.node.callbacks.Store(&callbacks{})
 }
 
 // SendRequest implements request.requestServer.
@@ -94,7 +96,7 @@ func (s *Server) SendRequest(id request.ID, req request.Request) {
 		default:
 			err = fmt.Errorf("not served over p2p")
 		}
-		cb := s.node.eventCallback
+		cb := s.node.callbacks.Load().event
 		if cb == nil {
 			return
 		}
@@ -263,7 +265,8 @@ func (n *Node) requestPeer(ctx context.Context, id peer.ID, proto string, body [
 }
 
 // UpdatesByRange fetches the best light client updates of count periods from first,
-// with the next sync committee each announces.
+// with the next sync committee each announces. Each answer is checked (checkUpdate), so
+// a peer's invalid answer loses to a valid one from another peer.
 func (n *Node) UpdatesByRange(first, count uint64) (sync.RespUpdates, error) {
 	if count > maxUpdatesPerCall {
 		count = maxUpdatesPerCall
@@ -277,9 +280,12 @@ func (n *Node) UpdatesByRange(first, count uint64) (sync.RespUpdates, error) {
 			return fmt.Errorf("got %d updates of %d", len(chunks), count)
 		}
 		var r sync.RespUpdates
-		for _, ch := range chunks {
+		for i, ch := range chunks {
 			u, c, err := DecodeUpdate(ch.fork, ch.ssz)
 			if err != nil {
+				return err
+			}
+			if err := checkUpdate(u, first+uint64(i)); err != nil {
 				return err
 			}
 			r.Updates = append(r.Updates, u)
@@ -291,18 +297,64 @@ func (n *Node) UpdatesByRange(first, count uint64) (sync.RespUpdates, error) {
 	return resp, err
 }
 
+// checkUpdate checks a light client update a peer served for a period: the period, the
+// order of its slots and its Merkle proofs, as the beacon API client does. The committee
+// chain relies on these checks (CommitteeChain.InsertUpdate verifies only the sync
+// committee signature): without them a peer could pair a signed header with a next sync
+// committee of its own.
+func checkUpdate(u *types.LightClientUpdate, period uint64) error {
+	if p := u.AttestedHeader.Header.SyncPeriod(); p != period {
+		return fmt.Errorf("update of period %d, asked for %d", p, period)
+	}
+	if u.AttestedHeader.SignatureSlot <= u.AttestedHeader.Header.Slot {
+		return errors.New("update signed before its attested header")
+	}
+	if u.FinalizedHeader != nil && u.FinalizedHeader.Slot > u.AttestedHeader.Header.Slot {
+		return errors.New("update finalized after its attested header")
+	}
+	if err := u.Validate(); err != nil {
+		return fmt.Errorf("update of period %d: %v", period, err)
+	}
+	return nil
+}
+
+// checkOptimistic checks the order of an optimistic update's slots and its Merkle proof;
+// the sync committee signature is for its user to check.
+func checkOptimistic(u *types.OptimisticUpdate) error {
+	if u.SignatureSlot <= u.Attested.Slot {
+		return errors.New("update signed before its attested header")
+	}
+	return u.Validate()
+}
+
+// checkFinality checks the order of a finality update's slots and its Merkle proofs; the
+// sync committee signature is for its user to check.
+func checkFinality(u *types.FinalityUpdate) error {
+	if u.SignatureSlot <= u.Attested.Slot {
+		return errors.New("update signed before its attested header")
+	}
+	if u.Finalized.Slot > u.Attested.Slot {
+		return errors.New("update finalized after its attested header")
+	}
+	return u.Validate()
+}
+
 // Bootstrap fetches the light client bootstrap for a (finalized, epoch boundary) block root.
 func (n *Node) Bootstrap(root common.Hash) (*types.BootstrapData, error) {
 	var boot *types.BootstrapData
 	err := n.request(protoLCBootstrap, root[:], 1, func(chunks []chunk) error {
 		b, err := DecodeBootstrap(chunks[0].fork, chunks[0].ssz)
-		if err == nil && b.Header.Hash() != root {
-			err = fmt.Errorf("bootstrap for %x, asked for %x", b.Header.Hash(), root)
+		if err != nil {
+			return err
 		}
-		if err == nil {
-			boot = b
+		if b.Header.Hash() != root {
+			return fmt.Errorf("bootstrap for %x, asked for %x", b.Header.Hash(), root)
 		}
-		return err
+		if err := b.Validate(); err != nil {
+			return fmt.Errorf("bootstrap: %v", err)
+		}
+		boot = b
+		return nil
 	})
 	return boot, err
 }
@@ -312,6 +364,9 @@ func (n *Node) FinalityUpdate() (types.FinalityUpdate, error) {
 	var u types.FinalityUpdate
 	err := n.request(protoLCFinality, nil, 1, func(chunks []chunk) error {
 		f, err := DecodeFinalityUpdate(chunks[0].fork, chunks[0].ssz)
+		if err == nil {
+			err = checkFinality(&f)
+		}
 		if err == nil {
 			u = f
 		}

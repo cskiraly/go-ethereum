@@ -86,12 +86,14 @@ type Config struct {
 	// unknown): no transitions then.
 	DigestOverride [4]byte
 
+	// OnOptimisticUpdate and OnFinalityUpdate receive the gossiped updates that pass the
+	// gossip rules (Node.check), each once.
 	OnOptimisticUpdate func(peer.ID, types.OptimisticUpdate)
 	OnFinalityUpdate   func(peer.ID, types.FinalityUpdate)
 
 	// VerifyHeader checks a signed header against the sync committee (blsync's committee
-	// chain). With it, gossiped updates that pass the checks are forwarded to other peers;
-	// without it, none are.
+	// chain); it returns an error if it doesn't know the committee. With it, gossiped
+	// updates that pass the checks are forwarded to other peers; without it, none are.
 	VerifyHeader func(types.SignedHeader) (bool, error)
 	GenesisTime  uint64
 }
@@ -117,14 +119,13 @@ type Node struct {
 	dialing  map[peer.ID]bool
 	received atomic.Int64
 
-	fwdMu                 sync.Mutex
-	fwdOptimistic, fwdFin uint64       // attested / finalized slot of the last update forwarded
-	lastOptimistic        servedUpdate // the last optimistic update forwarded, served on request
-	lastFinality          servedUpdate // same for the finality update
-	forwarded             atomic.Int64
-	served                atomic.Int64
+	fwdMu      sync.Mutex
+	optimistic gossipState // the optimistic update topic (keyed by the attested slot)
+	finality   gossipState // the finality update topic (keyed by the finalized slot)
+	forwarded  atomic.Int64
+	served     atomic.Int64
 
-	eventCallback func(request.Event) // set by Server.Subscribe
+	callbacks atomic.Pointer[callbacks] // from Config, or set by Server.Subscribe
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -182,6 +183,7 @@ func New(cfg Config) (*Node, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{cfg: cfg, key: key, host: h, bw: bw, sched: sched, forkByDigest: forkByDigest,
 		subs: make(map[[4]byte]*digestSubs), dialing: make(map[peer.ID]bool), ctx: ctx, cancel: cancel}
+	n.callbacks.Store(&callbacks{optimistic: cfg.OnOptimisticUpdate, finality: cfg.OnFinalityUpdate})
 	for _, p := range []string{protoStatus1, protoStatus2} {
 		h.SetStreamHandler(protocol.ID(p), n.handleStatus)
 	}
@@ -189,9 +191,16 @@ func New(cfg Config) (*Node, error) {
 	h.SetStreamHandler(protoMetadata2, n.handleMetadata)
 	h.SetStreamHandler(protoMetadata3, n.handleMetadata)
 	h.SetStreamHandler(protoGoodbye, n.handleGoodbye)
-	h.SetStreamHandler(protoLCOptimistic, func(s network.Stream) { n.serveLatest(s, &n.lastOptimistic) })
-	h.SetStreamHandler(protoLCFinality, func(s network.Stream) { n.serveLatest(s, &n.lastFinality) })
+	h.SetStreamHandler(protoLCOptimistic, func(s network.Stream) { n.serveLatest(s, &n.optimistic) })
+	h.SetStreamHandler(protoLCFinality, func(s network.Stream) { n.serveLatest(s, &n.finality) })
 	return n, nil
+}
+
+// callbacks are the receivers of the node's light client updates and request results.
+type callbacks struct {
+	optimistic func(peer.ID, types.OptimisticUpdate)
+	finality   func(peer.ID, types.FinalityUpdate)
+	event      func(request.Event) // request results (Server)
 }
 
 // Start begins discovery, dialing and the gossip subscriptions.
@@ -533,25 +542,22 @@ func (n *Node) subscribeDigest(d [4]byte) (*digestSubs, error) {
 			handle = n.onFinality
 		}
 		topic := fmt.Sprintf("/eth2/%x/%s/ssz_snappy", d[:], name)
-		// Updates are handed to blsync (which verifies them itself) and forwarded only if
-		// they pass the gossip checks here; anything else is ignored, not rejected, so a
-		// lagging committee chain of ours never penalizes honest peers.
+		// Updates that pass the gossip rules (check) are forwarded and handed to blsync,
+		// which checks them again.
 		if err := n.ps.RegisterTopicValidator(topic, func(_ context.Context, from peer.ID, m *pubsub.Message) pubsub.ValidationResult {
 			ssz, err := decodeGossip(m.Data)
 			if err != nil {
 				return pubsub.ValidationReject
 			}
 			n.received.Add(int64(len(m.Data)))
-			forward, err := handle(m.ReceivedFrom, fork, d, ssz)
+			res, err := handle(m.ReceivedFrom, fork, d, ssz)
 			if err != nil {
 				log.Debug("Bad light client update", "topic", topic, "peer", m.ReceivedFrom, "err", err)
-				return pubsub.ValidationReject
 			}
-			if forward() {
+			if res == pubsub.ValidationAccept {
 				n.forwarded.Add(1)
-				return pubsub.ValidationAccept
 			}
-			return pubsub.ValidationIgnore
+			return res
 		}); err != nil {
 			n.unsubscribe(ds)
 			return nil, err
@@ -659,55 +665,96 @@ func epochAt(genesis uint64, t time.Time) uint64 {
 	return uint64(t.Unix()-int64(genesis)) / 12 / params.EpochLength
 }
 
-func (n *Node) onOptimistic(from peer.ID, fork string, digest [4]byte, ssz []byte) (func() bool, error) {
+// onOptimistic handles a gossiped optimistic update.
+func (n *Node) onOptimistic(from peer.ID, fork string, digest [4]byte, ssz []byte) (pubsub.ValidationResult, error) {
 	u, err := DecodeOptimisticUpdate(fork, ssz)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		err = checkOptimistic(&u)
 	}
-	if cb := n.cfg.OnOptimisticUpdate; cb != nil {
+	if err != nil {
+		return pubsub.ValidationReject, err
+	}
+	res, deliver, err := n.check(&n.optimistic, u.SignedHeader(), u.Attested.Slot, false, servedUpdate{digest, ssz})
+	if cb := n.callbacks.Load().optimistic; deliver && cb != nil {
 		cb(from, u)
 	}
-	return func() bool {
-		return n.forwardable(u.SignedHeader(), u.Attested.Slot, &n.fwdOptimistic, &n.lastOptimistic, servedUpdate{digest, ssz})
-	}, nil
+	return res, err
 }
 
-func (n *Node) onFinality(from peer.ID, fork string, digest [4]byte, ssz []byte) (func() bool, error) {
+// onFinality handles a gossiped finality update.
+func (n *Node) onFinality(from peer.ID, fork string, digest [4]byte, ssz []byte) (pubsub.ValidationResult, error) {
 	u, err := DecodeFinalityUpdate(fork, ssz)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		err = checkFinality(&u)
 	}
-	if cb := n.cfg.OnFinalityUpdate; cb != nil {
+	if err != nil {
+		return pubsub.ValidationReject, err
+	}
+	super := u.Signature.SignerCount() >= params.SyncCommitteeSupermajority
+	res, deliver, err := n.check(&n.finality, u.SignedHeader(), u.Finalized.Slot, super, servedUpdate{digest, ssz})
+	if cb := n.callbacks.Load().finality; deliver && cb != nil {
 		cb(from, u)
 	}
-	return func() bool {
-		return n.forwardable(u.SignedHeader(), u.Finalized.Slot, &n.fwdFin, &n.lastFinality, servedUpdate{digest, ssz})
-	}, nil
+	return res, err
 }
 
-// forwardable applies the gossip rules for light client updates: received no earlier than
-// a third of the signature slot (allowing for clock disparity), newer than the last one
-// forwarded on the topic (key: attested slot, or finalized slot), and signed by the sync
-// committee. It records the update as forwarded if so.
-func (n *Node) forwardable(head types.SignedHeader, key uint64, last *uint64, keep *servedUpdate, u servedUpdate) bool {
-	if n.cfg.VerifyHeader == nil {
-		return false
-	}
-	due := time.Unix(int64(n.cfg.GenesisTime+head.SignatureSlot*12), 0).Add(4*time.Second - 500*time.Millisecond)
+// gossipState is what the gossip rules of a light client update topic remember.
+type gossipState struct {
+	forwarded uint64       // key of the last update forwarded
+	super     bool         // that update had a sync committee supermajority
+	pending   uint64       // key of the last update handed on unverified
+	served    servedUpdate // the last update forwarded, served on request
+}
+
+// maxClockDisparity is MAXIMUM_GOSSIP_CLOCK_DISPARITY.
+const maxClockDisparity = 500 * time.Millisecond
+
+var (
+	errBadSignature     = errors.New("invalid sync committee signature")
+	errNoCommitteeChain = errors.New("no committee chain")
+)
+
+// check applies the gossip rules of a light client update topic (the consensus specs'
+// light client p2p interface) to an update whose slots and Merkle proofs are valid; a
+// light client checks the sync committee signature where a full node compares the update
+// with the one it computed:
+//   - it is received no earlier than a third into its signature slot (ignored otherwise);
+//   - it is newer than the last update forwarded: its key (the attested slot of an
+//     optimistic update, the finalized slot of a finality update) is greater, or equal
+//     with a sync committee supermajority (super) that the last one hadn't (ignored
+//     otherwise);
+//   - the sync committee signed it (rejected otherwise).
+//
+// An update that passes is forwarded, kept for serving and handed on (deliver). While the
+// committee of its period isn't known (blsync still syncing its committee chain, or no
+// committee chain at all), a new update is handed on once per key, unverified, and not
+// forwarded: blsync keeps it until it can verify it.
+func (n *Node) check(st *gossipState, head types.SignedHeader, key uint64, super bool, u servedUpdate) (res pubsub.ValidationResult, deliver bool, err error) {
+	due := time.Unix(int64(n.cfg.GenesisTime+head.SignatureSlot*12), 0).Add(4*time.Second - maxClockDisparity)
 	if time.Now().Before(due) {
-		return false
+		return pubsub.ValidationIgnore, false, nil
 	}
 	n.fwdMu.Lock()
 	defer n.fwdMu.Unlock()
-	if key <= *last {
-		return false
+	if key < st.forwarded || (key == st.forwarded && (!super || st.super)) {
+		return pubsub.ValidationIgnore, false, nil
 	}
-	if ok, err := n.cfg.VerifyHeader(head); err != nil || !ok {
-		return false
+	ok, err := false, errNoCommitteeChain
+	if n.cfg.VerifyHeader != nil {
+		ok, err = n.cfg.VerifyHeader(head)
 	}
-	*last = key
-	*keep = u
-	return true
+	switch {
+	case err != nil:
+		if key <= st.pending {
+			return pubsub.ValidationIgnore, false, nil
+		}
+		st.pending = key
+		return pubsub.ValidationIgnore, true, nil
+	case !ok:
+		return pubsub.ValidationReject, false, errBadSignature
+	}
+	st.forwarded, st.super, st.served = key, super, u
+	return pubsub.ValidationAccept, true, nil
 }
 
 // ENR key advertising which light client data this node serves over req/resp: a bitfield,
@@ -724,11 +771,11 @@ type servedUpdate struct {
 
 // serveLatest answers a light client optimistic or finality update request with the last
 // verified update of that kind, or "resource unavailable" (3) without one.
-func (n *Node) serveLatest(s network.Stream, keep *servedUpdate) {
+func (n *Node) serveLatest(s network.Stream, st *gossipState) {
 	defer s.Close()
 	s.SetDeadline(time.Now().Add(respTimeout))
 	n.fwdMu.Lock()
-	u := *keep
+	u := st.served
 	n.fwdMu.Unlock()
 	if u.ssz == nil {
 		s.Write([]byte{3})

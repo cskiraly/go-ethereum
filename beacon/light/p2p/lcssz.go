@@ -145,7 +145,7 @@ func DecodeFinalityUpdate(fork string, b []byte) (types.FinalityUpdate, error) {
 		return types.FinalityUpdate{}, errShort
 	}
 	offA, offF := binary.LittleEndian.Uint32(b[0:4]), binary.LittleEndian.Uint32(b[4:8])
-	if int(offA) != fixed || offF < offA || int(offF) > len(b) {
+	if int(offA) != fixed || offF < offA || uint64(offF) > uint64(len(b)) {
 		return types.FinalityUpdate{}, fmt.Errorf("ssz: bad offsets %d, %d", offA, offF)
 	}
 	attested, err := decodeLCHeader(b[offA:offF])
@@ -203,7 +203,7 @@ func DecodeUpdate(fork string, b []byte) (*types.LightClientUpdate, *types.Seria
 		return nil, nil, errShort
 	}
 	offA, offF := binary.LittleEndian.Uint32(b[0:4]), binary.LittleEndian.Uint32(b[pOffFin:pFBranch])
-	if int(offA) != fixed || offF < offA || int(offF) > len(b) {
+	if int(offA) != fixed || offF < offA || uint64(offF) > uint64(len(b)) {
 		return nil, nil, fmt.Errorf("ssz: bad offsets %d, %d", offA, offF)
 	}
 	attested, err := decodeLCHeader(b[offA:offF])
