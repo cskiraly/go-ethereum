@@ -101,6 +101,22 @@ func TestCheckUpdate(t *testing.T) {
 	if err := checkUpdate(u, 1873); err == nil {
 		t.Fatal("update with a forged finalized header accepted")
 	}
+	// A finalized header of the period before: kept without its finality (its committee
+	// proof still checked).
+	forged = bytes.Clone(ssz)
+	binary.LittleEndian.PutUint64(forged[offF:], 1873*8192-32)
+	u, _, err = DecodeUpdate(want.Version, forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkUpdate(u, 1873); err != nil || u.FinalizedHeader != nil {
+		t.Fatalf("update with an older finalized header: err %v, finalized header %v", err, u.FinalizedHeader)
+	}
+	forged[4+100] ^= 1
+	u, _, _ = DecodeUpdate(want.Version, forged)
+	if err := checkUpdate(u, 1873); err == nil {
+		t.Fatal("update with a forged next sync committee accepted")
+	}
 }
 
 // TestCheckGossiped checks that the gossiped updates of the test data (mainnet: Fulu; a
@@ -168,8 +184,8 @@ func TestGossipRules(t *testing.T) {
 	var digest [4]byte
 	gt := newGossipTester()
 
-	// Forged finalized headers (far ahead, which used to block forwarding the real ones,
-	// and one slot off): rejected.
+	// Forged finalized headers: far ahead, which used to block forwarding the real ones,
+	// is malformed (rejected); one slot off fails its proof (ignored, not forwarded).
 	offF := binary.LittleEndian.Uint32(ssz[4:8])
 	forged := bytes.Clone(ssz)
 	binary.LittleEndian.PutUint64(forged[offF:], 1<<40)
@@ -178,7 +194,10 @@ func TestGossipRules(t *testing.T) {
 	forged = bytes.Clone(ssz)
 	forged[offF] ^= 1
 	res, _ = gt.onFinality("", "fulu", digest, forged)
-	expect(t, "finalized header forged", res, pubsub.ValidationReject)
+	expect(t, "finalized header forged", res, pubsub.ValidationIgnore)
+	if gt.nFin != 0 {
+		t.Fatal("forged finality update handed on")
+	}
 
 	// Fewer than two thirds of the committee: forwarded, handed on once.
 	p := 8 + finalityBranchDepth("fulu")*32
@@ -197,11 +216,17 @@ func TestGossipRules(t *testing.T) {
 		t.Fatalf("handed on %d finality updates (want 2), serving the last: %v", gt.nFin, bytes.Equal(gt.finality.served.ssz, ssz))
 	}
 
-	// Optimistic updates: a bad signature is rejected and not handed on.
+	// Optimistic updates: fewer signers than required are ignored, a bad signature too
+	// (geth's signature domain can differ from the spec's around a fork), and neither is
+	// handed on.
 	ssz, _ = load(t, "mainnet-optimistic_update")
+	gt.cfg.MinSigners = params.SyncCommitteeSize + 1
+	res, _ = gt.onOptimistic("", "fulu", digest, ssz)
+	expect(t, "too few signers", res, pubsub.ValidationIgnore)
+	gt.cfg.MinSigners = 0
 	gt.verify = func(types.SignedHeader) (bool, error) { return false, nil }
 	res, err := gt.onOptimistic("", "fulu", digest, ssz)
-	expect(t, "bad signature", res, pubsub.ValidationReject)
+	expect(t, "bad signature", res, pubsub.ValidationIgnore)
 	if !errors.Is(err, errBadSignature) || gt.nOpt != 0 {
 		t.Fatalf("bad signature: err %v, handed on %d", err, gt.nOpt)
 	}

@@ -100,7 +100,10 @@ type Config struct {
 	// chain); it returns an error if it doesn't know the committee. With it, gossiped
 	// updates that pass the checks are forwarded to other peers; without it, none are.
 	VerifyHeader func(types.SignedHeader) (bool, error)
-	GenesisTime  uint64
+	// MinSigners is the fewest sync committee signers of a gossiped update to forward or
+	// hand on, and to base the node's status on (blsync's --beacon.threshold).
+	MinSigners  int
+	GenesisTime uint64
 }
 
 // Node is a light client's node on the consensus layer's libp2p network.
@@ -442,7 +445,7 @@ func (n *Node) dialLoop() {
 		if !usable(nd) {
 			continue
 		}
-		for n.Peers() >= n.cfg.TargetPeers && !n.dropNonServing() {
+		for n.Peers()+n.dials() >= n.cfg.TargetPeers && !n.dropNonServing() {
 			select {
 			case <-n.ctx.Done():
 				return
@@ -453,11 +456,20 @@ func (n *Node) dialLoop() {
 	}
 }
 
-// servingPeers counts the connected peers that serve light client data (by their
-// identify protocol list).
+// dials returns the number of dials in progress (counted towards the peer target, so the
+// node doesn't overshoot it and churn: the connection manager would trim the excess).
+func (n *Node) dials() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.dialing)
+}
+
+// servingPeers counts the connected peers that serve light client data: those whose
+// identify protocol list includes updates by range, which a light client server has and
+// blsync needs (nodes like this one serve only the latest updates).
 func (n *Node) servingPeers() (count int) {
 	for _, id := range n.host.Network().Peers() {
-		if protos, err := n.host.Peerstore().GetProtocols(id); err == nil && slices.Contains(protos, protocol.ID(protoLCFinality)) {
+		if protos, err := n.host.Peerstore().GetProtocols(id); err == nil && slices.Contains(protos, protocol.ID(protoLCUpdates)) {
 			count++
 		}
 	}
@@ -465,9 +477,9 @@ func (n *Node) servingPeers() (count int) {
 }
 
 // dropNonServing disconnects a peer that serves no light client data (connected for a
-// minute, and its identify protocol list lacks the light client protocols), to make room
-// for one that does; it isn't dialed again for an hour. Such peers (many nodes don't run
-// a light client server) don't carry the light client topics either.
+// minute, and its identify protocol list lacks updates by range), to make room for one
+// that does; it isn't dialed again for an hour. Most such peers (many nodes don't run a
+// light client server) don't carry the light client topics either.
 func (n *Node) dropNonServing() bool {
 	for _, id := range n.host.Network().Peers() {
 		conns := n.host.Network().ConnsToPeer(id)
@@ -475,7 +487,7 @@ func (n *Node) dropNonServing() bool {
 			continue
 		}
 		protos, err := n.host.Peerstore().GetProtocols(id)
-		if err != nil || len(protos) == 0 || slices.Contains(protos, protocol.ID(protoLCFinality)) {
+		if err != nil || len(protos) == 0 || slices.Contains(protos, protocol.ID(protoLCUpdates)) {
 			continue
 		}
 		n.avoid(id, time.Hour)
@@ -485,14 +497,18 @@ func (n *Node) dropNonServing() bool {
 	return false
 }
 
+// maxBackoff bounds the peers kept from being dialed.
+const maxBackoff = 10000
+
 // avoid keeps a peer from being dialed for a while.
 func (n *Node) avoid(id peer.ID, d time.Duration) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if len(n.backoff) >= 10000 {
+	if len(n.backoff) >= maxBackoff {
+		// forget the expired ones, and while still too many, any (map order is random)
 		now := time.Now()
 		for id, until := range n.backoff {
-			if now.After(until) {
+			if now.After(until) || len(n.backoff) > maxBackoff*9/10 {
 				delete(n.backoff, id)
 			}
 		}
@@ -689,9 +705,9 @@ func topicsRegexp(sched []forkDigest) *regexp.Regexp {
 	return regexp.MustCompile(fmt.Sprintf("^/eth2/(%s)/(%s)/ssz_snappy$", strings.Join(digests, "|"), strings.Join(lightClientTopics, "|")))
 }
 
-// Peer scoring counts only the messages that break the gossip rules for certain (the
-// rejected ones, see check), which honest peers don't send: a peer sending about a dozen
-// within an hour is ignored (graylisted) until the count decays. Gossipsub adds each
+// Peer scoring counts only malformed messages (the rejected ones, see onOptimistic), which
+// honest peers don't send: a peer sending about a dozen within an hour is ignored
+// (graylisted) until the count decays. Gossipsub adds each
 // joined topic's parameters to the node's PeerScoreParams (newPeerScoreParams).
 func newPeerScoreParams() *pubsub.PeerScoreParams {
 	return &pubsub.PeerScoreParams{
@@ -863,14 +879,21 @@ func epochAt(genesis uint64, t time.Time) uint64 {
 	return uint64(t.Unix()-int64(genesis)) / 12 / params.EpochLength
 }
 
-// onOptimistic handles a gossiped optimistic update.
+// onOptimistic handles a gossiped optimistic update. Only a malformed one is rejected
+// (which lowers its sender's peer score): around a fork, geth's checks of the Merkle
+// proofs and the signature can fail updates that are valid (the proof of a pre-fork header
+// in the new format; the signature domain, which geth takes from the attested header's
+// epoch, the spec from the signature slot's), so those are ignored.
 func (n *Node) onOptimistic(from peer.ID, fork string, digest [4]byte, ssz []byte) (pubsub.ValidationResult, error) {
 	u, err := DecodeOptimisticUpdate(fork, ssz)
 	if err == nil {
-		err = checkOptimistic(&u)
+		err = optimisticSlots(&u)
 	}
 	if err != nil {
 		return pubsub.ValidationReject, err
+	}
+	if err := u.Validate(); err != nil {
+		return pubsub.ValidationIgnore, err
 	}
 	res, deliver, err := n.check(&n.optimistic, u.SignedHeader(), u.Attested.Header, false, servedUpdate{digest, ssz})
 	if cb := n.callbacks.Load().optimistic; deliver && cb != nil {
@@ -879,14 +902,18 @@ func (n *Node) onOptimistic(from peer.ID, fork string, digest [4]byte, ssz []byt
 	return res, err
 }
 
-// onFinality handles a gossiped finality update.
+// onFinality handles a gossiped finality update (rejected only if malformed, as in
+// onOptimistic).
 func (n *Node) onFinality(from peer.ID, fork string, digest [4]byte, ssz []byte) (pubsub.ValidationResult, error) {
 	u, err := DecodeFinalityUpdate(fork, ssz)
 	if err == nil {
-		err = checkFinality(&u)
+		err = finalitySlots(&u)
 	}
 	if err != nil {
 		return pubsub.ValidationReject, err
+	}
+	if err := u.Validate(); err != nil {
+		return pubsub.ValidationIgnore, err
 	}
 	super := u.Signature.SignerCount() >= params.SyncCommitteeSupermajority
 	res, deliver, err := n.check(&n.finality, u.SignedHeader(), u.Finalized.Header, super, servedUpdate{digest, ssz})
@@ -917,13 +944,13 @@ var (
 // light client p2p interface) to an update whose slots and Merkle proofs are valid; a
 // light client checks the sync committee signature where a full node compares the update
 // with the one it computed:
-//   - it is received no earlier than a third into its signature slot (ignored otherwise);
+//   - it is received no earlier than a third into its signature slot;
 //   - it is newer than the last update forwarded: its key (the attested slot of an
 //     optimistic update, the finalized slot of a finality update) is greater, or equal
-//     with a sync committee supermajority (super) that the last one hadn't (ignored
-//     otherwise);
-//   - the sync committee signed it (rejected otherwise).
+//     with a sync committee supermajority (super) that the last one hadn't;
+//   - it has the signers blsync requires (MinSigners), and the sync committee signed it.
 //
+// Updates that fail are ignored (see onOptimistic).
 // An update that passes is forwarded, kept for serving and handed on (deliver). While the
 // committee of its period isn't known (blsync still syncing its committee chain, or no
 // committee chain at all), a new update is handed on once per key, unverified, and not
@@ -931,7 +958,7 @@ var (
 func (n *Node) check(st *gossipState, head types.SignedHeader, header types.Header, super bool, u servedUpdate) (res pubsub.ValidationResult, deliver bool, err error) {
 	key := header.Slot
 	due := time.Unix(int64(n.cfg.GenesisTime+head.SignatureSlot*12), 0).Add(4*time.Second - maxClockDisparity)
-	if time.Now().Before(due) {
+	if time.Now().Before(due) || head.Signature.SignerCount() < n.cfg.MinSigners {
 		return pubsub.ValidationIgnore, false, nil
 	}
 	n.fwdMu.Lock()
@@ -951,7 +978,7 @@ func (n *Node) check(st *gossipState, head types.SignedHeader, header types.Head
 		st.pending = key
 		return pubsub.ValidationIgnore, true, nil
 	case !ok:
-		return pubsub.ValidationReject, false, errBadSignature
+		return pubsub.ValidationIgnore, false, errBadSignature
 	}
 	st.forwarded, st.header, st.super, st.served = key, header, super, u
 	return pubsub.ValidationAccept, true, nil

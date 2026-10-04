@@ -78,11 +78,12 @@ func readSSZ(r *bufio.Reader, max int) ([]byte, error) {
 	return buf, nil
 }
 
-// maxFramedSize is the most bytes n bytes take in the snappy framing format: the stream
-// identifier, and for each chunk of up to 64 KiB a header, a checksum and the data, as
-// compressed by snappy at worst (snappy.MaxEncodedLen: 32 + n + n/6).
+// maxFramedSize bounds the snappy framing of n bytes as encoders write it: the stream
+// identifier, and for each chunk (64 KiB, Teku 32 KiB) a header, a checksum and the data
+// compressed by snappy at worst (snappy.MaxEncodedLen: 32 + n + n/6). Framing with tiny
+// chunks or padding beyond that is cut off.
 func maxFramedSize(n int) int64 {
-	chunks := n/65536 + 1
+	chunks := n/32768 + 1
 	return int64(10 + chunks*(8+32) + n + n/6)
 }
 

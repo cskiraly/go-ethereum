@@ -197,7 +197,11 @@ loop:
 		go func(id peer.ID) {
 			defer wg.Done()
 			defer func() { <-slots }()
-			defer recovered("request "+proto, nil)
+			defer recovered("request "+proto, func() {
+				mu.Lock()
+				lastErr = errors.New("panic")
+				mu.Unlock()
+			})
 			res, err := n.requestPeer(ctx, id, proto, body, chunks)
 			mu.Lock()
 			defer mu.Unlock()
@@ -222,6 +226,9 @@ loop:
 	}
 	if lastErr == nil {
 		lastErr = ctx.Err()
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no answer to %s", proto)
 	}
 	return lastErr
 }
@@ -321,6 +328,12 @@ func checkUpdate(u *types.LightClientUpdate, period uint64) error {
 	if u.FinalizedHeader != nil && u.FinalizedHeader.Slot > u.AttestedHeader.Header.Slot {
 		return errors.New("update finalized after its attested header")
 	}
+	if u.FinalizedHeader != nil && u.FinalizedHeader.SyncPeriod() != period {
+		// geth's update holds a finalized header of its own period only; a peer's best
+		// update may have an older one (around a period change, or without finality for
+		// a while). It still proves the next committee: keep it without its finality.
+		u.FinalizedHeader, u.FinalityBranch = nil, nil
+	}
 	if err := u.Validate(); err != nil {
 		return fmt.Errorf("update of period %d: %v", period, err)
 	}
@@ -330,8 +343,8 @@ func checkUpdate(u *types.LightClientUpdate, period uint64) error {
 // checkOptimistic checks the order of an optimistic update's slots and its Merkle proof;
 // the sync committee signature is for its user to check.
 func checkOptimistic(u *types.OptimisticUpdate) error {
-	if u.SignatureSlot <= u.Attested.Slot {
-		return errors.New("update signed before its attested header")
+	if err := optimisticSlots(u); err != nil {
+		return err
 	}
 	return u.Validate()
 }
@@ -339,13 +352,29 @@ func checkOptimistic(u *types.OptimisticUpdate) error {
 // checkFinality checks the order of a finality update's slots and its Merkle proofs; the
 // sync committee signature is for its user to check.
 func checkFinality(u *types.FinalityUpdate) error {
+	if err := finalitySlots(u); err != nil {
+		return err
+	}
+	return u.Validate()
+}
+
+// optimisticSlots checks the order of an optimistic update's slots.
+func optimisticSlots(u *types.OptimisticUpdate) error {
+	if u.SignatureSlot <= u.Attested.Slot {
+		return errors.New("update signed before its attested header")
+	}
+	return nil
+}
+
+// finalitySlots checks the order of a finality update's slots.
+func finalitySlots(u *types.FinalityUpdate) error {
 	if u.SignatureSlot <= u.Attested.Slot {
 		return errors.New("update signed before its attested header")
 	}
 	if u.Finalized.Slot > u.Attested.Slot {
 		return errors.New("update finalized after its attested header")
 	}
-	return u.Validate()
+	return nil
 }
 
 // Bootstrap fetches the light client bootstrap for a (finalized, epoch boundary) block root.

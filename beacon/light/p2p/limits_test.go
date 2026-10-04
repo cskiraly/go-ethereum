@@ -166,7 +166,8 @@ func TestLoadOrCreateKey(t *testing.T) {
 }
 
 // TestTwoNodes connects two nodes on localhost: the status exchange, the metadata (with
-// the custody group count peers require) and the serving peer count.
+// the custody group count peers require) and the serving peer count (nodes like these
+// serve no updates by range).
 func TestTwoNodes(t *testing.T) {
 	cfg := params.MainnetLightConfig
 	start := func() *Node {
@@ -199,12 +200,18 @@ func TestTwoNodes(t *testing.T) {
 	if err != nil || len(md) != 25 || binary.LittleEndian.Uint64(md[17:]) != custodyRequirement {
 		t.Fatalf("metadata %x, err %v", md, err)
 	}
-	for b.servingPeers() != 1 { // identify runs after the connection
+	for { // identify runs after the connection
+		if protos, _ := b.host.Peerstore().GetProtocols(a.host.ID()); len(protos) > 0 {
+			break
+		}
 		select {
 		case <-ctx.Done():
-			t.Fatal("peer not seen as serving light client data")
+			t.Fatal("no identify")
 		case <-time.After(50 * time.Millisecond):
 		}
+	}
+	if n := b.servingPeers(); n != 0 {
+		t.Fatalf("%d serving peers, want 0", n)
 	}
 	// Once each sees the other on the topic, gossipsub meshes them at its next heartbeat
 	// and scores them from then on: let a few heartbeats run.
@@ -217,4 +224,17 @@ func TestTwoNodes(t *testing.T) {
 		}
 	}
 	time.Sleep(3 * time.Second)
+}
+
+func TestAvoidBound(t *testing.T) {
+	n := &Node{backoff: make(map[peer.ID]time.Time)}
+	for i := 0; i < 3*maxBackoff; i++ {
+		n.avoid(peer.ID(fmt.Sprint(i)), time.Hour)
+		if len(n.backoff) > maxBackoff {
+			t.Fatalf("%d peers kept", len(n.backoff))
+		}
+	}
+	if _, ok := n.backoff[peer.ID(fmt.Sprint(3*maxBackoff-1))]; !ok {
+		t.Fatal("the last peer isn't kept")
+	}
 }

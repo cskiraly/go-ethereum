@@ -169,6 +169,7 @@ func (c *Client) startP2P() error {
 		Bootnodes:      boot,
 		ListenPort:     c.config.P2PPort,
 		TargetPeers:    c.config.P2PPeers,
+		MinSigners:     c.config.Threshold,
 		Chain:          &c.config.ChainConfig,
 		Network:        network,
 		DigestOverride: override,
