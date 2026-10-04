@@ -82,20 +82,7 @@ func (s *Server) Unsubscribe() {
 // SendRequest implements request.requestServer.
 func (s *Server) SendRequest(id request.ID, req request.Request) {
 	go func() {
-		var (
-			resp request.Response
-			err  error
-		)
-		switch data := req.(type) {
-		case sync.ReqUpdates:
-			resp, err = s.node.UpdatesByRange(data.FirstPeriod, data.Count)
-		case sync.ReqCheckpointData:
-			resp, err = s.node.Bootstrap(common.Hash(data))
-		case sync.ReqFinality:
-			resp, err = s.node.FinalityUpdate()
-		default:
-			err = fmt.Errorf("not served over p2p")
-		}
+		resp, err := s.serve(req)
 		cb := s.node.callbacks.Load().event
 		if cb == nil {
 			return
@@ -109,8 +96,23 @@ func (s *Server) SendRequest(id request.ID, req request.Request) {
 	}()
 }
 
+// serve gets the answer to a request from peers.
+func (s *Server) serve(req request.Request) (resp request.Response, err error) {
+	defer recovered("request", func() { err = errors.New("panic") })
+	switch data := req.(type) {
+	case sync.ReqUpdates:
+		return s.node.UpdatesByRange(data.FirstPeriod, data.Count)
+	case sync.ReqCheckpointData:
+		return s.node.Bootstrap(common.Hash(data))
+	case sync.ReqFinality:
+		return s.node.FinalityUpdate()
+	}
+	return nil, errors.New("not served over p2p")
+}
+
 // Timing of blsync's requests over req/resp. blsync cancels a request after 10 s
-// (request.hardRequestTimeout), so all tries of one request fit in requestDeadline.
+// (request.hardRequestTimeout), so the wait for a peer and all tries of one request fit
+// in requestDeadline.
 const (
 	requestDeadline = 8 * time.Second
 	tryTimeout      = 3 * time.Second        // per peer, plus perChunkTime per expected chunk
@@ -159,21 +161,18 @@ type chunk struct {
 // until one answers with chunks that accept takes (accept decodes and keeps the result;
 // it is called for one try at a time, and after a success for no other).
 func (n *Node) request(proto string, body []byte, chunks int, accept func(chunks []chunk) error) error {
+	ctx, cancel := context.WithTimeout(n.ctx, requestDeadline)
+	defer cancel()
 	// Right after start (blsync asks for the bootstrap first) there may be no peer yet.
 	cands := n.candidates(proto)
-	for wait := 0; len(cands) == 0 && wait < 20; wait++ {
+	for len(cands) == 0 {
 		select {
-		case <-n.ctx.Done():
-			return n.ctx.Err()
+		case <-ctx.Done():
+			return fmt.Errorf("no peer serves %s", proto)
 		case <-time.After(time.Second):
 		}
 		cands = n.candidates(proto)
 	}
-	if len(cands) == 0 {
-		return fmt.Errorf("no peer serves %s", proto)
-	}
-	ctx, cancel := context.WithTimeout(n.ctx, requestDeadline)
-	defer cancel()
 	var (
 		mu      stdsync.Mutex
 		done    bool
@@ -198,6 +197,7 @@ loop:
 		go func(id peer.ID) {
 			defer wg.Done()
 			defer func() { <-slots }()
+			defer recovered("request "+proto, nil)
 			res, err := n.requestPeer(ctx, id, proto, body, chunks)
 			mu.Lock()
 			defer mu.Unlock()
@@ -226,6 +226,15 @@ loop:
 	return lastErr
 }
 
+// maxResponseSize is the size limit of a light client protocol's response chunks.
+func maxResponseSize(proto string) int {
+	switch proto {
+	case protoLCUpdates, protoLCBootstrap:
+		return maxUpdateSize
+	}
+	return maxGossipSize
+}
+
 // requestPeer sends one request to a peer and returns the response chunks (up to chunks).
 func (n *Node) requestPeer(ctx context.Context, id peer.ID, proto string, body []byte, chunks int) ([]chunk, error) {
 	ctx, cancel := context.WithTimeout(ctx, tryTimeout+time.Duration(chunks)*perChunkTime)
@@ -249,7 +258,7 @@ func (n *Node) requestPeer(ctx context.Context, id peer.ID, proto string, body [
 	r := bufio.NewReader(s)
 	var res []chunk
 	for len(res) < chunks {
-		context, ssz, err := readResponse(r, 4)
+		context, ssz, err := readResponse(r, 4, maxResponseSize(proto))
 		if err == io.EOF && len(res) > 0 {
 			break
 		}

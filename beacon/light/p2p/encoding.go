@@ -31,7 +31,16 @@ import (
 // with the SSZ length followed by the SSZ bytes in the snappy framing format; gossip
 // messages are the SSZ bytes in the snappy block format.
 
-const maxChunkSize = 10 << 20 // MAX_PAYLOAD_SIZE
+// Size limits of the payloads this node reads (their SSZ length). The spec allows any
+// payload up to MAX_PAYLOAD_SIZE (10 MiB); these are the sizes of the types read, with room
+// to spare, so a peer can't make the node allocate or decompress more than they need.
+const (
+	maxStatusSize = 92       // StatusV2 (StatusV1: 84)
+	maxPingSize   = 8        // ping, goodbye
+	maxErrorSize  = 256      // ErrorMessage
+	maxUpdateSize = 64 << 10 // LightClientUpdate, LightClientBootstrap (~27 KB)
+	maxGossipSize = 8 << 10  // LightClientOptimisticUpdate and FinalityUpdate (~1 and ~2 KB)
+)
 
 var (
 	domainValidSnappy   = [4]byte{0x01, 0x00, 0x00, 0x00}
@@ -52,20 +61,29 @@ func writeSSZ(w io.Writer, ssz []byte) error {
 	return sw.Close()
 }
 
-// readSSZ reads one ssz_snappy payload from r.
-func readSSZ(r *bufio.Reader) ([]byte, error) {
+// readSSZ reads one ssz_snappy payload of at most max bytes from r, reading no more of
+// the framed snappy data than a payload of its size takes.
+func readSSZ(r *bufio.Reader, max int) ([]byte, error) {
 	size, err := binary.ReadUvarint(r)
 	if err != nil {
 		return nil, err
 	}
-	if size > maxChunkSize {
+	if size > uint64(max) {
 		return nil, fmt.Errorf("payload too large: %d", size)
 	}
 	buf := make([]byte, size)
-	if _, err := io.ReadFull(snappy.NewReader(r), buf); err != nil {
+	if _, err := io.ReadFull(snappy.NewReader(io.LimitReader(r, maxFramedSize(int(size)))), buf); err != nil {
 		return nil, fmt.Errorf("snappy: %v", err)
 	}
 	return buf, nil
+}
+
+// maxFramedSize is the most bytes n bytes take in the snappy framing format: the stream
+// identifier, and for each chunk of up to 64 KiB a header, a checksum and the data, as
+// compressed by snappy at worst (snappy.MaxEncodedLen: 32 + n + n/6).
+func maxFramedSize(n int) int64 {
+	chunks := n/65536 + 1
+	return int64(10 + chunks*(8+32) + n + n/6)
 }
 
 // writeResponse writes a successful response chunk, with context bytes if given.
@@ -82,14 +100,15 @@ func writeResponse(w io.Writer, context []byte, ssz []byte) error {
 }
 
 // readResponse reads a response chunk: result code, context bytes (contextLen of them),
-// payload. A non-zero result code is returned as an error with the error message.
-func readResponse(r *bufio.Reader, contextLen int) (context []byte, ssz []byte, err error) {
+// payload (at most max bytes). A non-zero result code is returned as an error with the
+// error message.
+func readResponse(r *bufio.Reader, contextLen int, max int) (context []byte, ssz []byte, err error) {
 	code, err := r.ReadByte()
 	if err != nil {
 		return nil, nil, err
 	}
 	if code != 0 {
-		msg, _ := readSSZ(r)
+		msg, _ := readSSZ(r, maxErrorSize)
 		return nil, nil, fmt.Errorf("response code %d: %q", code, msg)
 	}
 	if contextLen > 0 {
@@ -98,17 +117,18 @@ func readResponse(r *bufio.Reader, contextLen int) (context []byte, ssz []byte, 
 			return nil, nil, err
 		}
 	}
-	ssz, err = readSSZ(r)
+	ssz, err = readSSZ(r, max)
 	return context, ssz, err
 }
 
-// decodeGossip decompresses a gossip message.
+// decodeGossip decompresses a gossip message (a light client update: at most
+// maxGossipSize bytes).
 func decodeGossip(data []byte) ([]byte, error) {
 	n, err := snappy.DecodedLen(data)
 	if err != nil {
 		return nil, err
 	}
-	if n > maxChunkSize {
+	if n > maxGossipSize {
 		return nil, errors.New("gossip message too large")
 	}
 	return snappy.Decode(nil, data)
@@ -116,7 +136,8 @@ func decodeGossip(data []byte) ([]byte, error) {
 
 // gossipMessageID is the Altair+ message-id: the first 20 bytes of
 // SHA256(domain + uint64_le(len(topic)) + topic + data), with the decompressed data if
-// it decompresses.
+// it decompresses (a message too large to be a light client update counts as not
+// decompressing: it is rejected anyway).
 func gossipMessageID(topic string, data []byte) string {
 	h := sha256.New()
 	if dec, err := decodeGossip(data); err == nil {

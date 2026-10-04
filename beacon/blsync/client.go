@@ -171,8 +171,11 @@ func (c *Client) startP2P() error {
 	if err != nil {
 		return err
 	}
-	c.scheduler.RegisterServer(request.NewServer(p2p.NewServer(node), &mclock.System{}))
+	server := request.NewServer(p2p.NewServer(node), &mclock.System{})
+	c.scheduler.RegisterServer(server)
 	if err := node.Start(); err != nil {
+		c.scheduler.UnregisterServer(server)
+		node.Stop()
 		return err
 	}
 	c.p2pNode = node

@@ -28,6 +28,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -53,7 +55,9 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	"github.com/libp2p/go-libp2p/p2p/muxer/yamux"
+	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	quic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
@@ -104,6 +108,7 @@ type Node struct {
 	key   *ecdsa.PrivateKey
 	host  host.Host
 	disc  *discover.UDPv5
+	db    *enode.DB
 	local *enode.LocalNode
 	ps    *pubsub.PubSub
 	bw    *metrics.BandwidthCounter
@@ -162,6 +167,20 @@ func New(cfg Config) (*Node, error) {
 	if cfg.ListenPort != 0 {
 		quicPort = cfg.ListenPort + 1
 	}
+	// libp2p's default limits scale with the machine (an eighth of its memory, half of the
+	// file descriptor limit); in geth's process this node gets a small fixed budget, and
+	// the connection manager trims connections to the peer target.
+	limits := rcmgr.DefaultLimits
+	libp2p.SetDefaultServiceLimits(&limits)
+	rm, err := rcmgr.NewResourceManager(rcmgr.NewFixedLimiter(limits.Scale(128<<20, 512)))
+	if err != nil {
+		return nil, err
+	}
+	cm, err := connmgr.NewConnManager(cfg.TargetPeers, cfg.TargetPeers+cfg.TargetPeers/2+1, connmgr.WithGracePeriod(time.Minute))
+	if err != nil {
+		rm.Close()
+		return nil, err
+	}
 	// QUIC as well as TCP: the consensus p2p spec prefers it, and it multiplexes by itself.
 	// Over TCP both muxers: yamux, and mplex (outside go-libp2p proper), which some clients
 	// (Lodestar) require.
@@ -173,27 +192,51 @@ func New(cfg Config) (*Node, error) {
 		libp2p.Security(noise.ID, noise.New),
 		libp2p.Muxer(yamux.ID, yamux.DefaultTransport),
 		libp2p.Muxer(mplex.ID, mplex.DefaultTransport), // some clients (Lodestar) only speak mplex over TCP
+		libp2p.ResourceManager(rm),
+		libp2p.ConnectionManager(cm),
+		libp2p.DisableMetrics(), // not into the process-wide Prometheus registry
 		libp2p.BandwidthReporter(bw),
 		libp2p.DisableRelay(),
 		libp2p.UserAgent("geth-blsync/p2p"),
 	)
 	if err != nil {
+		cm.Close()
+		rm.Close()
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{cfg: cfg, key: key, host: h, bw: bw, sched: sched, forkByDigest: forkByDigest,
 		subs: make(map[[4]byte]*digestSubs), dialing: make(map[peer.ID]bool), ctx: ctx, cancel: cancel}
 	n.callbacks.Store(&callbacks{optimistic: cfg.OnOptimisticUpdate, finality: cfg.OnFinalityUpdate})
-	for _, p := range []string{protoStatus1, protoStatus2} {
-		h.SetStreamHandler(protocol.ID(p), n.handleStatus)
+	handlers := map[string]network.StreamHandler{
+		protoStatus1:      n.handleStatus,
+		protoStatus2:      n.handleStatus,
+		protoPing:         n.handlePing,
+		protoMetadata2:    n.handleMetadata,
+		protoMetadata3:    n.handleMetadata,
+		protoGoodbye:      n.handleGoodbye,
+		protoLCOptimistic: func(s network.Stream) { n.serveLatest(s, &n.optimistic) },
+		protoLCFinality:   func(s network.Stream) { n.serveLatest(s, &n.finality) },
 	}
-	h.SetStreamHandler(protoPing, n.handlePing)
-	h.SetStreamHandler(protoMetadata2, n.handleMetadata)
-	h.SetStreamHandler(protoMetadata3, n.handleMetadata)
-	h.SetStreamHandler(protoGoodbye, n.handleGoodbye)
-	h.SetStreamHandler(protoLCOptimistic, func(s network.Stream) { n.serveLatest(s, &n.optimistic) })
-	h.SetStreamHandler(protoLCFinality, func(s network.Stream) { n.serveLatest(s, &n.finality) })
+	for p, handler := range handlers {
+		h.SetStreamHandler(protocol.ID(p), func(s network.Stream) {
+			defer recovered("stream handler "+p, func() { s.Reset() })
+			handler(s)
+		})
+	}
 	return n, nil
+}
+
+// recovered recovers from a panic in code that handles peers' input, logs it and calls
+// fail. Neither libp2p nor gossipsub recovers panics in handlers and validators, and the
+// node runs in geth's process: a bug there should cost the peer, not the process.
+func recovered(what string, fail func()) {
+	if r := recover(); r != nil {
+		log.Error("Panic in the consensus p2p light client", "in", what, "err", r, "stack", string(debug.Stack()))
+		if fail != nil {
+			fail()
+		}
+	}
 }
 
 // callbacks are the receivers of the node's light client updates and request results.
@@ -220,11 +263,11 @@ func (n *Node) Start() error {
 	if err != nil {
 		return err
 	}
-	db, err := enode.OpenDB("")
-	if err != nil {
+	if n.db, err = enode.OpenDB(""); err != nil {
+		conn.Close()
 		return err
 	}
-	n.local = enode.NewLocalNode(db, n.key)
+	n.local = enode.NewLocalNode(n.db, n.key)
 	n.local.Set(enr.TCP(port))
 	if quicPort != 0 {
 		n.local.Set(enr.WithEntry("quic", uint16(quicPort)))
@@ -235,19 +278,34 @@ func (n *Node) Start() error {
 	if n.cfg.VerifyHeader != nil { // only a node that verifies updates keeps any to serve
 		n.local.Set(enr.WithEntry(enrLightClientKey, []byte{0x01}))
 	}
+	// The consensus specs' gossipsub parameters. Peers are scored by the messages that
+	// break the rules (invalid ones, which no honest peer sends: see check), so that a peer
+	// sending them is soon ignored. Remote subscriptions are tracked for the light client
+	// topics of the network's digests only.
+	gsp := pubsub.DefaultGossipSubParams()
+	gsp.D, gsp.Dlo, gsp.Dhi, gsp.Dlazy = 8, 6, 12, 6
+	gsp.HeartbeatInterval = 700 * time.Millisecond
+	gsp.FanoutTTL = time.Minute
+	gsp.HistoryLength, gsp.HistoryGossip = 6, 3
 	n.ps, err = pubsub.NewGossipSub(n.ctx, n.host,
+		pubsub.WithGossipSubParams(gsp),
+		pubsub.WithSeenMessagesTTL(2*params.EpochLength*12*time.Second),
 		pubsub.WithMessageIdFn(func(m *pb.Message) string { return gossipMessageID(m.GetTopic(), m.Data) }),
 		pubsub.WithMessageSignaturePolicy(pubsub.StrictNoSign),
 		pubsub.WithNoAuthor(),
 		pubsub.WithPeerOutboundQueueSize(256),
 		pubsub.WithValidateQueueSize(256),
+		pubsub.WithPeerScore(newPeerScoreParams(), peerScoreThresholds),
+		pubsub.WithSubscriptionFilter(pubsub.NewRegexpSubscriptionFilter(topicsRegexp(n.sched))),
 	)
 	if err != nil {
+		conn.Close()
 		return err
 	}
 	n.reconcile(epochAt(n.cfg.Chain.GenesisTime, time.Now())) // digest, ENR, topics
 	n.disc, err = discover.ListenV5(conn, n.local, discover.Config{PrivateKey: n.key, Bootnodes: n.cfg.Bootnodes})
 	if err != nil {
+		conn.Close()
 		return err
 	}
 	log.Info("Consensus p2p light client listening", "addr", fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", port, n.host.ID()))
@@ -303,6 +361,9 @@ func (n *Node) Stop() {
 	}
 	n.host.Close()
 	n.wg.Wait()
+	if n.db != nil {
+		n.db.Close()
+	}
 }
 
 // Peers returns the number of connected peers.
@@ -416,8 +477,11 @@ func (n *Node) dial(nd *enode.Node) {
 	if a, err := ma.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/%d", nd.IP(), nd.TCP())); err == nil {
 		addrs = append(addrs, a)
 	}
+	n.wg.Add(1)
 	go func() {
+		defer n.wg.Done()
 		defer func() { n.mu.Lock(); delete(n.dialing, id); n.mu.Unlock() }()
+		defer recovered("dial", func() { n.host.Network().ClosePeer(id) })
 		ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
 		defer cancel()
 		if err := n.host.Connect(ctx, peer.AddrInfo{ID: id, Addrs: addrs}); err != nil {
@@ -466,7 +530,7 @@ func (n *Node) exchangeStatus(id peer.ID) error {
 		return err
 	}
 	s.CloseWrite()
-	_, resp, err := readResponse(bufio.NewReader(s), 0)
+	_, resp, err := readResponse(bufio.NewReader(s), 0, maxStatusSize)
 	if err != nil {
 		return err
 	}
@@ -485,7 +549,7 @@ func (n *Node) exchangeStatus(id peer.ID) error {
 func (n *Node) handleStatus(s network.Stream) {
 	defer s.Close()
 	s.SetDeadline(time.Now().Add(respTimeout))
-	if _, err := readSSZ(bufio.NewReader(s)); err != nil {
+	if _, err := readSSZ(bufio.NewReader(s), maxStatusSize); err != nil {
 		s.Reset()
 		return
 	}
@@ -495,7 +559,7 @@ func (n *Node) handleStatus(s network.Stream) {
 func (n *Node) handlePing(s network.Stream) {
 	defer s.Close()
 	s.SetDeadline(time.Now().Add(respTimeout))
-	if _, err := readSSZ(bufio.NewReader(s)); err != nil {
+	if _, err := readSSZ(bufio.NewReader(s), maxPingSize); err != nil {
 		s.Reset()
 		return
 	}
@@ -518,7 +582,8 @@ func (n *Node) handleMetadata(s network.Stream) {
 
 func (n *Node) handleGoodbye(s network.Stream) {
 	defer s.Close()
-	if b, err := readSSZ(bufio.NewReader(s)); err == nil && len(b) == 8 {
+	s.SetDeadline(time.Now().Add(respTimeout))
+	if b, err := readSSZ(bufio.NewReader(s), maxPingSize); err == nil && len(b) == 8 {
 		log.Debug("Peer said goodbye", "peer", s.Conn().RemotePeer(), "reason", binary.LittleEndian.Uint64(b))
 	}
 }
@@ -530,6 +595,45 @@ type digestSubs struct {
 }
 
 var lightClientTopics = []string{"light_client_optimistic_update", "light_client_finality_update"}
+
+// topicsRegexp matches the light client topics of a network's digests.
+func topicsRegexp(sched []forkDigest) *regexp.Regexp {
+	digests := make([]string, len(sched))
+	for i, fd := range sched {
+		digests[i] = fmt.Sprintf("%x", fd.digest)
+	}
+	return regexp.MustCompile(fmt.Sprintf("^/eth2/(%s)/(%s)/ssz_snappy$", strings.Join(digests, "|"), strings.Join(lightClientTopics, "|")))
+}
+
+// Peer scoring counts only the messages that break the gossip rules for certain (the
+// rejected ones, see check), which honest peers don't send: a peer sending about a dozen
+// within an hour is ignored (graylisted) until the count decays. Gossipsub adds each
+// joined topic's parameters to the node's PeerScoreParams (newPeerScoreParams).
+func newPeerScoreParams() *pubsub.PeerScoreParams {
+	return &pubsub.PeerScoreParams{
+		SkipAtomicValidation: true,
+		Topics:               make(map[string]*pubsub.TopicScoreParams),
+		AppSpecificScore:     func(peer.ID) float64 { return 0 },
+		DecayInterval:        12 * time.Second,
+		DecayToZero:          0.01,
+		RetainScore:          time.Hour,
+	}
+}
+
+var (
+	peerScoreThresholds = &pubsub.PeerScoreThresholds{
+		SkipAtomicValidation: true,
+		GossipThreshold:      -4000,
+		PublishThreshold:     -8000,
+		GraylistThreshold:    -16000,
+	}
+	topicScoreParams = &pubsub.TopicScoreParams{
+		SkipAtomicValidation:           true,
+		TopicWeight:                    1,
+		InvalidMessageDeliveriesWeight: -100,  // times the count squared: 13 reach the graylist
+		InvalidMessageDeliveriesDecay:  0.997, // per slot: the count halves in about 45 minutes
+	}
+)
 
 // subscribeDigest subscribes to the light client update topics of a digest; messages on
 // them are decoded with that digest's fork.
@@ -544,13 +648,17 @@ func (n *Node) subscribeDigest(d [4]byte) (*digestSubs, error) {
 		topic := fmt.Sprintf("/eth2/%x/%s/ssz_snappy", d[:], name)
 		// Updates that pass the gossip rules (check) are forwarded and handed to blsync,
 		// which checks them again.
-		if err := n.ps.RegisterTopicValidator(topic, func(_ context.Context, from peer.ID, m *pubsub.Message) pubsub.ValidationResult {
+		if err := n.ps.RegisterTopicValidator(topic, func(_ context.Context, from peer.ID, m *pubsub.Message) (res pubsub.ValidationResult) {
+			defer recovered("gossip validator", func() { res = pubsub.ValidationIgnore })
+			if !decodable(fork) {
+				return pubsub.ValidationIgnore // not the peer's fault
+			}
 			ssz, err := decodeGossip(m.Data)
 			if err != nil {
 				return pubsub.ValidationReject
 			}
 			n.received.Add(int64(len(m.Data)))
-			res, err := handle(m.ReceivedFrom, fork, d, ssz)
+			res, err = handle(m.ReceivedFrom, fork, d, ssz)
 			if err != nil {
 				log.Debug("Bad light client update", "topic", topic, "peer", m.ReceivedFrom, "err", err)
 			}
@@ -563,6 +671,11 @@ func (n *Node) subscribeDigest(d [4]byte) (*digestSubs, error) {
 			return nil, err
 		}
 		t, err := n.ps.Join(topic)
+		if err == nil {
+			if err = t.SetScoreParams(topicScoreParams); err != nil {
+				t.Close()
+			}
+		}
 		if err != nil {
 			n.ps.UnregisterTopicValidator(topic)
 			n.unsubscribe(ds)

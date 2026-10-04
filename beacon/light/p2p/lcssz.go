@@ -50,7 +50,13 @@ func finalityBranchDepth(fork string) int {
 	}
 }
 
-// supportedFork reports whether the light client messages of a fork are decoded here.
+// decodable reports whether the light client messages of a fork are decoded here.
+func decodable(fork string) bool {
+	return fork == "gloas" || supportedFork(fork)
+}
+
+// supportedFork reports whether the light client messages of a fork are decoded with the
+// Deneb layout of the light client header.
 func supportedFork(fork string) bool {
 	switch fork {
 	case "deneb", "electra", "fulu":
