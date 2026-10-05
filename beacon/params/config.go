@@ -50,8 +50,10 @@ type ClientConfig struct {
 	P2PBlocks    bool     // leave fetching execution blocks to the execution client (by hash)
 	P2P          bool     // follow the consensus layer's libp2p network as a light client
 	P2PPort      int      // its TCP (libp2p) and UDP (discv5) port
+	P2PPeers     int      // peers to keep
 	P2PBootnodes []string // consensus discv5 bootnodes (ENRs); default: built in for mainnet
 	P2PDigest    []byte   // fork digest override (4 bytes); default: computed
+	P2PKeyFile   string   // node key file, keeping the node's identity; random key if empty
 
 	ChainConfigFile string // the beacon chain config file of a custom network (--beacon.config)
 }

@@ -381,13 +381,19 @@ var (
 	}
 	BeaconP2PFlag = &cli.BoolFlag{
 		Name:     "beacon.p2p",
-		Usage:    "Get light client data from the consensus layer's libp2p network (with or instead of --beacon.api)",
+		Usage:    "Get light client data from the consensus layer's libp2p network (with --beacon.api, or instead of it with --beacon.p2pblocks)",
 		Category: flags.BeaconCategory,
 	}
 	BeaconP2PPortFlag = &cli.IntFlag{
 		Name:     "beacon.p2p.port",
 		Usage:    "TCP and UDP port of the consensus layer light client (--beacon.p2p)",
 		Value:    9000,
+		Category: flags.BeaconCategory,
+	}
+	BeaconP2PPeersFlag = &cli.IntFlag{
+		Name:     "beacon.p2p.peers",
+		Usage:    "Number of consensus layer peers to keep (--beacon.p2p)",
+		Value:    10,
 		Category: flags.BeaconCategory,
 	}
 	BeaconP2PBootnodesFlag = &cli.StringSliceFlag{
@@ -2231,7 +2237,11 @@ func MakeBeaconLightConfig(ctx *cli.Context) bparams.ClientConfig {
 	config.NoFilter = ctx.Bool(BeaconNoFilterFlag.Name)
 	config.P2PBlocks = ctx.Bool(BeaconP2PBlocksFlag.Name)
 	config.P2P = ctx.Bool(BeaconP2PFlag.Name)
+	if config.P2P && config.Apis == nil && !config.P2PBlocks {
+		Fatalf("--%s without --%s needs --%s (the execution client then fetches the blocks)", BeaconP2PFlag.Name, BeaconApiFlag.Name, BeaconP2PBlocksFlag.Name)
+	}
 	config.P2PPort = ctx.Int(BeaconP2PPortFlag.Name)
+	config.P2PPeers = ctx.Int(BeaconP2PPeersFlag.Name)
 	config.P2PBootnodes = ctx.StringSlice(BeaconP2PBootnodesFlag.Name)
 	if s := ctx.String(BeaconP2PDigestFlag.Name); s != "" {
 		d, err := hexutil.Decode(s)

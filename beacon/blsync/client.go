@@ -17,6 +17,7 @@
 package blsync
 
 import (
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"os"
@@ -156,9 +157,19 @@ func (c *Client) startP2P() error {
 	} else if !known {
 		return errors.New("--beacon.p2p: unknown network, its blob schedule is needed for the fork digest (--beacon.config, or --beacon.p2p.forkdigest)")
 	}
+	var key *ecdsa.PrivateKey
+	if c.config.P2PKeyFile != "" {
+		var err error
+		if key, err = p2p.LoadOrCreateKey(c.config.P2PKeyFile); err != nil {
+			return fmt.Errorf("--beacon.p2p node key: %v", err)
+		}
+	}
 	node, err := p2p.New(p2p.Config{
+		PrivateKey:     key,
 		Bootnodes:      boot,
 		ListenPort:     c.config.P2PPort,
+		TargetPeers:    c.config.P2PPeers,
+		MinSigners:     c.config.Threshold,
 		Chain:          &c.config.ChainConfig,
 		Network:        network,
 		DigestOverride: override,
@@ -171,8 +182,11 @@ func (c *Client) startP2P() error {
 	if err != nil {
 		return err
 	}
-	c.scheduler.RegisterServer(request.NewServer(p2p.NewServer(node), &mclock.System{}))
+	server := request.NewServer(p2p.NewServer(node), &mclock.System{})
+	c.scheduler.RegisterServer(server)
 	if err := node.Start(); err != nil {
+		c.scheduler.UnregisterServer(server)
+		node.Stop()
 		return err
 	}
 	c.p2pNode = node

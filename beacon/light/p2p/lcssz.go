@@ -50,7 +50,13 @@ func finalityBranchDepth(fork string) int {
 	}
 }
 
-// supportedFork reports whether the light client messages of a fork are decoded here.
+// decodable reports whether the light client messages of a fork are decoded here.
+func decodable(fork string) bool {
+	return fork == "gloas" || supportedFork(fork)
+}
+
+// supportedFork reports whether the light client messages of a fork are decoded with the
+// Deneb layout of the light client header.
 func supportedFork(fork string) bool {
 	switch fork {
 	case "deneb", "electra", "fulu":
@@ -145,7 +151,7 @@ func DecodeFinalityUpdate(fork string, b []byte) (types.FinalityUpdate, error) {
 		return types.FinalityUpdate{}, errShort
 	}
 	offA, offF := binary.LittleEndian.Uint32(b[0:4]), binary.LittleEndian.Uint32(b[4:8])
-	if int(offA) != fixed || offF < offA || int(offF) > len(b) {
+	if int(offA) != fixed || offF < offA || uint64(offF) > uint64(len(b)) {
 		return types.FinalityUpdate{}, fmt.Errorf("ssz: bad offsets %d, %d", offA, offF)
 	}
 	attested, err := decodeLCHeader(b[offA:offF])
@@ -166,9 +172,6 @@ func DecodeFinalityUpdate(fork string, b []byte) (types.FinalityUpdate, error) {
 		SignatureSlot:  binary.LittleEndian.Uint64(b[p+syncAggregateSize : fixed]),
 	}, nil
 }
-
-// execHash returns the execution block hash proven by a header, or zero.
-func execHash(h types.HeaderWithExecProof) common.Hash { return h.BlockHash() }
 
 // committeeBranchDepth is the depth of the (next) sync committee proof in a fork's state.
 func committeeBranchDepth(fork string) int {
@@ -203,7 +206,7 @@ func DecodeUpdate(fork string, b []byte) (*types.LightClientUpdate, *types.Seria
 		return nil, nil, errShort
 	}
 	offA, offF := binary.LittleEndian.Uint32(b[0:4]), binary.LittleEndian.Uint32(b[pOffFin:pFBranch])
-	if int(offA) != fixed || offF < offA || int(offF) > len(b) {
+	if int(offA) != fixed || offF < offA || uint64(offF) > uint64(len(b)) {
 		return nil, nil, fmt.Errorf("ssz: bad offsets %d, %d", offA, offF)
 	}
 	attested, err := decodeLCHeader(b[offA:offF])
