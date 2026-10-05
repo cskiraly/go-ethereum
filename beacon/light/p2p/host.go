@@ -70,6 +70,7 @@ const (
 	protoStatus2   = protoPrefix + "status/2/ssz_snappy"
 	protoPing      = protoPrefix + "ping/1/ssz_snappy"
 	protoMetadata2 = protoPrefix + "metadata/2/ssz_snappy"
+	protoMetadata3 = protoPrefix + "metadata/3/ssz_snappy"
 	protoGoodbye   = protoPrefix + "goodbye/1/ssz_snappy"
 
 	respTimeout = 10 * time.Second
@@ -222,6 +223,7 @@ func New(cfg Config) (*Node, error) {
 		protoStatus2:      n.handleStatus,
 		protoPing:         n.handlePing,
 		protoMetadata2:    n.handleMetadata,
+		protoMetadata3:    n.handleMetadata,
 		protoGoodbye:      n.handleGoodbye,
 		protoLCOptimistic: func(s network.Stream) { n.serveLatest(s, &n.optimistic) },
 		protoLCFinality:   func(s network.Stream) { n.serveLatest(s, &n.finality) },
@@ -283,6 +285,8 @@ func (n *Node) Start() error {
 	n.local.Set(enr.UDP(conn.LocalAddr().(*net.UDPAddr).Port))
 	n.local.Set(enr.WithEntry("attnets", make([]byte, 8)))
 	n.local.Set(enr.WithEntry("syncnets", make([]byte, 1)))
+	// No custody (see handleMetadata).
+	n.local.Set(enr.WithEntry("cgc", uint64(0)))
 	if n.cfg.VerifyHeader != nil { // only a node that verifies updates keeps any to serve
 		n.local.Set(enr.WithEntry(enrLightClientKey, []byte{0x01}))
 	}
@@ -317,8 +321,9 @@ func (n *Node) Start() error {
 		return err
 	}
 	log.Info("Consensus p2p light client listening", "addr", fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", port, n.host.ID()))
-	n.wg.Add(3)
+	n.wg.Add(4)
 	go n.dialLoop()
+	go n.bootnodeLoop()
 	go n.statsLoop()
 	go n.forkLoop()
 	return nil
@@ -425,22 +430,12 @@ func (n *Node) dialLoop() {
 	defer it.Close()
 	go func() { <-n.ctx.Done(); it.Close() }() // unblocks it.Next on Stop
 
-	usable := func(nd *enode.Node) bool {
-		eth2 := nodeEth2(nd)
-		return eth2 != nil && nd.TCP() != 0 && nd.IP() != nil && n.acceptsDigest([4]byte(eth2[:4]))
-	}
-	// On a small network, random lookups may never return the bootnodes themselves.
-	for _, nd := range n.cfg.Bootnodes {
-		if usable(nd) {
-			n.dial(nd)
-		}
-	}
 	for it.Next() {
 		if n.ctx.Err() != nil {
 			return
 		}
 		nd := it.Node()
-		if !usable(nd) {
+		if !n.usable(nd) {
 			continue
 		}
 		for !n.canDial() {
@@ -456,6 +451,39 @@ func (n *Node) dialLoop() {
 
 // dialInterval is the pace of dialing above half the peer target.
 const dialInterval = 10 * time.Second
+
+// usable reports whether a discovered node can be a peer: a consensus node with a TCP
+// address, on a digest the node accepts.
+func (n *Node) usable(nd *enode.Node) bool {
+	eth2 := nodeEth2(nd)
+	return eth2 != nil && nd.TCP() != 0 && nd.IP() != nil && n.acceptsDigest([4]byte(eth2[:4]))
+}
+
+// bootnodeLoop dials the bootnodes at start, and again every half minute while the node is
+// short of peers: on a small network random lookups may never return the bootnodes, and
+// they may be all the nodes there are.
+func (n *Node) bootnodeLoop() {
+	defer n.wg.Done()
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		for _, nd := range n.cfg.Bootnodes {
+			if n.usable(nd) {
+				n.dial(nd)
+			}
+		}
+		for {
+			select {
+			case <-n.ctx.Done():
+				return
+			case <-t.C:
+			}
+			if n.Peers() < n.cfg.TargetPeers/2 {
+				break
+			}
+		}
+	}
+}
 
 // canDial reports whether to dial another node. Below half the peer target, up to the
 // target's number of dials run at a time; above it, one every dialInterval: most nodes
@@ -511,7 +539,9 @@ func (n *Node) dropNonServing() bool {
 // maxBackoff bounds the peers kept from being dialed.
 const maxBackoff = 10000
 
-// avoid keeps a peer from being dialed for a while.
+// avoid keeps a peer from being dialed for a while, unless the node is short of peers
+// (below half its target): on a small network, a devnet say, the few nodes that turned it
+// away may be all there are.
 func (n *Node) avoid(id peer.ID, d time.Duration) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -541,8 +571,9 @@ func (n *Node) dial(nd *enode.Node) {
 	if err != nil || n.host.Network().Connectedness(id) == network.Connected {
 		return
 	}
+	short := n.Peers() < n.cfg.TargetPeers/2
 	n.mu.Lock()
-	if n.dialing[id] || time.Now().Before(n.backoff[id]) {
+	if n.dialing[id] || (!short && time.Now().Before(n.backoff[id])) {
 		n.mu.Unlock()
 		return
 	}
@@ -665,17 +696,19 @@ func (n *Node) handlePing(s network.Stream) {
 	writeResponse(s, nil, seq[:])
 }
 
-// handleMetadata answers metadata in version 2 (seq_number, attnets, syncnets), without
-// the custody group count Fulu added in version 3, and the ENR has no `cgc` either: the
-// node custodies no data columns, and a count below CUSTODY_REQUIREMENT gets it rejected
-// (Lighthouse bans it as faulty for 12 hours), so it makes no claim. Peers then assume
-// their default: Lighthouse asks for version 3, 2 or 1; Prysm and Nimbus fall back to
-// CUSTODY_REQUIREMENT.
+// handleMetadata answers metadata: seq_number, attnets, syncnets, and from version 3 the
+// custody group count, 0 (as the ENR's `cgc`): the node custodies no data columns. The
+// Fulu spec lets peers reject a count below CUSTODY_REQUIREMENT; Lighthouse does, banning
+// the node for 12 hours, while Prysm, Nimbus and Lodestar keep it. Not answering version
+// 3 is worse: Nimbus and Lodestar drop a peer whose metadata they can't get.
 func (n *Node) handleMetadata(s network.Stream) {
 	defer s.Close()
 	s.SetDeadline(time.Now().Add(respTimeout))
-	md := make([]byte, 17)
+	md := make([]byte, 17, 25)
 	binary.LittleEndian.PutUint64(md[0:8], 1)
+	if s.Protocol() == protoMetadata3 {
+		md = md[:25] // custody_group_count 0
+	}
 	writeResponse(s, nil, md)
 }
 
@@ -933,11 +966,12 @@ func (n *Node) onFinality(from peer.ID, fork string, digest [4]byte, ssz []byte)
 
 // gossipState is what the gossip rules of a light client update topic remember.
 type gossipState struct {
-	forwarded uint64       // key of the last update forwarded
-	header    types.Header // the header of that key (status)
-	super     bool         // that update had a sync committee supermajority
-	pending   uint64       // key of the last update handed on unverified
-	served    servedUpdate // the last update forwarded, served on request
+	forwarded      uint64       // key of the last update forwarded
+	super          bool         // that update had a sync committee supermajority
+	served         servedUpdate // the last update forwarded, served on request
+	delivered      uint64       // key of the last update handed on
+	deliveredSuper bool         // that update had a sync committee supermajority
+	header         types.Header // the header of the last verified update handed on (status)
 }
 
 // maxClockDisparity is MAXIMUM_GOSSIP_CLOCK_DISPARITY.
@@ -952,26 +986,29 @@ var (
 // light client p2p interface) to an update whose slots and Merkle proofs are valid; a
 // light client checks the sync committee signature where a full node compares the update
 // with the one it computed:
-//   - it is received no earlier than a third into its signature slot;
+//   - it has the signers blsync requires (MinSigners), and the sync committee signed it;
 //   - it is newer than the last update forwarded: its key (the attested slot of an
 //     optimistic update, the finalized slot of a finality update) is greater, or equal
 //     with a sync committee supermajority (super) that the last one hadn't;
-//   - it has the signers blsync requires (MinSigners), and the sync committee signed it.
+//   - it is received no earlier than the sync committee messages of its signature slot
+//     are due (syncMessageDue).
 //
-// Updates that fail are ignored (see onOptimistic).
-// An update that passes is forwarded, kept for serving and handed on (deliver). While the
-// committee of its period isn't known (blsync still syncing its committee chain, or no
-// committee chain at all), a new update is handed on once per key, unverified, and not
-// forwarded: blsync keeps it until it can verify it.
+// Updates that fail are ignored (see onOptimistic). An update that passes is forwarded and
+// kept for serving. Each new verified update is handed on (deliver) whether or not it is
+// forwarded yet: the timing rule is about forwarding. While the committee of its period
+// isn't known (blsync still syncing its committee chain, or no committee chain at all), a
+// new update is handed on unverified and not forwarded: blsync keeps it until it can
+// verify it.
 func (n *Node) check(st *gossipState, head types.SignedHeader, header types.Header, super bool, u servedUpdate) (res pubsub.ValidationResult, deliver bool, err error) {
-	key := header.Slot
-	due := time.Unix(int64(n.cfg.GenesisTime+head.SignatureSlot*12), 0).Add(4*time.Second - maxClockDisparity)
-	if time.Now().Before(due) || head.Signature.SignerCount() < n.cfg.MinSigners {
+	if head.Signature.SignerCount() < n.cfg.MinSigners {
 		return pubsub.ValidationIgnore, false, nil
 	}
+	key := header.Slot
+	newer := func(last uint64, lastSuper bool) bool { return key > last || (key == last && super && !lastSuper) }
 	n.fwdMu.Lock()
 	defer n.fwdMu.Unlock()
-	if key < st.forwarded || (key == st.forwarded && (!super || st.super)) {
+	forward, deliver := newer(st.forwarded, st.super), newer(st.delivered, st.deliveredSuper)
+	if !forward && !deliver {
 		return pubsub.ValidationIgnore, false, nil
 	}
 	ok, err := false, errNoCommitteeChain
@@ -980,16 +1017,36 @@ func (n *Node) check(st *gossipState, head types.SignedHeader, header types.Head
 	}
 	switch {
 	case err != nil:
-		if key <= st.pending {
-			return pubsub.ValidationIgnore, false, nil
+		if deliver {
+			st.delivered, st.deliveredSuper = key, super
 		}
-		st.pending = key
-		return pubsub.ValidationIgnore, true, nil
+		return pubsub.ValidationIgnore, deliver, nil
 	case !ok:
 		return pubsub.ValidationIgnore, false, errBadSignature
 	}
-	st.forwarded, st.header, st.super, st.served = key, header, super, u
-	return pubsub.ValidationAccept, true, nil
+	if deliver {
+		st.delivered, st.deliveredSuper, st.header = key, super, header
+	}
+	due := time.Unix(int64(n.cfg.GenesisTime+head.SignatureSlot*12), 0).Add(n.syncMessageDue(head.SignatureSlot) - maxClockDisparity)
+	if !forward || time.Now().Before(due) {
+		return pubsub.ValidationIgnore, deliver, nil
+	}
+	st.forwarded, st.super, st.served = key, super, u
+	return pubsub.ValidationAccept, deliver, nil
+}
+
+// syncMessageDue is when the sync committee messages of a slot are due, from its start:
+// a third of the slot (SYNC_MESSAGE_DUE_BPS), from Gloas on a quarter
+// (SYNC_MESSAGE_DUE_BPS_GLOAS).
+func (n *Node) syncMessageDue(slot uint64) time.Duration {
+	if n.cfg.Chain != nil {
+		for _, f := range n.cfg.Chain.Forks {
+			if strings.EqualFold(f.Name, "gloas") && f.Epoch <= slot/params.EpochLength {
+				return 3 * time.Second
+			}
+		}
+	}
+	return 4 * time.Second
 }
 
 // ENR key advertising which light client data this node serves over req/resp: a bitfield,

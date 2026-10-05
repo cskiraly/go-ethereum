@@ -166,9 +166,9 @@ func TestLoadOrCreateKey(t *testing.T) {
 	}
 }
 
-// TestTwoNodes connects two nodes on localhost: the status exchange, the metadata (version
-// 2 only: no custody claim, see handleMetadata) and the serving peer count (nodes like
-// these serve no updates by range).
+// TestTwoNodes connects two nodes on localhost: the status exchange, the metadata (custody
+// 0, see handleMetadata) and the serving peer count (nodes like these serve no updates by
+// range).
 func TestTwoNodes(t *testing.T) {
 	cfg := params.MainnetLightConfig
 	start := func() *Node {
@@ -192,21 +192,18 @@ func TestTwoNodes(t *testing.T) {
 	if err := b.exchangeStatus(a.host.ID()); err != nil {
 		t.Fatal("status:", err)
 	}
-	if _, err := b.host.NewStream(ctx, a.host.ID(), protoPrefix+"metadata/3/ssz_snappy"); err == nil {
-		t.Fatal("metadata v3 served")
-	}
-	s, err := b.host.NewStream(ctx, a.host.ID(), protoPrefix+"metadata/3/ssz_snappy", protoMetadata2) // as Lighthouse asks
+	s, err := b.host.NewStream(ctx, a.host.ID(), protoMetadata3, protoMetadata2) // as Lighthouse asks
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.CloseWrite()
 	_, md, err := readResponse(bufio.NewReader(s), 0, 25)
-	if err != nil || len(md) != 17 || s.Protocol() != protoMetadata2 {
+	if err != nil || len(md) != 25 || s.Protocol() != protoMetadata3 || binary.LittleEndian.Uint64(md[17:]) != 0 {
 		t.Fatalf("metadata %x (%s), err %v", md, s.Protocol(), err)
 	}
-	var cgc uint64
-	if a.local.Node().Load(enr.WithEntry("cgc", &cgc)) == nil {
-		t.Fatal("ENR has a custody group count")
+	cgc := uint64(1)
+	if err := a.local.Node().Load(enr.WithEntry("cgc", &cgc)); err != nil || cgc != 0 {
+		t.Fatalf("ENR custody group count %d, err %v", cgc, err)
 	}
 	for { // identify runs after the connection
 		if protos, _ := b.host.Peerstore().GetProtocols(a.host.ID()); len(protos) > 0 {

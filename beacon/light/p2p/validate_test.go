@@ -239,11 +239,12 @@ func TestGossipRules(t *testing.T) {
 	if gt.nOpt != 1 || gt.optimistic.served.ssz != nil {
 		t.Fatalf("unverified update: handed on %d times (want 1), served %v", gt.nOpt, gt.optimistic.served.ssz != nil)
 	}
-	// Once verifiable: forwarded and handed on.
+	// Once verifiable: forwarded (it was handed on already).
 	gt.verify = func(types.SignedHeader) (bool, error) { return true, nil }
 	res, _ = gt.onOptimistic("", "fulu", digest, ssz)
 	expect(t, "verified", res, pubsub.ValidationAccept)
-	// A newer one signed in a slot not a third over yet: ignored.
+	// A newer one signed in a slot whose sync messages aren't due yet: handed on, not
+	// forwarded (the timing rule is about forwarding).
 	early := bytes.Clone(ssz)
 	now := uint64(time.Now().Unix()-int64(gt.cfg.GenesisTime)) / 12
 	binary.LittleEndian.PutUint64(early[optimisticFixedSize:], now+5)                                        // attested slot
@@ -252,5 +253,22 @@ func TestGossipRules(t *testing.T) {
 	expect(t, "early", res, pubsub.ValidationIgnore)
 	if gt.nOpt != 2 {
 		t.Fatalf("handed on %d optimistic updates, want 2", gt.nOpt)
+	}
+}
+
+// TestSyncMessageDue checks the time into a slot from which updates are forwarded: a third
+// of the slot, from Gloas on a quarter.
+func TestSyncMessageDue(t *testing.T) {
+	gt := newGossipTester()
+	if d := gt.syncMessageDue(100); d != 4*time.Second {
+		t.Fatalf("without a chain config: %v", d)
+	}
+	chain := new(params.ChainConfig)
+	chain.AddFork("FULU", 0, []byte{6, 0, 0, 0}).AddFork("GLOAS", 100, []byte{7, 0, 0, 0})
+	gt.cfg.Chain = chain
+	for slot, want := range map[uint64]time.Duration{100*params.EpochLength - 1: 4 * time.Second, 100 * params.EpochLength: 3 * time.Second} {
+		if d := gt.syncMessageDue(slot); d != want {
+			t.Errorf("slot %d: %v, want %v", slot, d, want)
+		}
 	}
 }
