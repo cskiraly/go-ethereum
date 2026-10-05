@@ -72,10 +72,10 @@ func TestCheckUpdate(t *testing.T) {
 	if agg := committee[len(committee)-params.BLSPubkeySize:]; !bytes.Equal(agg, want.Data.Committee.Aggregate) {
 		t.Fatalf("aggregate key %x, want %x", agg, want.Data.Committee.Aggregate)
 	}
-	if err := checkUpdate(u, 1873); err != nil {
+	if err := checkUpdate(params.MainnetLightConfig, u, 1873); err != nil {
 		t.Fatalf("valid update: %v", err)
 	}
-	if err := checkUpdate(u, 1874); err == nil {
+	if err := checkUpdate(params.MainnetLightConfig, u, 1874); err == nil {
 		t.Fatal("update accepted for another period")
 	}
 
@@ -86,7 +86,7 @@ func TestCheckUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := checkUpdate(u, 1873); err == nil {
+	if err := checkUpdate(params.MainnetLightConfig, u, 1873); err == nil {
 		t.Fatal("update with a forged next sync committee accepted")
 	}
 	// A different finalized header (its slot).
@@ -98,7 +98,7 @@ func TestCheckUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := checkUpdate(u, 1873); err == nil {
+	if err := checkUpdate(params.MainnetLightConfig, u, 1873); err == nil {
 		t.Fatal("update with a forged finalized header accepted")
 	}
 	// A finalized header of the period before: kept without its finality (its committee
@@ -109,12 +109,12 @@ func TestCheckUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := checkUpdate(u, 1873); err != nil || u.FinalizedHeader != nil {
+	if err := checkUpdate(params.MainnetLightConfig, u, 1873); err != nil || u.FinalizedHeader != nil {
 		t.Fatalf("update with an older finalized header: err %v, finalized header %v", err, u.FinalizedHeader)
 	}
 	forged[4+100] ^= 1
 	u, _, _ = DecodeUpdate(want.Version, forged)
-	if err := checkUpdate(u, 1873); err == nil {
+	if err := checkUpdate(params.MainnetLightConfig, u, 1873); err == nil {
 		t.Fatal("update with a forged next sync committee accepted")
 	}
 }
@@ -123,16 +123,17 @@ func TestCheckUpdate(t *testing.T) {
 // devnet: Gloas) pass checkOptimistic and checkFinality, and forged ones don't.
 func TestCheckGossiped(t *testing.T) {
 	for _, net := range []string{"mainnet", "devnet"} {
+		config := testConfig(net)
 		ssz, js := load(t, net+"-optimistic_update")
 		opt, err := DecodeOptimisticUpdate(js.Version, ssz)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := checkOptimistic(&opt); err != nil {
+		if err := checkOptimistic(config, &opt); err != nil {
 			t.Errorf("%s optimistic update: %v", net, err)
 		}
 		opt.Attested.BodyRoot[0] ^= 1
-		if err := checkOptimistic(&opt); err == nil {
+		if err := checkOptimistic(config, &opt); err == nil {
 			t.Errorf("%s optimistic update with a forged body root accepted", net)
 		}
 
@@ -141,11 +142,11 @@ func TestCheckGossiped(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := checkFinality(&fin); err != nil {
+		if err := checkFinality(config, &fin); err != nil {
 			t.Errorf("%s finality update: %v", net, err)
 		}
 		fin.Finalized.Slot++
-		if err := checkFinality(&fin); err == nil {
+		if err := checkFinality(config, &fin); err == nil {
 			t.Errorf("%s finality update with a forged finalized header accepted", net)
 		}
 	}
@@ -183,6 +184,7 @@ func TestGossipRules(t *testing.T) {
 	ssz, _ := load(t, "mainnet-finality_update")
 	var digest [4]byte
 	gt := newGossipTester()
+	gt.cfg.Chain = params.MainnetLightConfig
 
 	// Forged finalized headers: far ahead, which used to block forwarding the real ones,
 	// is malformed (rejected); one slot off fails its proof (ignored, not forwarded).

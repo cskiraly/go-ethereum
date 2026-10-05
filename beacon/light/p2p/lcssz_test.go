@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/beacon/params"
 	"github.com/ethereum/go-ethereum/beacon/types"
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -77,7 +78,7 @@ func load(t *testing.T, name string) ([]byte, jsonUpdate) {
 	return ssz, u
 }
 
-func checkHeader(t *testing.T, what string, got types.HeaderWithExecProof, want jsonHeader) {
+func checkHeader(t *testing.T, config *params.ChainConfig, what string, got types.HeaderWithExecProof, want jsonHeader) {
 	t.Helper()
 	if got.Slot != want.slot(t) {
 		t.Errorf("%s slot %d, want %d", what, got.Slot, want.slot(t))
@@ -85,21 +86,35 @@ func checkHeader(t *testing.T, what string, got types.HeaderWithExecProof, want 
 	if got.BlockHash() != want.hash() {
 		t.Errorf("%s execution hash %x, want %x", what, got.BlockHash(), want.hash())
 	}
-	if err := got.Validate(); err != nil {
+	if err := got.Validate(config); err != nil {
 		t.Errorf("%s execution proof: %v", what, err)
 	}
+}
+
+// testConfig returns the chain config of a test network: mainnet's, or for the devnet
+// (Gloas well before its updates were taken) one with every fork from genesis.
+func testConfig(net string) *params.ChainConfig {
+	if net == "mainnet" {
+		return params.MainnetLightConfig
+	}
+	config := new(params.ChainConfig)
+	for i, fork := range []string{"GENESIS", "ALTAIR", "BELLATRIX", "CAPELLA", "DENEB", "ELECTRA", "FULU", "GLOAS"} {
+		config.AddFork(fork, 0, []byte{byte(i), 0, 0, 0})
+	}
+	return config
 }
 
 // TestDecodeUpdates decodes light client updates served as SSZ by Lodestar (mainnet: Fulu;
 // a Kurtosis devnet: Gloas) and compares them with the JSON of the same objects.
 func TestDecodeUpdates(t *testing.T) {
 	for _, net := range []string{"mainnet", "devnet"} {
+		config := testConfig(net)
 		ssz, js := load(t, net+"-optimistic_update")
 		opt, err := DecodeOptimisticUpdate(js.Version, ssz)
 		if err != nil {
 			t.Fatalf("%s optimistic (%s): %v", net, js.Version, err)
 		}
-		checkHeader(t, net+" optimistic attested", opt.Attested, js.Data.Attested)
+		checkHeader(t, config, net+" optimistic attested", opt.Attested, js.Data.Attested)
 		if s, _ := strconv.ParseUint(js.Data.SignatureSlot, 10, 64); opt.SignatureSlot != s {
 			t.Errorf("%s optimistic signature slot %d, want %d", net, opt.SignatureSlot, s)
 		}
@@ -109,7 +124,7 @@ func TestDecodeUpdates(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s finality (%s): %v", net, js.Version, err)
 		}
-		checkHeader(t, net+" finality attested", fin.Attested, js.Data.Attested)
-		checkHeader(t, net+" finality finalized", fin.Finalized, js.Data.Finalized)
+		checkHeader(t, config, net+" finality attested", fin.Attested, js.Data.Attested)
+		checkHeader(t, config, net+" finality finalized", fin.Finalized, js.Data.Finalized)
 	}
 }
