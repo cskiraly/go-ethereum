@@ -31,6 +31,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/beacon/light/request"
 	"github.com/ethereum/go-ethereum/beacon/light/sync"
+	"github.com/ethereum/go-ethereum/beacon/params"
 	"github.com/ethereum/go-ethereum/beacon/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
@@ -301,7 +302,7 @@ func (n *Node) UpdatesByRange(first, count uint64) (sync.RespUpdates, error) {
 			if err != nil {
 				return err
 			}
-			if err := checkUpdate(u, first+uint64(i)); err != nil {
+			if err := checkUpdate(n.cfg.Chain, u, first+uint64(i)); err != nil {
 				return err
 			}
 			r.Updates = append(r.Updates, u)
@@ -318,7 +319,7 @@ func (n *Node) UpdatesByRange(first, count uint64) (sync.RespUpdates, error) {
 // chain relies on these checks (CommitteeChain.InsertUpdate verifies only the sync
 // committee signature): without them a peer could pair a signed header with a next sync
 // committee of its own.
-func checkUpdate(u *types.LightClientUpdate, period uint64) error {
+func checkUpdate(config *params.ChainConfig, u *types.LightClientUpdate, period uint64) error {
 	if p := u.AttestedHeader.Header.SyncPeriod(); p != period {
 		return fmt.Errorf("update of period %d, asked for %d", p, period)
 	}
@@ -334,7 +335,7 @@ func checkUpdate(u *types.LightClientUpdate, period uint64) error {
 		// a while). It still proves the next committee: keep it without its finality.
 		u.FinalizedHeader, u.FinalityBranch = nil, nil
 	}
-	if err := u.Validate(); err != nil {
+	if err := u.Validate(config); err != nil {
 		return fmt.Errorf("update of period %d: %v", period, err)
 	}
 	return nil
@@ -342,20 +343,20 @@ func checkUpdate(u *types.LightClientUpdate, period uint64) error {
 
 // checkOptimistic checks the order of an optimistic update's slots and its Merkle proof;
 // the sync committee signature is for its user to check.
-func checkOptimistic(u *types.OptimisticUpdate) error {
+func checkOptimistic(config *params.ChainConfig, u *types.OptimisticUpdate) error {
 	if err := optimisticSlots(u); err != nil {
 		return err
 	}
-	return u.Validate()
+	return u.Validate(config)
 }
 
 // checkFinality checks the order of a finality update's slots and its Merkle proofs; the
 // sync committee signature is for its user to check.
-func checkFinality(u *types.FinalityUpdate) error {
+func checkFinality(config *params.ChainConfig, u *types.FinalityUpdate) error {
 	if err := finalitySlots(u); err != nil {
 		return err
 	}
-	return u.Validate()
+	return u.Validate(config)
 }
 
 // optimisticSlots checks the order of an optimistic update's slots.
@@ -388,7 +389,7 @@ func (n *Node) Bootstrap(root common.Hash) (*types.BootstrapData, error) {
 		if b.Header.Hash() != root {
 			return fmt.Errorf("bootstrap for %x, asked for %x", b.Header.Hash(), root)
 		}
-		if err := b.Validate(); err != nil {
+		if err := b.Validate(n.cfg.Chain); err != nil {
 			return fmt.Errorf("bootstrap: %v", err)
 		}
 		boot = b
@@ -403,7 +404,7 @@ func (n *Node) FinalityUpdate() (types.FinalityUpdate, error) {
 	err := n.request(protoLCFinality, nil, 1, func(chunks []chunk) error {
 		f, err := DecodeFinalityUpdate(chunks[0].fork, chunks[0].ssz)
 		if err == nil {
-			err = checkFinality(&f)
+			err = checkFinality(n.cfg.Chain, &f)
 		}
 		if err == nil {
 			u = f

@@ -921,10 +921,9 @@ func epochAt(genesis uint64, t time.Time) uint64 {
 }
 
 // onOptimistic handles a gossiped optimistic update. Only a malformed one is rejected
-// (which lowers its sender's peer score): around a fork, geth's checks of the Merkle
-// proofs and the signature can fail updates that are valid (the proof of a pre-fork header
-// in the new format; the signature domain, which geth takes from the attested header's
-// epoch, the spec from the signature slot's), so those are ignored.
+// (which lowers its sender's peer score): around a fork, geth's signature check can fail
+// updates that are valid (it takes the signature domain from the attested header's epoch,
+// the spec from the signature slot's), so failed checks are ignored.
 func (n *Node) onOptimistic(from peer.ID, fork string, digest [4]byte, ssz []byte) (pubsub.ValidationResult, error) {
 	u, err := DecodeOptimisticUpdate(fork, ssz)
 	if err == nil {
@@ -933,7 +932,7 @@ func (n *Node) onOptimistic(from peer.ID, fork string, digest [4]byte, ssz []byt
 	if err != nil {
 		return pubsub.ValidationReject, err
 	}
-	if err := u.Validate(); err != nil {
+	if err := u.Validate(n.cfg.Chain); err != nil {
 		return pubsub.ValidationIgnore, err
 	}
 	res, deliver, err := n.check(&n.optimistic, u.SignedHeader(), u.Attested.Header, false, servedUpdate{digest, ssz})
@@ -953,7 +952,7 @@ func (n *Node) onFinality(from peer.ID, fork string, digest [4]byte, ssz []byte)
 	if err != nil {
 		return pubsub.ValidationReject, err
 	}
-	if err := u.Validate(); err != nil {
+	if err := u.Validate(n.cfg.Chain); err != nil {
 		return pubsub.ValidationIgnore, err
 	}
 	super := u.Signature.SignerCount() >= params.SyncCommitteeSupermajority
