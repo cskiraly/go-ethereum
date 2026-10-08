@@ -114,6 +114,8 @@ func (e *benchEnv) verify(block *types.Block) error {
 	return err
 }
 
+var benchCoinbase = common.HexToAddress("0xc0ffee")
+
 func newBenchEnv(w benchWorkload, seed int64) (*benchEnv, error) {
 	config := params.MergedTestChainConfig
 	gen := newBenchGen(config, seed, uint64(*buildBenchCandidates*benchBlockGas))
@@ -123,6 +125,10 @@ func newBenchEnv(w benchWorkload, seed int64) (*benchEnv, error) {
 	gen.deploy(params.HistoryStorageAddress, params.HistoryStorageCode, nil)
 	gen.deploy(params.WithdrawalQueueAddress, params.WithdrawalQueueCode, nil)
 	gen.deploy(params.ConsolidationQueueAddress, params.ConsolidationQueueCode, nil)
+	// The fee recipient exists, as it does on mainnet. Otherwise the first
+	// transaction creates it, which conflicts with every later one in engines
+	// that track account existence.
+	gen.alloc[benchCoinbase] = types.Account{Balance: big.NewInt(params.Ether)}
 
 	gspec := &core.Genesis{
 		Config:   config,
@@ -203,7 +209,7 @@ func (e *benchEnv) params() *generateParams {
 		timestamp:   parent.Time + 12,
 		forceTime:   true,
 		parentHash:  parent.Hash(),
-		coinbase:    common.HexToAddress("0xc0ffee"),
+		coinbase:    benchCoinbase,
 		random:      common.Hash{0x02},
 		withdrawals: types.Withdrawals{},
 		beaconRoot:  &beaconRoot,
