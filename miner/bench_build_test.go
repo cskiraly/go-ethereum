@@ -76,6 +76,7 @@ type benchEnv struct {
 	chain    *core.BlockChain
 	pool     *txpool.TxPool
 	txs      int
+	signer   types.Signer
 }
 
 func (e *benchEnv) BlockChain() *core.BlockChain { return e.chain }
@@ -90,6 +91,11 @@ func newBenchEnv(w benchWorkload, seed int64) (*benchEnv, error) {
 	config := params.MergedTestChainConfig
 	gen := newBenchGen(config, seed, uint64(*buildBenchCandidates*benchBlockGas))
 	w.generate(gen)
+	// The system contracts of the active forks, as on mainnet.
+	gen.deploy(params.BeaconRootsAddress, params.BeaconRootsCode, nil)
+	gen.deploy(params.HistoryStorageAddress, params.HistoryStorageCode, nil)
+	gen.deploy(params.WithdrawalQueueAddress, params.WithdrawalQueueCode, nil)
+	gen.deploy(params.ConsolidationQueueAddress, params.ConsolidationQueueCode, nil)
 
 	gspec := &core.Genesis{
 		Config:   config,
@@ -112,7 +118,42 @@ func newBenchEnv(w benchWorkload, seed int64) (*benchEnv, error) {
 		chain.Stop()
 		return nil, err
 	}
-	return &benchEnv{workload: w, config: config, engine: engine, chain: chain, pool: pool, txs: len(gen.txs)}, nil
+	return &benchEnv{workload: w, config: config, engine: engine, chain: chain, pool: pool, txs: len(gen.txs), signer: gen.signer}, nil
+}
+
+// blockDiff describes where got's transactions first diverge from ref's.
+func (e *benchEnv) blockDiff(ref, got *types.Block) string {
+	if got == nil {
+		return ""
+	}
+	describe := func(txs types.Transactions, i int) string {
+		if i >= len(txs) {
+			return "none"
+		}
+		tx := txs[i]
+		from, _ := types.Sender(e.signer, tx)
+		return fmt.Sprintf("%x from %x nonce %d gas %d tip %v", tx.Hash().Bytes()[:4], from.Bytes()[:4], tx.Nonce(), tx.Gas(), tx.GasTipCap())
+	}
+	a, b := ref.Transactions(), got.Transactions()
+	i := 0
+	for i < len(a) && i < len(b) && a[i].Hash() == b[i].Hash() {
+		i++
+	}
+	if i == len(a) && i == len(b) {
+		return fmt.Sprintf("\n\tsame %d txs; gas used %d vs %d, root %x vs %x", len(a), ref.GasUsed(), got.GasUsed(), ref.Root(), got.Root())
+	}
+	inRef := make(map[common.Hash]bool, len(a))
+	for _, tx := range a {
+		inRef[tx.Hash()] = true
+	}
+	var extra int
+	for _, tx := range b {
+		if !inRef[tx.Hash()] {
+			extra++
+		}
+	}
+	return fmt.Sprintf("\n\t%d vs %d txs (%d not in reference), first divergence at index %d:\n\t  reference: %s\n\t  got:       %s",
+		len(a), len(b), extra, i, describe(a, i), describe(b, i))
 }
 
 // newMiner returns a miner configured for strategy. The recommit deadline is
