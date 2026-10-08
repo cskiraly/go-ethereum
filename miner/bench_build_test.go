@@ -36,6 +36,7 @@ import (
 	"math/big"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"slices"
 	"strings"
 	"sync"
@@ -66,6 +67,7 @@ var (
 	buildBenchCandidates = flag.Float64("buildbench.candidates", 2, "candidate set size, in blocks worth of gas")
 	buildBenchGC         = flag.Bool("buildbench.gc", true, "run a GC before every build")
 	buildBenchExact      = flag.Bool("buildbench.exact", false, "fail when a valid block differs from the baseline strategy's")
+	buildBenchProfile    = flag.String("buildbench.profile", "", "write CPU, block and mutex profiles of the measured builds to <prefix>-<workload>.{cpu,block,mutex}")
 	buildBenchSpans      = flag.Bool("buildbench.spans", false, "record miner telemetry spans for a per-phase breakdown (adds overhead)")
 )
 
@@ -285,6 +287,42 @@ func (r *spanRecorder) start() (context.Context, func() map[string]int64) {
 	}
 }
 
+// startBuildProfile starts profiling the builds of a workload if
+// -buildbench.profile is set, and returns the function that stops it. Block and
+// mutex profiles are cumulative over the process, so profile one workload per
+// run; don't combine with go test's own -cpuprofile.
+func startBuildProfile(t *testing.T, workload string) func() {
+	if *buildBenchProfile == "" {
+		return func() {}
+	}
+	prefix := *buildBenchProfile + "-" + workload
+	cpu, err := os.Create(prefix + ".cpu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pprof.StartCPUProfile(cpu); err != nil {
+		t.Fatal(err)
+	}
+	runtime.SetBlockProfileRate(1)
+	runtime.SetMutexProfileFraction(1)
+	return func() {
+		pprof.StopCPUProfile()
+		cpu.Close()
+		runtime.SetBlockProfileRate(0)
+		runtime.SetMutexProfileFraction(0)
+		for _, name := range []string{"block", "mutex"} {
+			f, err := os.Create(prefix + "." + name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pprof.Lookup(name).WriteTo(f, 0); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+		}
+	}
+}
+
 // buildOnce builds one block with m and measures it.
 func buildOnce(env *benchEnv, m *Miner, spans *spanRecorder) (*newPayloadResult, benchRecord) {
 	if *buildBenchGC {
@@ -398,11 +436,14 @@ func TestBuildBench(t *testing.T) {
 			if err := env.verify(reference); err != nil {
 				t.Fatalf("%s: invalid reference block: %v", strategies[0], err)
 			}
-			// Engines need not build the baseline's block. A block that
-			// differs is imported to check that it is valid, and only the
-			// first difference per strategy is shown unless -buildbench.exact.
-			shown := make(map[string]bool)
-			records := make(map[string][]benchRecord)
+			// Build first and check afterwards, so that profiles cover only
+			// the builds.
+			type build struct {
+				rec   benchRecord
+				block *types.Block
+			}
+			var builds []build
+			stopProfile := startBuildProfile(t, w.name)
 			for rep := 0; rep < *buildBenchReps; rep++ {
 				// Rotate the order every rep so each strategy runs in every
 				// position equally often.
@@ -410,27 +451,38 @@ func TestBuildBench(t *testing.T) {
 					i := (slot + rep) % len(strategies)
 					res, rec := buildOnce(env, miners[i], spans)
 					rec.Strategy, rec.Rep, rec.Slot, rec.Seed, rec.Depth = strategies[i], rep, slot, *buildBenchSeed, *buildBenchCandidates
-					rec.Match = rec.Error == "" && rec.BlockHash == reference.Hash()
-					switch {
-					case rec.Error != "":
-						t.Errorf("%s rep %d: build failed: %s", strategies[i], rep, rec.Error)
-					case rec.Match:
-					case env.verify(res.block) != nil:
-						rec.Invalid = env.verify(res.block).Error()
-						t.Errorf("%s rep %d: invalid block %x: %s", strategies[i], rep, rec.BlockHash, rec.Invalid)
-					case *buildBenchExact:
-						t.Errorf("%s rep %d: block %x differs from %s block %x%s",
-							strategies[i], rep, rec.BlockHash, strategies[0], reference.Hash(), env.blockDiff(reference, res.block))
-					case !shown[rec.Strategy]:
-						shown[rec.Strategy] = true
-						t.Logf("%s rep %d: valid block %x differs from %s block %x%s",
-							strategies[i], rep, rec.BlockHash, strategies[0], reference.Hash(), env.blockDiff(reference, res.block))
-					}
-					records[rec.Strategy] = append(records[rec.Strategy], rec)
-					if out != nil {
-						if err := out.Encode(rec); err != nil {
-							t.Fatal(err)
-						}
+					builds = append(builds, build{rec, res.block})
+				}
+			}
+			stopProfile()
+
+			// Engines need not build the baseline's block. A block that
+			// differs is imported to check that it is valid, and only the
+			// first difference per strategy is shown unless -buildbench.exact.
+			shown := make(map[string]bool)
+			records := make(map[string][]benchRecord)
+			for _, b := range builds {
+				rec := b.rec
+				rec.Match = rec.Error == "" && rec.BlockHash == reference.Hash()
+				switch {
+				case rec.Error != "":
+					t.Errorf("%s rep %d: build failed: %s", rec.Strategy, rec.Rep, rec.Error)
+				case rec.Match:
+				case env.verify(b.block) != nil:
+					rec.Invalid = env.verify(b.block).Error()
+					t.Errorf("%s rep %d: invalid block %x: %s", rec.Strategy, rec.Rep, rec.BlockHash, rec.Invalid)
+				case *buildBenchExact:
+					t.Errorf("%s rep %d: block %x differs from %s block %x%s",
+						rec.Strategy, rec.Rep, rec.BlockHash, strategies[0], reference.Hash(), env.blockDiff(reference, b.block))
+				case !shown[rec.Strategy]:
+					shown[rec.Strategy] = true
+					t.Logf("%s rep %d: valid block %x differs from %s block %x%s",
+						rec.Strategy, rec.Rep, rec.BlockHash, strategies[0], reference.Hash(), env.blockDiff(reference, b.block))
+				}
+				records[rec.Strategy] = append(records[rec.Strategy], rec)
+				if out != nil {
+					if err := out.Encode(rec); err != nil {
+						t.Fatal(err)
 					}
 				}
 			}
