@@ -351,14 +351,14 @@ func TestBuildBench(t *testing.T) {
 			}
 			// Warm up: one unrecorded build per strategy, which also fixes
 			// the reference block.
-			var reference common.Hash
+			var reference *types.Block
 			for i, m := range miners {
-				res, rec := buildOnce(env, m, spans)
+				res, _ := buildOnce(env, m, spans)
 				if res.err != nil {
 					t.Fatalf("%s: warm-up build failed: %v", strategies[i], res.err)
 				}
 				if i == 0 {
-					reference = rec.BlockHash
+					reference = res.block
 				}
 			}
 			records := make(map[string][]benchRecord)
@@ -367,12 +367,12 @@ func TestBuildBench(t *testing.T) {
 				// position equally often.
 				for slot := range strategies {
 					i := (slot + rep) % len(strategies)
-					_, rec := buildOnce(env, miners[i], spans)
+					res, rec := buildOnce(env, miners[i], spans)
 					rec.Strategy, rec.Rep, rec.Slot, rec.Seed, rec.Depth = strategies[i], rep, slot, *buildBenchSeed, *buildBenchCandidates
-					rec.Match = rec.Error == "" && rec.BlockHash == reference
+					rec.Match = rec.Error == "" && rec.BlockHash == reference.Hash()
 					if !rec.Match {
-						t.Errorf("%s rep %d: block %x differs from %s block %x (err: %s)",
-							strategies[i], rep, rec.BlockHash, strategies[0], reference, rec.Error)
+						t.Errorf("%s rep %d: block %x differs from %s block %x (err: %s)%s",
+							strategies[i], rep, rec.BlockHash, strategies[0], reference.Hash(), rec.Error, env.blockDiff(reference, res.block))
 					}
 					records[rec.Strategy] = append(records[rec.Strategy], rec)
 					if out != nil {
