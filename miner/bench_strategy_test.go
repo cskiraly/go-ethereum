@@ -50,22 +50,38 @@ func resetBenchStats(m *Miner) {
 	m.lastParallelMetrics.Store(nil)
 }
 
-// benchStats returns the engine statistics of the last build, if any.
+// benchStats returns the engine statistics of the last build, if any. The
+// common keys (planned, executions, stale, committed, executionTimeNs) mean the
+// same as on the improv branches; the rest are v1's own.
 func benchStats(m *Miner) map[string]any {
 	s := m.lastParallelMetrics.Load()
 	if s == nil {
 		return nil
 	}
 	return map[string]any{
-		"batches":         s.batches,
-		"planned":         s.Planned,
-		"executions":      s.Executions,
-		"stale":           s.Stale,
-		"committed":       s.Committed,
-		"dropped":         s.Dropped,
-		"commitPhaseNs":   s.wall.Nanoseconds(),
-		"executionTimeNs": s.ExecutionTime.Nanoseconds(),
-		"commitTimeNs":    s.CommitTime.Nanoseconds(),
-		"waitTimeNs":      s.WaitTime.Nanoseconds(),
+		"batches":           s.batches,
+		"planned":           s.planned,
+		"executions":        s.speculative + s.retryExecutions + s.retries,
+		"stale":             s.conflicts,
+		"committed":         s.committed,
+		"executionTimeNs":   s.executionWork.Nanoseconds(),
+		"speculative":       s.speculative,
+		"merged":            s.merged,
+		"firstAttempt":      s.firstAttempt,
+		"retriedCommitted":  s.retriedCommitted,
+		"retryRounds":       s.retryRounds,
+		"retryExecutions":   s.retryExecutions,
+		"serialRetries":     s.retries,
+		"invalid":           s.invalid,
+		"incomplete":        s.incomplete,
+		"executeWallNs":     s.executeWall.Nanoseconds(),
+		"commitWallNs":      s.commitWall.Nanoseconds(),
+		"serialRetryTimeNs": s.retryTime.Nanoseconds(),
+		"planningTimeNs":    s.planningTime.Nanoseconds(),
+		"storageConflicts":  s.storageConflicts,
+		"balanceConflicts":  s.balanceConflicts,
+		"nonceConflicts":    s.nonceConflicts,
+		"codeConflicts":     s.codeConflicts,
+		"existConflicts":    s.existConflicts,
 	}
 }
