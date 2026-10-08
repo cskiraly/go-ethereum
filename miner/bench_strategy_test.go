@@ -67,5 +67,10 @@ func benchStats(m *Miner) map[string]any {
 		"executionTimeNs": s.ExecutionTime.Nanoseconds(),
 		"commitTimeNs":    s.CommitTime.Nanoseconds(),
 		"waitTimeNs":      s.WaitTime.Nanoseconds(),
+		"chained":         s.Chained,
+		"longestChain":    s.LongestChain,
+		"requeued":        s.Requeued,
+		"validateTimeNs":  s.ValidateTime.Nanoseconds(),
+		"chainWaitTimeNs": s.ChainWaitTime.Nanoseconds(),
 	}
 }
