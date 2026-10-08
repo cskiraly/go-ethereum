@@ -531,33 +531,6 @@ func (miner *Miner) executeParallelTasks(env *environment, tasks []*parallelTask
 	return !interrupted
 }
 
-func parallelResultConflict(task *parallelTask, committedResults []parallelCommittedResult) *parallelConflict {
-	if task.result == nil || task.result.state == nil {
-		return &parallelConflict{incomplete: true}
-	}
-	// Results committed before this execution ran were part of the state it
-	// read, so only the ones committed after it can conflict.
-	for i := task.commitsSeen; i < len(committedResults); i++ {
-		committed := committedResults[i]
-		if committed.sender == task.sender {
-			continue
-		}
-		// Writes of an earlier link of the task's own chain were visible to
-		// its execution; they are inputs, not conflicts.
-		if task.contextForChain != nil && committed.chain == task.contextForChain && committed.chainIndex < task.indexInChain {
-			continue
-		}
-		if conflict := task.result.state.Conflict(committed.state); conflict != nil {
-			return &parallelConflict{
-				previousHash:     committed.hash,
-				previousPosition: committed.position,
-				state:            conflict,
-			}
-		}
-	}
-	return nil
-}
-
 type parallelCommittedResult struct {
 	hash       common.Hash
 	position   int
@@ -789,6 +762,7 @@ func chainStaleTasks(staleTasks []*parallelTask) int {
 // retry rounds.
 type parallelBatchCommit struct {
 	committed     []parallelCommittedResult // footprints of every merged result, in commit order
+	index         parallelWriteIndex        // writes of the committed results, by location
 	poppedSenders map[common.Address]bool   // senders removed from the queues; their remaining tasks are skipped
 }
 
@@ -1075,7 +1049,7 @@ func (miner *Miner) commitParallelTasks(ctx context.Context, env *environment, t
 			if task.previous != nil && !task.previous.settled {
 				continue // depends on a pending task; re-executing now would be premature
 			}
-			if conflict := parallelResultConflict(task, batch.committed); conflict != nil && conflict.state != nil && !conflict.incomplete {
+			if conflict := parallelResultConflict(task, batch); conflict != nil && conflict.state != nil && !conflict.incomplete {
 				collect(task, conflict)
 			}
 			continue
@@ -1103,7 +1077,7 @@ func (miner *Miner) commitParallelTasks(ctx context.Context, env *environment, t
 		droppedInput := sawDroppedWrite(task)
 		var conflict *parallelConflict
 		if !senderBroken && !droppedInput {
-			conflict = parallelResultConflict(task, batch.committed)
+			conflict = parallelResultConflict(task, batch)
 		}
 		if senderBroken || droppedInput || conflict != nil {
 			if !inlineFallback {
@@ -1154,7 +1128,7 @@ func (miner *Miner) commitParallelTasks(ctx context.Context, env *environment, t
 		metrics.committed++
 		task.settled = true
 		ordered.Shift()
-		batch.committed = append(batch.committed, committedResult(task, task.result.state))
+		batch.commit(committedResult(task, task.result.state))
 	}
 	return stale, false, false, nil
 }
@@ -1211,5 +1185,5 @@ func (miner *Miner) commitTaskSerially(ctx context.Context, env *environment, ta
 	// skip validating against it.
 	entry := committedResult(task, sequentialState)
 	entry.chain, entry.chainIndex = nil, 0
-	batch.committed = append(batch.committed, entry)
+	batch.commit(entry)
 }
