@@ -65,6 +65,7 @@ var (
 	buildBenchSeed       = flag.Int64("buildbench.seed", 1, "workload generation seed")
 	buildBenchCandidates = flag.Float64("buildbench.candidates", 2, "candidate set size, in blocks worth of gas")
 	buildBenchGC         = flag.Bool("buildbench.gc", true, "run a GC before every build")
+	buildBenchExact      = flag.Bool("buildbench.exact", false, "fail when a valid block differs from the baseline strategy's")
 	buildBenchSpans      = flag.Bool("buildbench.spans", false, "record miner telemetry spans for a per-phase breakdown (adds overhead)")
 )
 
@@ -77,6 +78,10 @@ type benchEnv struct {
 	pool     *txpool.TxPool
 	txs      int
 	signer   types.Signer
+	gspec    *core.Genesis
+
+	verifier *core.BlockChain      // imports built blocks to validate them
+	verified map[common.Hash]error // verifier results by block hash
 }
 
 func (e *benchEnv) BlockChain() *core.BlockChain { return e.chain }
@@ -85,6 +90,28 @@ func (e *benchEnv) TxPool() *txpool.TxPool       { return e.pool }
 func (e *benchEnv) close() {
 	e.pool.Close()
 	e.chain.Stop()
+	if e.verifier != nil {
+		e.verifier.Stop()
+	}
+}
+
+// verify imports block into a separate chain on the same genesis, which
+// executes and validates it as a node receiving it would. Results are cached
+// by block hash.
+func (e *benchEnv) verify(block *types.Block) error {
+	if err, ok := e.verified[block.Hash()]; ok {
+		return err
+	}
+	if e.verifier == nil {
+		chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), e.gspec, e.engine, core.DefaultConfig().WithStateScheme(rawdb.PathScheme))
+		if err != nil {
+			return err
+		}
+		e.verifier = chain
+	}
+	_, err := e.verifier.InsertChain(types.Blocks{block})
+	e.verified[block.Hash()] = err
+	return err
 }
 
 func newBenchEnv(w benchWorkload, seed int64) (*benchEnv, error) {
@@ -118,7 +145,7 @@ func newBenchEnv(w benchWorkload, seed int64) (*benchEnv, error) {
 		chain.Stop()
 		return nil, err
 	}
-	return &benchEnv{workload: w, config: config, engine: engine, chain: chain, pool: pool, txs: len(gen.txs), signer: gen.signer}, nil
+	return &benchEnv{workload: w, config: config, engine: engine, chain: chain, pool: pool, txs: len(gen.txs), signer: gen.signer, gspec: gspec, verified: make(map[common.Hash]error)}, nil
 }
 
 // blockDiff describes where got's transactions first diverge from ref's.
@@ -202,6 +229,7 @@ type benchRecord struct {
 	StateRoot  common.Hash      `json:"stateRoot"`
 	Match      bool             `json:"match"` // block identical to the baseline strategy's
 	Error      string           `json:"error,omitempty"`
+	Invalid    string           `json:"invalid,omitempty"` // why the verifier rejected the block
 	Engine     map[string]any   `json:"engine,omitempty"`
 	PhasesNs   map[string]int64 `json:"phasesNs,omitempty"`
 }
@@ -361,6 +389,13 @@ func TestBuildBench(t *testing.T) {
 					reference = res.block
 				}
 			}
+			if err := env.verify(reference); err != nil {
+				t.Fatalf("%s: invalid reference block: %v", strategies[0], err)
+			}
+			// Engines need not build the baseline's block. A block that
+			// differs is imported to check that it is valid, and only the
+			// first difference per strategy is shown unless -buildbench.exact.
+			shown := make(map[string]bool)
 			records := make(map[string][]benchRecord)
 			for rep := 0; rep < *buildBenchReps; rep++ {
 				// Rotate the order every rep so each strategy runs in every
@@ -370,9 +405,20 @@ func TestBuildBench(t *testing.T) {
 					res, rec := buildOnce(env, miners[i], spans)
 					rec.Strategy, rec.Rep, rec.Slot, rec.Seed, rec.Depth = strategies[i], rep, slot, *buildBenchSeed, *buildBenchCandidates
 					rec.Match = rec.Error == "" && rec.BlockHash == reference.Hash()
-					if !rec.Match {
-						t.Errorf("%s rep %d: block %x differs from %s block %x (err: %s)%s",
-							strategies[i], rep, rec.BlockHash, strategies[0], reference.Hash(), rec.Error, env.blockDiff(reference, res.block))
+					switch {
+					case rec.Error != "":
+						t.Errorf("%s rep %d: build failed: %s", strategies[i], rep, rec.Error)
+					case rec.Match:
+					case env.verify(res.block) != nil:
+						rec.Invalid = env.verify(res.block).Error()
+						t.Errorf("%s rep %d: invalid block %x: %s", strategies[i], rep, rec.BlockHash, rec.Invalid)
+					case *buildBenchExact:
+						t.Errorf("%s rep %d: block %x differs from %s block %x%s",
+							strategies[i], rep, rec.BlockHash, strategies[0], reference.Hash(), env.blockDiff(reference, res.block))
+					case !shown[rec.Strategy]:
+						shown[rec.Strategy] = true
+						t.Logf("%s rep %d: valid block %x differs from %s block %x%s",
+							strategies[i], rep, rec.BlockHash, strategies[0], reference.Hash(), env.blockDiff(reference, res.block))
 					}
 					records[rec.Strategy] = append(records[rec.Strategy], rec)
 					if out != nil {
@@ -394,23 +440,46 @@ func summarizeBench(w benchWorkload, strategies []string, records map[string][]b
 	base := records[strategies[0]]
 	first := base[0]
 	fmt.Fprintf(&b, "\n%s: %s\n  block: %d/%d txs, %.1f Mgas\n", w.name, w.description, first.Txs, first.Candidates, float64(first.GasUsed)/1e6)
-	fmt.Fprintf(&b, "  %-14s %10s %10s %10s %9s %9s\n", "strategy", "median", "min", "max", "Mgas/s", "speedup")
+	fmt.Fprintf(&b, "  %-14s %10s %10s %10s %9s %9s %7s %6s %8s\n", "strategy", "median", "min", "max", "Mgas/s", "speedup", "same", "txs", "fees")
+	baseFees := median(benchFees(base))
 	for _, s := range strategies {
 		recs := records[s]
 		walls := make([]float64, len(recs))
 		ratios := make([]float64, len(recs))
+		gas := make([]float64, len(recs))
+		txs := make([]float64, len(recs))
+		same := 0
 		for i, r := range recs {
 			walls[i] = float64(r.WallNs)
 			ratios[i] = float64(base[i].WallNs) / float64(r.WallNs)
+			gas[i] = float64(r.GasUsed)
+			txs[i] = float64(r.Txs)
+			if r.Match {
+				same++
+			}
 		}
 		med := median(walls)
-		fmt.Fprintf(&b, "  %-14s %10s %10s %10s %9.0f %8.2fx\n", s,
+		fmt.Fprintf(&b, "  %-14s %10s %10s %10s %9.0f %8.2fx %7s %6.0f %+7.3f%%\n", s,
 			time.Duration(med).Round(10*time.Microsecond),
 			time.Duration(slices.Min(walls)).Round(10*time.Microsecond),
 			time.Duration(slices.Max(walls)).Round(10*time.Microsecond),
-			float64(first.GasUsed)/1e6/(med/1e9), median(ratios))
+			median(gas)/1e6/(med/1e9), median(ratios),
+			fmt.Sprintf("%d/%d", same, len(recs)), median(txs),
+			100*(median(benchFees(recs))/baseFees-1))
 	}
+	b.WriteString("  (same: builds identical to the first strategy's block; fees: median relative to it)\n")
 	return b.String()
+}
+
+// benchFees returns the fees of each record, in wei.
+func benchFees(recs []benchRecord) []float64 {
+	fees := make([]float64, len(recs))
+	for i, r := range recs {
+		if f, ok := new(big.Float).SetString(r.Fees); ok {
+			fees[i], _ = f.Float64()
+		}
+	}
+	return fees
 }
 
 func median(xs []float64) float64 {
