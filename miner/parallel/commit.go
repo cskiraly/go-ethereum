@@ -32,6 +32,9 @@ type Block interface {
 	Check(t *Task) (Verdict, error)
 	// Include applies a validated result to the block, using Result.Apply.
 	Include(t *Task, r *Result) error
+	// Execute executes the transaction of t on the block state and includes
+	// it, as a sequential builder would.
+	Execute(t *Task) error
 }
 
 // maxRequeues bounds how often a stale task is handed back to the workers
@@ -50,6 +53,7 @@ type committer struct {
 	coinbase  common.Address
 	dropped   map[common.Address]bool
 	stats     *Stats
+	inlineGas uint64 // see Config.InlineGas
 }
 
 // run commits every task once its result has arrived and reports whether the
@@ -107,6 +111,99 @@ func (c *committer) run(ctx context.Context, tasks []*Task) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// runInOrder commits tasks in position order and reports whether the block
+// became full. A cheap task (see Task.cheap), or one whose result failed or is
+// stale, is executed on the block state by the committer itself; any other
+// result is validated and applied.
+func (c *committer) runInOrder(ctx context.Context, tasks []*Task) (bool, error) {
+	finished := make(map[*Task]bool, len(tasks))
+	for _, t := range tasks {
+		if c.dropped[t.Sender] {
+			c.drop(t)
+			continue
+		}
+		// a task that never reached a worker is not resolved yet
+		t.resolve()
+		verdict, err := c.block.Check(t)
+		if err != nil {
+			return false, err
+		}
+		switch verdict {
+		case Full:
+			return true, nil
+		case Reject:
+			c.reject(t)
+			continue
+		}
+		for more := true; more; {
+			select {
+			case f := <-c.finished:
+				finished[f] = true
+			default:
+				more = false
+			}
+		}
+		if t.cheap(c.inlineGas) {
+			c.inline(t)
+			continue
+		}
+		if !finished[t] {
+			started := time.Now()
+			for !finished[t] {
+				select {
+				case <-ctx.Done():
+					return false, ctx.Err()
+				case f := <-c.finished:
+					finished[f] = true
+				}
+			}
+			c.stats.WaitTime += time.Since(started)
+		}
+		t.mu.Lock()
+		r := t.result
+		t.mu.Unlock()
+		if r != nil && r.Err == nil {
+			started := time.Now()
+			fresh := !stale(c.block.State(), r.reads)
+			c.stats.ValidateTime += time.Since(started)
+			if fresh {
+				started = time.Now()
+				err := c.block.Include(t, r)
+				c.stats.CommitTime += time.Since(started)
+				if err != nil {
+					c.reject(t)
+					continue
+				}
+				c.publishCoinbase(t.Position)
+				c.stats.Committed++
+				continue
+			}
+			c.stats.Stale++
+			c.retract(t, r)
+		}
+		c.inline(t)
+	}
+	return false, nil
+}
+
+// inline executes t on the block state and includes it.
+func (c *committer) inline(t *Task) {
+	started := time.Now()
+	err := c.block.Execute(t)
+	c.stats.InlineTime += time.Since(started)
+	c.stats.Inlined++
+	if err != nil {
+		if errors.Is(err, core.ErrNonceTooLow) {
+			c.drop(t)
+		} else {
+			c.reject(t)
+		}
+		return
+	}
+	c.publishCoinbase(t.Position)
+	c.stats.Committed++
 }
 
 // commit checks t against the block and includes it. A stale result is
@@ -210,16 +307,22 @@ func (c *committer) drop(t *Task) {
 // at pos, in commit order, and the coinbase after it. Fees are applied as
 // deltas, so this is where its true balance becomes visible to later tasks.
 func (c *committer) publishCommitted(pos int, r *Result) {
+	coinbase := c.publishCoinbase(pos)
+	seq := c.stats.Committed
+	c.committed.publish(seq, r.writes, r.codes)
+	c.committed.publish(seq, coinbase, nil)
+}
+
+// publishCoinbase makes the coinbase after the transaction at pos visible to
+// later positions and returns the published values.
+func (c *committer) publishCoinbase(pos int) map[key]value {
 	sdb := c.block.State()
 	coinbase := map[key]value{
 		{addr: c.coinbase, field: exists}:  boolValue(sdb.Exist(c.coinbase)),
 		{addr: c.coinbase, field: balance}: balanceValue(sdb.GetBalance(c.coinbase)),
 	}
 	c.store.publish(pos, coinbase, nil)
-
-	seq := c.stats.Committed
-	c.committed.publish(seq, r.writes, r.codes)
-	c.committed.publish(seq, coinbase, nil)
+	return coinbase
 }
 
 // stale reports whether any recorded read differs from the current state.

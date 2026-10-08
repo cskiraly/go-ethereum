@@ -26,23 +26,50 @@ import (
 	"strings"
 )
 
-// applyBenchStrategy configures cfg for the named strategy: "sequential" or
-// "parallel-w<workers>".
+// applyBenchStrategy configures cfg for the named strategy:
+//   - "sequential"
+//   - "parallel-w<N>": the branch's engine, committing results as they arrive
+//   - "inorder-w<N>": the engine committing in priority order
+//   - "hybrid-w<N>[-g<gas>]": in order, the committer executing transactions
+//     that use at most <gas> (default 50000) itself
 func applyBenchStrategy(name string, cfg *Config) error {
-	switch {
-	case name == "sequential":
+	if name == "sequential" {
 		cfg.ParallelExecution = false
 		return nil
-	case strings.HasPrefix(name, "parallel-w"):
-		workers, err := strconv.Atoi(strings.TrimPrefix(name, "parallel-w"))
-		if err != nil || workers < 1 {
+	}
+	kind, rest, ok := strings.Cut(name, "-w")
+	if !ok {
+		return fmt.Errorf("unknown strategy %q", name)
+	}
+	workersStr, gasStr, hasGas := strings.Cut(rest, "-g")
+	workers, err := strconv.Atoi(workersStr)
+	if err != nil || workers < 1 {
+		return fmt.Errorf("invalid strategy %q", name)
+	}
+	cfg.ParallelExecution = true
+	cfg.ParallelWorkers = workers
+	switch kind {
+	case "parallel":
+		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
-		cfg.ParallelExecution = true
-		cfg.ParallelWorkers = workers
-		return nil
+	case "inorder":
+		if hasGas {
+			return fmt.Errorf("invalid strategy %q", name)
+		}
+		cfg.ParallelInOrder = true
+	case "hybrid":
+		cfg.ParallelInOrder = true
+		cfg.ParallelInlineGas = 50_000
+		if hasGas {
+			if cfg.ParallelInlineGas, err = strconv.ParseUint(gasStr, 10, 64); err != nil {
+				return fmt.Errorf("invalid strategy %q", name)
+			}
+		}
+	default:
+		return fmt.Errorf("unknown strategy %q", name)
 	}
-	return fmt.Errorf("unknown strategy %q", name)
+	return nil
 }
 
 // resetBenchStats clears engine statistics before a build.
@@ -72,5 +99,7 @@ func benchStats(m *Miner) map[string]any {
 		"requeued":        s.Requeued,
 		"validateTimeNs":  s.ValidateTime.Nanoseconds(),
 		"chainWaitTimeNs": s.ChainWaitTime.Nanoseconds(),
+		"inlined":         s.Inlined,
+		"inlineTimeNs":    s.InlineTime.Nanoseconds(),
 	}
 }

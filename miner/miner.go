@@ -53,6 +53,8 @@ type Config struct {
 	MaxBlobsPerBlock    int            // Maximum number of blobs per block (0 for unset uses protocol default)
 	ParallelExecution   bool           // Execute transactions optimistically with a shared worker pool.
 	ParallelWorkers     int            // Maximum optimistic execution workers.
+	ParallelInOrder     bool           // Commit parallel results in priority order, building the sequential block.
+	ParallelInlineGas   uint64         // With ParallelInOrder, execute txs using at most this much gas on the block state.
 
 	ParallelBenchmarkMode    string // Parallel execution benchmark mode: off or alternate.
 	ParallelBenchmarkOutput  string // JSONL output file for parallel execution benchmark events.

@@ -92,6 +92,13 @@ type Task struct {
 	requeues int // times the committer handed the task back as stale
 }
 
+// cheap reports whether the committer executes t itself rather than a worker:
+// for a transaction allowed at most inlineGas, validating and applying a
+// worker's result costs about as much as executing it.
+func (t *Task) cheap(inlineGas uint64) bool {
+	return t.Lazy.Gas <= inlineGas
+}
+
 // Follow records that t must not start before prev has executed once.
 func (t *Task) Follow(prev *Task) {
 	if prev == nil {

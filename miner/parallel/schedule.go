@@ -10,9 +10,10 @@ import (
 // scheduler hands tasks to a fixed set of workers, lowest position first, and
 // reports each finished task on finished.
 type scheduler struct {
-	store    *store
-	run      func(*Task) *Result
-	finished chan *Task
+	store     *store
+	run       func(*Task) *Result
+	finished  chan *Task
+	inlineGas uint64 // cheap tasks are left to the committer
 
 	mu            sync.Mutex
 	cond          *sync.Cond
@@ -23,10 +24,11 @@ type scheduler struct {
 	wg            sync.WaitGroup
 }
 
-func newScheduler(s *store, workers int, run func(*Task) *Result) *scheduler {
+func newScheduler(s *store, workers int, run func(*Task) *Result, inlineGas uint64) *scheduler {
 	sched := &scheduler{
-		store: s,
-		run:   run,
+		store:     s,
+		run:       run,
+		inlineGas: inlineGas,
 	}
 	sched.cond = sync.NewCond(&sched.mu)
 	sched.wg.Add(workers)
@@ -36,12 +38,13 @@ func newScheduler(s *store, workers int, run func(*Task) *Result) *scheduler {
 	return sched
 }
 
-// start releases every task that has no predecessor to wait for.
+// start releases every task that has no predecessor to wait for. Cheap tasks
+// are never released, and do not hold back their successors.
 func (s *scheduler) start(tasks []*Task) {
 	// every task finishes once, plus once per requeue
 	s.finished = make(chan *Task, len(tasks)*(1+maxRequeues))
 	for _, t := range tasks {
-		if t.prev == nil {
+		if !t.cheap(s.inlineGas) && (t.prev == nil || t.prev.cheap(s.inlineGas)) {
 			s.release(t)
 		}
 	}
@@ -118,7 +121,7 @@ func (s *scheduler) finish(t *Task, res *Result) {
 	t.result = res
 	t.mu.Unlock()
 	s.finished <- t
-	if t.next != nil {
+	if t.next != nil && !t.next.cheap(s.inlineGas) {
 		s.release(t.next)
 	}
 }

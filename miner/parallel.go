@@ -78,13 +78,15 @@ func (miner *Miner) commitTransactionsParallel(ctx context.Context, env *environ
 		return fmt.Errorf("missing parent header %x", env.header.ParentHash)
 	}
 	engine, err := parallel.New(parallel.Config{
-		Workers:  miner.parallelWorkerCount(),
-		Chain:    miner.chain,
-		Params:   miner.chainConfig,
-		DB:       env.state.Database(),
-		Root:     parent.Root,
-		Header:   env.header,
-		Coinbase: env.coinbase,
+		Workers:   miner.parallelWorkerCount(),
+		Chain:     miner.chain,
+		Params:    miner.chainConfig,
+		DB:        env.state.Database(),
+		Root:      parent.Root,
+		Header:    env.header,
+		Coinbase:  env.coinbase,
+		InOrder:   miner.config.ParallelInOrder,
+		InlineGas: miner.config.ParallelInlineGas,
 	})
 	if err != nil {
 		return err
@@ -114,7 +116,7 @@ func (miner *Miner) commitTransactionsParallel(ctx context.Context, env *environ
 		log.Info("Parallel block building summary", "number", env.header.Number, "batches", metrics.batches,
 			"planned", metrics.Planned, "chained", metrics.Chained, "longestChain", metrics.LongestChain,
 			"executions", metrics.Executions, "stale", metrics.Stale, "requeued", metrics.Requeued,
-			"committed", metrics.Committed, "dropped", metrics.Dropped, "wall", metrics.wall,
+			"committed", metrics.Committed, "dropped", metrics.Dropped, "inlined", metrics.Inlined, "wall", metrics.wall,
 			"executionTime", metrics.ExecutionTime, "validateTime", metrics.ValidateTime, "commitTime", metrics.CommitTime,
 			"waitTime", metrics.WaitTime, "chainWaitTime", metrics.ChainWaitTime)
 	}()
@@ -226,6 +228,14 @@ func (b *parallelBlock) Check(t *parallel.Task) (parallel.Verdict, error) {
 func (b *parallelBlock) blobFits(tx *types.Transaction) bool {
 	sidecar := tx.BlobTxSidecar()
 	return sidecar != nil && b.env.blobs+len(sidecar.Blobs) <= b.miner.maxBlobsPerBlock(b.env.header.Time)
+}
+
+// Execute runs the transaction of t on the block state through the sequential
+// path and appends it to the block.
+func (b *parallelBlock) Execute(t *parallel.Task) error {
+	env, tx := b.env, t.Tx()
+	env.state.SetTxContext(tx.Hash(), env.tcount, uint32(env.tcount+1))
+	return b.miner.commitTransaction(context.Background(), env, tx)
 }
 
 // Include applies a validated result and appends the transaction to the block.

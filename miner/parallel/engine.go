@@ -21,6 +21,14 @@ type Config struct {
 	Root     common.Hash // parent state root
 	Header   *types.Header
 	Coinbase common.Address
+
+	// InOrder commits in position order, which builds the block a sequential
+	// builder would. Otherwise results commit as they arrive.
+	InOrder bool
+	// InlineGas, with InOrder, makes the committer execute a transaction on the
+	// block state itself when it uses at most this much gas. For cheap
+	// transactions that costs less than validating and applying a result.
+	InlineGas uint64
 }
 
 // Stats counts what happened during a build.
@@ -33,11 +41,13 @@ type Stats struct {
 	Requeued     int // stale tasks handed back to the workers
 	Committed    int
 	Dropped      int
+	Inlined      int // transactions the committer executed on the block state
 
 	ExecutionTime time.Duration // time summed over all executions
 	ValidateTime  time.Duration // time the committer spent checking reads against the block state
 	CommitTime    time.Duration // time the committer spent applying results
 	WaitTime      time.Duration // time the committer spent waiting for results
+	InlineTime    time.Duration // time the committer spent executing transactions itself
 	ChainWaitTime time.Duration // the part of WaitTime spent with a chained task as the lowest one left
 }
 
@@ -48,6 +58,8 @@ type Engine struct {
 	committed *store // writes of committed transactions, versioned by commit order
 	exec      *executor
 	workers   int
+	inOrder   bool
+	inlineGas uint64
 	next      int
 	dropped   map[common.Address]bool
 	stats     Stats
@@ -74,8 +86,10 @@ func New(cfg Config) (*Engine, error) {
 			committed: committed,
 			parent:    parent,
 		},
-		workers: max(1, cfg.Workers),
-		dropped: make(map[common.Address]bool),
+		workers:   max(1, cfg.Workers),
+		inOrder:   cfg.InOrder,
+		inlineGas: cfg.InlineGas,
+		dropped:   make(map[common.Address]bool),
 	}, nil
 }
 
@@ -136,7 +150,7 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 		}
 		e.stats.LongestChain = max(e.stats.LongestChain, chain[t])
 	}
-	sched := newScheduler(e.store, e.workers, e.exec.run)
+	sched := newScheduler(e.store, e.workers, e.exec.run, e.inlineGas)
 	sched.start(tasks)
 	defer func() {
 		executions, executionTime := sched.stop()
@@ -154,6 +168,10 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 		coinbase:  e.exec.coinbase,
 		dropped:   e.dropped,
 		stats:     &e.stats,
+		inlineGas: e.inlineGas,
+	}
+	if e.inOrder {
+		return c.runInOrder(ctx, tasks)
 	}
 	return c.run(ctx, tasks)
 }
