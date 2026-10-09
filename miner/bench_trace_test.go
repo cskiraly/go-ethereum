@@ -412,6 +412,16 @@ var traceOut *json.Encoder
 // state, as a builder could from its mempool, and returns what each one
 // writes exactly, the balances it changes additively and those it reads
 // exactly.
+var buildBenchPredictTargeted = flag.Bool("buildbench.predicttargeted", false, "pre-execute only calls to contracts that wrote contended keys in earlier cases (learned across cases); implies -buildbench.predictstatic")
+
+// targets learns, across cases, which call targets write contended keys.
+var targets = struct {
+	hot     map[common.Address]bool // call targets whose calls wrote contended addresses
+	learned bool
+}{hot: make(map[common.Address]bool)}
+
+var buildBenchPredictStatic = flag.Bool("buildbench.predictstatic", false, "predict plain ETH transfers statically instead of executing them")
+
 var buildBenchPredict = flag.String("buildbench.predict", "parent", "predict mainnet candidates on the parent state of the block built (parent) or of the block each was included in (origin), as a node would on the head at the transaction's arrival")
 
 func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction, error) {
@@ -455,6 +465,15 @@ func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction,
 	readers := make(map[common.Hash]*parallel.SharedReader)
 	for _, tx := range env.candidates {
 		parent, header := contextFor(tx)
+		if *buildBenchPredictStatic || *buildBenchPredictTargeted {
+			if p, ok := staticTransferPrediction(env, tx, signer, header.Coinbase, parent); ok {
+				out[tx.Hash()] = p
+				continue
+			}
+		}
+		if *buildBenchPredictTargeted && targets.learned && tx.To() != nil && !targets.hot[*tx.To()] {
+			continue // not known to contend: no prediction, validation catches conflicts
+		}
 		shared := readers[parent.Root]
 		if shared == nil {
 			reader, err := db.Reader(parent.Root)
@@ -506,5 +525,64 @@ func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction,
 		}
 		out[tx.Hash()] = p
 	}
+	if *buildBenchPredictTargeted {
+		learnTargets(env, out)
+	}
 	return out, nil
+}
+
+// staticTransferPrediction predicts a plain ETH transfer (no calldata, to an
+// account without code) without executing it: the sender's nonce and balance
+// are written and its balance read, the recipient's balance and the
+// coinbase's change additively.
+func staticTransferPrediction(env *benchEnv, tx *types.Transaction, signer types.Signer, coinbase common.Address, parent *types.Header) (parallel.Prediction, bool) {
+	to := tx.To()
+	if to == nil || len(tx.Data()) > 0 || len(tx.SetCodeAuthorizations()) > 0 {
+		return parallel.Prediction{}, false
+	}
+	statedb, err := env.chain.StateAt(parent)
+	if err != nil || statedb.GetCodeSize(*to) > 0 {
+		return parallel.Prediction{}, false
+	}
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return parallel.Prediction{}, false
+	}
+	p := parallel.Prediction{
+		Writes:   []parallel.WriteKey{{Addr: from, Field: 'n'}, {Addr: from, Field: 'b'}},
+		Deltas:   []common.Address{coinbase},
+		Observes: []common.Address{from},
+	}
+	if tx.Value().Sign() > 0 {
+		p.Deltas = append(p.Deltas, *to)
+	}
+	return p, true
+}
+
+// learnTargets records the call targets whose predicted writes touched an
+// address written by at least two candidates.
+func learnTargets(env *benchEnv, predicted map[common.Hash]parallel.Prediction) {
+	writers := make(map[common.Address]int)
+	for _, p := range predicted {
+		seen := make(map[common.Address]bool)
+		for _, w := range p.Writes {
+			seen[w.Addr] = true
+		}
+		for a := range seen {
+			writers[a]++
+		}
+	}
+	for _, tx := range env.candidates {
+		p, ok := predicted[tx.Hash()]
+		if !ok || tx.To() == nil || len(tx.Data()) == 0 {
+			continue
+		}
+		for _, w := range p.Writes {
+			if writers[w.Addr] >= 2 {
+				targets.hot[*tx.To()] = true
+				break
+			}
+		}
+	}
+	targets.learned = true
 }
