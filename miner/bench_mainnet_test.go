@@ -41,6 +41,7 @@ import (
 var (
 	buildBenchMainnet = flag.String("buildbench.mainnet", "", "geth datadir to replay mainnet blocks from, instead of the synthetic workloads; it is opened read-write, so use a disposable copy")
 	buildBenchBlocks  = flag.String("buildbench.blocks", "last:10", "mainnet blocks N to build: FROM-TO, N, or last:COUNT (the latest whose candidates and parent state exist)")
+	buildBenchCold    = flag.Bool("buildbench.cold", false, "mainnet: shrink geth's own caches (pebble block cache, pathdb clean caches) so state reads reach the OS page cache")
 	buildBenchLog     = flag.Bool("buildbench.log", false, "print geth's info logs, such as opening the chain")
 	buildBenchDepth   = flag.Int("buildbench.depth", 2, "mainnet candidates: the transactions of blocks N to N+depth-1, built on N-1")
 )
@@ -123,10 +124,14 @@ func openBenchChain(datadir string) (*core.BlockChain, consensus.Engine, error) 
 		kv  ethdb.KeyValueStore
 		err error
 	)
+	cache := 2048
+	if *buildBenchCold {
+		cache = 16
+	}
 	if pebble.NeedsV1(dir) {
-		kv, err = pebble.NewV1(dir, 2048, 4096, "", false)
+		kv, err = pebble.NewV1(dir, cache, 4096, "", false)
 	} else {
-		kv, err = pebble.New(dir, 2048, 4096, "", false)
+		kv, err = pebble.New(dir, cache, 4096, "", false)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -142,6 +147,9 @@ func openBenchChain(datadir string) (*core.BlockChain, consensus.Engine, error) 
 	// shutdown. Without them the chain rewinds to the state on disk, ~128
 	// blocks back, and truncates the blocks above it.
 	cfg.TrieJournalDirectory = filepath.Join(datadir, "geth", "triedb")
+	if *buildBenchCold {
+		cfg.TrieCleanLimit, cfg.SnapshotLimit = 1, 1
+	}
 	chain, err := core.NewBlockChain(db, nil, engine, cfg)
 	if err != nil {
 		db.Close()

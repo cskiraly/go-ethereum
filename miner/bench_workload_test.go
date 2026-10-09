@@ -45,6 +45,11 @@ var (
 	// touches no storage.
 	benchComputeContract = common.HexToAddress("0x00000000000000000000000000000000000d0000")
 	benchComputeCode     = common.FromHex("0x6107d05b60206000206000526001900380600357" + "00")
+
+	// benchCoinbaseRevertContract sends 1 wei to the coinbase and then
+	// reverts: call(gas, coinbase, 1, 0, 0, 0, 0); revert(0, 0)
+	benchCoinbaseRevertContract = common.HexToAddress("0x00000000000000000000000000000000000e0000")
+	benchCoinbaseRevertCode     = common.FromHex("0x6000600060006000600141" + "5af1" + "50" + "60006000fd")
 )
 
 const (
@@ -116,6 +121,18 @@ var benchWorkloads = []benchWorkload{
 		g.deploy(benchComputeContract, benchComputeCode, nil)
 		for gas := uint64(0); gas < g.candidateGas; gas += benchComputeUse {
 			g.call(g.newSender(), benchComputeContract, nil, benchComputeGas)
+		}
+	}},
+	{"coinbase-revert", "calls that pay the coinbase in a call that reverts, among transfers", func(g *benchGen) {
+		g.alloc[benchCoinbaseRevertContract] = types.Account{Nonce: 1, Code: benchCoinbaseRevertCode, Balance: benchFunds}
+		for gas := uint64(0); gas < g.candidateGas; {
+			if g.rng.Intn(4) == 0 {
+				g.call(g.newSender(), benchCoinbaseRevertContract, nil, 100_000)
+				gas += 40_000
+			} else {
+				g.transfer(g.newSender(), g.newAccount())
+				gas += benchTransferUse
+			}
 		}
 	}},
 	{"mixed", "50% transfers, 30% token, 10% token-hot, 10% compute", func(g *benchGen) {

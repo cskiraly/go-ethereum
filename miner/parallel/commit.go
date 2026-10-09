@@ -243,7 +243,11 @@ func (c *committer) storeStale(t *Task, r *Result) (key, bool) {
 			stale = readStale(sdb, k, v)
 		}
 		if !stale && k.field == storage {
-			stale, _ = checkAs(key{addr: k.addr, field: destructed, slot: k.slot}, key{addr: k.addr, field: destructed})
+			// a destroyed and recreated account can make an unchanged raw
+			// slot read differently: be conservative with any destruction
+			if _, _, destroyed := c.store.read(key{addr: k.addr, field: destructed}, t.Position); destroyed {
+				stale = true
+			}
 		}
 		if stale {
 			return k, true
