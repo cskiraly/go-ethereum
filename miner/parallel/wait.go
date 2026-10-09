@@ -56,8 +56,13 @@ func (w *writeWaiter) waitFor(ts []*Task, pos int) {
 				break
 			}
 		}
-		if pending == nil || !w.sched.suspend(pending.done) {
+		if pending == nil {
 			return
+		}
+		if !w.sched.suspend(pending.done) {
+			// the run stopped: abandon this execution rather than
+			// continue it without a slot
+			panic(errRunStopped)
 		}
 	}
 }

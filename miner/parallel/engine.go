@@ -109,6 +109,10 @@ func New(cfg Config) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !cfg.InOrder {
+		// only the in-order committer executes cheap transactions itself
+		cfg.InlineGas = 0
+	}
 	s, committed := newStore(), newStore()
 	return &Engine{
 		store:     s,

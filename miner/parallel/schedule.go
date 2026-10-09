@@ -72,7 +72,7 @@ func (s *scheduler) dispatch() {
 // hasReady drops tasks that were never released and reports whether one is
 // left. The caller holds mu.
 func (s *scheduler) hasReady() bool {
-	for len(s.ready) > 0 && !s.ready[0].released {
+	for len(s.ready) > 0 && !s.ready[0].isReleased() {
 		heap.Pop(&s.ready)
 	}
 	return len(s.ready) > 0

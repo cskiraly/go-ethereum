@@ -15,7 +15,10 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
-var errUnavailable = errors.New("transaction no longer available")
+var (
+	errUnavailable = errors.New("transaction no longer available")
+	errRunStopped  = errors.New("run stopped while waiting")
+)
 
 // noVersions lies below every position, so a reader at it serves only its parent.
 const noVersions = math.MinInt
@@ -65,6 +68,10 @@ func (e *executor) runOn(t *Task, sdb *state.StateDB) *Result {
 func (e *executor) execute(t *Task, reader *versionedStateReader) (res *Result) {
 	defer func() {
 		if r := recover(); r != nil {
+			if r == errRunStopped {
+				res = &Result{Err: errRunStopped}
+				return
+			}
 			log.Error("parallel transaction execution panicked", "hash", t.Lazy.Hash, "position", t.Position, "err", r, "stack", string(debug.Stack()))
 			res = &Result{Err: fmt.Errorf("execution panic: %v", r)}
 		}

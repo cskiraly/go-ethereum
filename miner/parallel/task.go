@@ -107,6 +107,12 @@ type Task struct {
 	observes  map[common.Address]bool
 }
 
+func (t *Task) isReleased() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.released
+}
+
 func (t *Task) markDone() {
 	t.doneOnce.Do(func() { close(t.done) })
 }
