@@ -39,6 +39,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -270,6 +271,7 @@ type benchRecord struct {
 	GOMAXPROCS    int              `json:"gomaxprocs"`
 	WallNs        int64            `json:"wallNs"`
 	CPUNs         int64            `json:"cpuNs"`                  // user and system CPU of the process during the build
+	IO            *benchIO         `json:"io,omitempty"`           // what the process read during the build
 	PreexecCPUNs  int64            `json:"preexecCpuNs,omitempty"` // the same, pre-executing the candidates (outside wallNs)
 	Txs           int              `json:"txs"`
 	Candidates    int              `json:"candidates"`
@@ -374,17 +376,19 @@ func buildOnce(env *benchEnv, m *Miner, spans *spanRecorder) (*newPayloadResult,
 	}
 	resetBenchStats(m)
 	ctx, phases := spans.start()
-	cpu := processCPU()
+	cpu, io := processCPU(), processIO()
 	start := time.Now()
 	res := m.generateWork(ctx, env.params(), false)
 	wall := time.Since(start)
 	cpu = processCPU() - cpu
+	io = processIO().sub(io)
 
 	rec := benchRecord{
 		Workload:   env.name,
 		GOMAXPROCS: runtime.GOMAXPROCS(0),
 		WallNs:     wall.Nanoseconds(),
 		CPUNs:      cpu.Nanoseconds(),
+		IO:         &io,
 		Candidates: env.txs,
 		Engine:     benchStats(m),
 		PhasesNs:   phases(),
@@ -735,4 +739,43 @@ func processCPU() time.Duration {
 		return 0
 	}
 	return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
+}
+
+// benchIO is what the process read: from storage (readBytes, inBlocks of 512
+// bytes, majFaults) and in all (rchar, including the page cache).
+type benchIO struct {
+	ReadBytes int64 `json:"readBytes"`
+	Rchar     int64 `json:"rchar"`
+	MajFaults int64 `json:"majFaults"`
+	InBlocks  int64 `json:"inBlocks"`
+}
+
+func (a benchIO) sub(b benchIO) benchIO {
+	return benchIO{a.ReadBytes - b.ReadBytes, a.Rchar - b.Rchar, a.MajFaults - b.MajFaults, a.InBlocks - b.InBlocks}
+}
+
+// processIO returns what the process read so far, from /proc/self/io and
+// getrusage; fields it cannot read stay zero.
+func processIO() benchIO {
+	var io benchIO
+	if data, err := os.ReadFile("/proc/self/io"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			name, val, ok := strings.Cut(line, ": ")
+			if !ok {
+				continue
+			}
+			n, _ := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
+			switch name {
+			case "read_bytes":
+				io.ReadBytes = n
+			case "rchar":
+				io.Rchar = n
+			}
+		}
+	}
+	var ru syscall.Rusage
+	if syscall.Getrusage(syscall.RUSAGE_SELF, &ru) == nil {
+		io.MajFaults, io.InBlocks = ru.Majflt, ru.Inblock
+	}
+	return io
 }
