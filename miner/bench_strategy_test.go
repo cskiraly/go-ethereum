@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -144,11 +145,12 @@ func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
 		return nil
 	}
 	if env.predicted == nil {
+		started := time.Now()
 		predicted, err := predictCandidateWrites(env)
 		if err != nil {
 			return err
 		}
-		env.predicted = predicted
+		env.predicted, env.predictNs = predicted, time.Since(started).Nanoseconds()
 	}
 	m.parallelPredict = func(hash common.Hash) parallel.Prediction { return env.predicted[hash] }
 	return nil

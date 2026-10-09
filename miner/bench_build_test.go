@@ -90,6 +90,7 @@ type benchEnv struct {
 	candidates []*types.Transaction
 	signer     types.Signer
 	predicted  map[common.Hash]parallel.Prediction // access of each candidate executed alone, computed once
+	predictNs  int64                               // time computing predicted
 
 	check    func(*types.Block) error // executes and validates a built block
 	verified map[common.Hash]error    // check results by block hash
@@ -272,6 +273,7 @@ type benchRecord struct {
 	Error      string           `json:"error,omitempty"`
 	Invalid    string           `json:"invalid,omitempty"` // why the verifier rejected the block
 	Engine     map[string]any   `json:"engine,omitempty"`
+	PredictNs  int64            `json:"predictNs,omitempty"` // time predicting the candidates (outside wallNs)
 	PhasesNs   map[string]int64 `json:"phasesNs,omitempty"`
 }
 
@@ -514,6 +516,9 @@ func TestBuildBench(t *testing.T) {
 			records := make(map[string][]benchRecord)
 			for _, b := range builds {
 				rec := b.rec
+				if strings.HasPrefix(rec.Strategy, "predict-") {
+					rec.PredictNs = env.predictNs
+				}
 				rec.Match = rec.Error == "" && rec.BlockHash == reference.Hash()
 				switch {
 				case rec.Error != "":
