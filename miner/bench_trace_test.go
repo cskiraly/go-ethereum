@@ -448,6 +448,16 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 	if err != nil {
 		return nil, err
 	}
+	// the block's system calls come first, as in the build
+	err = pre.Seed(func(sdb vm.StateDB) error {
+		evm := vm.NewEVM(core.NewEVMBlockContext(header, env.chain, &header.Coinbase), sdb, env.chain.Config(), vm.Config{})
+		defer evm.Release()
+		core.PreExecution(context.Background(), header.ParentBeaconRoot, parent, env.chain.Config(), evm, header.Number, header.Time)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	// The transactions of one sender run in nonce order, each on top of the
 	// results of the earlier ones (unless -buildbench.preexecalone), on
 	// -buildbench.preexecpar goroutines; busy is their summed time.

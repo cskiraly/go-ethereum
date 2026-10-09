@@ -135,6 +135,33 @@ var benchWorkloads = []benchWorkload{
 			}
 		}
 	}},
+	{"create", "senders deploying contracts in nonce chains, some destroyed in their constructor, among transfers", func(g *benchGen) {
+		for gas := uint64(0); gas < g.candidateGas; {
+			s := g.newSender()
+			for range 1 + g.rng.Intn(4) {
+				if g.rng.Intn(3) == 0 {
+					g.create(s, benchDestroyInit)
+				} else {
+					g.create(s, benchStoreInit)
+				}
+				gas += benchCreateUse
+			}
+			g.transfer(g.newSender(), g.newAccount())
+			gas += benchTransferUse
+		}
+	}},
+	{"beacon-read", "calls storing the beacon root that the block's system call writes, among transfers", func(g *benchGen) {
+		g.deploy(benchBeaconReader, benchBeaconReaderCode, nil)
+		for gas := uint64(0); gas < g.candidateGas; {
+			if g.rng.Intn(3) == 0 {
+				g.call(g.newSender(), benchBeaconReader, nil, 100_000)
+				gas += 50_000
+			} else {
+				g.transfer(g.newSender(), g.newAccount())
+				gas += benchTransferUse
+			}
+		}
+	}},
 	{"mixed", "50% transfers, 30% token, 10% token-hot, 10% compute", func(g *benchGen) {
 		g.deploy(benchComputeContract, benchComputeCode, nil)
 		holders := g.tokenHolders(2000)
@@ -263,6 +290,20 @@ func (g *benchGen) sign(sender int, to common.Address, value *big.Int, data []by
 	g.txs = append(g.txs, tx)
 }
 
+// create signs a contract creation running init.
+func (g *benchGen) create(sender int, init []byte) {
+	tx := types.MustSignNewTx(g.keys[sender], g.signer, &types.DynamicFeeTx{
+		ChainID:   g.config.ChainID,
+		Nonce:     g.nonces[sender],
+		GasTipCap: big.NewInt(int64(1+g.rng.Intn(20)) * params.GWei / 2),
+		GasFeeCap: big.NewInt(100 * params.GWei),
+		Gas:       benchCreateGas,
+		Data:      init,
+	})
+	g.nonces[sender]++
+	g.txs = append(g.txs, tx)
+}
+
 func (g *benchGen) transfer(sender int, to common.Address) {
 	g.sign(sender, to, big.NewInt(1), nil, params.TxGas)
 }
@@ -274,3 +315,23 @@ func (g *benchGen) tokenTransfer(sender int, to common.Address) {
 func (g *benchGen) call(sender int, to common.Address, data []byte, gas uint64) {
 	g.sign(sender, to, nil, data, gas)
 }
+
+const (
+	benchCreateGas = 120_000
+	benchCreateUse = 80_000
+)
+
+var (
+	// benchStoreInit stores 1 in slot 0 and deploys a one-byte contract.
+	benchStoreInit = common.FromHex("600160005560016000f3")
+	// benchDestroyInit destroys the contract in its constructor, sending
+	// nothing to the coinbase.
+	benchDestroyInit = common.FromHex("41ff")
+
+	benchBeaconReader = common.HexToAddress("0xbeac04")
+	// benchBeaconReaderCode stores, under the caller, the beacon root of the
+	// block's timestamp, which the block's pre-execution system call writes:
+	// mstore(0, timestamp); staticcall(gas, beaconRoots, 0, 32, 0, 32);
+	// sstore(caller, mload(0)).
+	benchBeaconReaderCode = common.FromHex("4260005260206000602060007300" + "0f3df6d732807ef1319fb7b8bb8522d0beac02" + "5afa50600051335500")
+)

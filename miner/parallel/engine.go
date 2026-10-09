@@ -205,36 +205,45 @@ func (e *Engine) Dropped(sender common.Address) bool {
 // task, so executions see the changes made before the first transaction
 // parent writes are written at position -1 in the store
 func (e *Engine) Seed(fn func(vm.StateDB) error) error {
-	reader := newVersionedStateReader(0, e.store, e.exec.parent)
-	sdb, err := state.NewWithReader(e.exec.root, e.exec.db, reader)
+	writes, codes, err := e.exec.seedWrites(fn)
 	if err != nil {
 		return err
 	}
-	tracked := newTrackingStateDB(sdb, reader, e.exec.coinbase)
+	e.store.publish(-1, writes, codes)
+	e.committed.publish(-1, writes, codes)
+	return nil
+}
+
+// seedWrites runs fn on the parent state and returns its writes, additive
+// balance changes made absolute, as the committer publishes them for
+// transactions.
+func (e *executor) seedWrites(fn func(vm.StateDB) error) (map[key]value, map[common.Hash][]byte, error) {
+	reader := newVersionedStateReader(0, e.store, e.parent)
+	sdb, err := state.NewWithReader(e.root, e.db, reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	tracked := newTrackingStateDB(sdb, reader, e.coinbase)
 	if err := fn(tracked); err != nil {
-		return err
+		return nil, nil, err
 	}
 	res, err := tracked.result()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	// additive balance changes become absolute versions, as the committer
-	// publishes them for transactions
 	writes := res.writes
 	if len(res.deltas) > 0 || res.fee != nil {
 		writes = maps.Clone(res.writes)
 		credited := slices.Collect(maps.Keys(res.deltas))
 		if res.fee != nil {
-			credited = append(credited, e.exec.coinbase)
+			credited = append(credited, e.coinbase)
 		}
 		for _, addr := range credited {
 			writes[key{addr: addr, field: exists}] = boolValue(true)
 			writes[key{addr: addr, field: balance}] = balanceValue(sdb.GetBalance(addr))
 		}
 	}
-	e.store.publish(-1, writes, res.codes)
-	e.committed.publish(-1, writes, res.codes)
-	return nil
+	return writes, res.codes, nil
 }
 
 // Run executes tasks and commits them into block as their results arrive. It

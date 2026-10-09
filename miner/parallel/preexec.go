@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
@@ -29,6 +30,22 @@ import (
 type Preexecutor struct {
 	exec    *executor
 	context common.Hash
+	seed    map[key]value // the writes of Seed, under every execution
+	codes   map[common.Hash][]byte
+}
+
+// Seed runs fn on the parent state, as Engine.Seed does for a build, and
+// executes every later transaction on top of its writes: the block's system
+// calls, such as the one storing the beacon root, which transactions can read.
+// It must be called before Run.
+func (p *Preexecutor) Seed(fn func(vm.StateDB) error) error {
+	writes, codes, err := p.exec.seedWrites(fn)
+	if err != nil {
+		return err
+	}
+	p.seed, p.codes = writes, codes
+	p.exec.store.publish(-1, writes, codes)
+	return nil
 }
 
 // executionContext identifies what an execution depends on besides the
@@ -114,6 +131,9 @@ func (p *Preexecutor) RunAfter(tx *types.Transaction, basis []*Result) *Result {
 	store := p.exec.store
 	if len(basis) > 0 {
 		store = newStore()
+		if p.seed != nil {
+			store.publish(-1, p.seed, p.codes)
+		}
 		for i, b := range basis {
 			writes := b.writes
 			if len(b.deltas) > 0 {
