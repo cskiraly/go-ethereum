@@ -216,8 +216,13 @@ func (t *trackingStateDB) Exist(addr common.Address) bool {
 	return t.StateDB.Exist(addr)
 }
 
+// Empty reads the balance only if the account may be empty: one with code or
+// a nonce never is. Every value-carrying call asks this of its target.
 func (t *trackingStateDB) Empty(addr common.Address) bool {
-	t.touchAll(addr)
+	t.touch(addr, exists, nonce, code)
+	if t.mayBeEmpty(addr) {
+		t.touch(addr, balance)
+	}
 	return t.StateDB.Empty(addr)
 }
 

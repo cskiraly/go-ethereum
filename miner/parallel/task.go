@@ -30,6 +30,8 @@ const (
 	// destructed marks the position at which the account was deleted. Its
 	// storage reads as empty from there on.
 	destructed
+	// minBalance only labels a failed minimum-balance requirement in stats.
+	minBalance
 )
 
 // key identifies one versioned piece of state.

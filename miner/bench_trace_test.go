@@ -293,7 +293,10 @@ func (a *accessRecorder) Exist(addr common.Address) bool {
 }
 
 func (a *accessRecorder) Empty(addr common.Address) bool {
-	a.read(addr, "ebnc")
+	a.read(addr, "enc")
+	if a.mayBeEmpty(addr) {
+		a.read(addr, "b")
+	}
 	return a.StateDB.Empty(addr)
 }
 

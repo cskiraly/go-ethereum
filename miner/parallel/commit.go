@@ -341,7 +341,7 @@ func resultStale(sdb *state.StateDB, r *Result) (key, bool) {
 		return k, true
 	}
 	if addr, ok := r.holds(sdb); !ok {
-		return key{addr: addr, field: balance}, true
+		return key{addr: addr, field: minBalance}, true
 	}
 	return key{}, false
 }

@@ -2,6 +2,7 @@ package parallel
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -72,6 +73,10 @@ func (s *Stats) recordStale(k key) {
 		loc += "/storage"
 	} else if k.field == balance {
 		loc += "/balance"
+	} else if k.field == minBalance {
+		loc += "/minbalance"
+	} else {
+		loc += fmt.Sprintf("/field%d", k.field)
 	}
 	s.StaleBy[loc]++
 }
