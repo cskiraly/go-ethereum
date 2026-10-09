@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -129,6 +130,33 @@ func TestReadEventStreamReceived(t *testing.T) {
 	}
 }
 
+// TestReadEventStreamErrorBody checks that a failed subscription doesn't wait long
+// for an error body that doesn't end.
+func TestReadEventStreamErrorBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, "unavailable")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	defer server.CloseClientConnections()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewBeaconLightApi(server.URL, nil, nil).readEventStream(context.Background(), make(chan eventsource.Event))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.HasSuffix(err.Error(), "status code 503: unavailable") {
+			t.Errorf("wrong error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("still reading the error body")
+	}
+}
+
 // TestHeadListenerStop checks that stopping the head listener returns while a
 // subscription waits for the response, and while a stream is open.
 func TestHeadListenerStop(t *testing.T) {
@@ -165,6 +193,7 @@ func TestHeadListenerStop(t *testing.T) {
 				OnFinality:   func(types.FinalityUpdate) {},
 				OnError:      func(error) {},
 			})
+			defer stop() // on an early failure; stopping twice is fine
 			select {
 			case <-subscribed:
 			case <-time.After(5 * time.Second):
@@ -182,4 +211,68 @@ func TestHeadListenerStop(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEventStreamCancel checks that the event stream functions return when the
+// context is closed while they wait: reading the stream, passing on an event,
+// reporting an error.
+func TestEventStreamCancel(t *testing.T) {
+	// check serves handler, runs start, closes the context once start returns,
+	// and waits for the channel start returned to be closed.
+	check := func(t *testing.T, handler http.HandlerFunc, start func(api *BeaconLightApi, ctx context.Context) <-chan struct{}) {
+		server := httptest.NewServer(handler)
+		defer server.Close()
+		defer server.CloseClientConnections() // ends the open streams on a failure
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		returned := start(NewBeaconLightApi(server.URL, nil, nil), ctx)
+		cancel()
+		select {
+		case <-returned:
+		case <-time.After(5 * time.Second):
+			t.Fatal("didn't return after the context was closed")
+		}
+	}
+	// stream sends events and keeps the stream open.
+	stream := func(events int) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, strings.Repeat("event: head\ndata: {}\n\n", events))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}
+	}
+	// readStream runs readEventStream and takes its first event.
+	readStream := func(api *BeaconLightApi, ctx context.Context) <-chan struct{} {
+		var (
+			events   = make(chan eventsource.Event)
+			returned = make(chan struct{})
+		)
+		go func() {
+			api.readEventStream(ctx, events)
+			close(returned)
+		}()
+		<-events
+		return returned
+	}
+	// One event, taken: readEventStream waits for the next one.
+	t.Run("reading", func(t *testing.T) { check(t, stream(1), readStream) })
+	// Two events, the second not taken: readEventStream waits to pass it on.
+	t.Run("event", func(t *testing.T) { check(t, stream(2), readStream) })
+	// A failed subscription, its error not taken: runEventStream waits to report it.
+	t.Run("error", func(t *testing.T) {
+		unavailable := func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		}
+		check(t, unavailable, func(api *BeaconLightApi, ctx context.Context) <-chan struct{} {
+			returned := make(chan struct{})
+			go func() {
+				api.runEventStream(ctx, make(chan eventsource.Event), make(chan error))
+				close(returned)
+			}()
+			time.Sleep(100 * time.Millisecond) // until it waits to report the error
+			return returned
+		})
+	})
 }

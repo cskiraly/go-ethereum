@@ -653,6 +653,10 @@ func (api *BeaconLightApi) readEventStream(ctx context.Context, eventCh chan<- e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		// The start of the body says why, but don't wait long for a body that
+		// doesn't end.
+		timer := time.AfterFunc(time.Second, func() { resp.Body.Close() })
+		defer timer.Stop()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		return false, fmt.Errorf("error creating event subscription: status code %d: %s", resp.StatusCode, bytes.TrimSpace(body))
 	}
