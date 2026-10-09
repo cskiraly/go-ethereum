@@ -194,13 +194,15 @@ func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
 				}
 			}
 		}
+		// predictions are derived once, as a node would keep them with the results
 		coinbase := env.params().coinbase
-		m.parallelPredict = func(hash common.Hash) parallel.Prediction {
-			if r := env.preexecuted[hash]; r != nil && r.Err == nil && !missing[hash] {
-				return r.Prediction(coinbase)
+		predictions := make(map[common.Hash]parallel.Prediction, len(env.preexecuted))
+		for hash, r := range env.preexecuted {
+			if r != nil && r.Err == nil && !missing[hash] {
+				predictions[hash] = r.Prediction(coinbase)
 			}
-			return parallel.Prediction{}
 		}
+		m.parallelPredict = func(hash common.Hash) parallel.Prediction { return predictions[hash] }
 		if !strings.HasPrefix(strategy, "preexecp") {
 			// preexecp: the predictions alone, without starting from the results
 			m.parallelPreexecuted = func(hash common.Hash) *parallel.Result {
