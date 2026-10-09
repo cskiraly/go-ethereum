@@ -29,6 +29,8 @@ import (
 	"math/big"
 	"math/rand"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -446,9 +448,34 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 	if err != nil {
 		return nil, err
 	}
+	// executions run on -buildbench.preexecpar goroutines; busy is their
+	// summed time
+	results := make([]*parallel.Result, len(env.candidates))
+	var (
+		next atomic.Int64
+		busy atomic.Int64
+		wg   sync.WaitGroup
+	)
+	for range max(1, *buildBenchPreexecPar) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(results) {
+					return
+				}
+				started := time.Now()
+				results[i] = pre.Run(env.candidates[i])
+				busy.Add(time.Since(started).Nanoseconds())
+			}
+		}()
+	}
+	wg.Wait()
+	env.preexecBusyNs = busy.Load()
 	out := make(map[common.Hash]*parallel.Result, len(env.candidates))
-	for _, tx := range env.candidates {
-		out[tx.Hash()] = pre.Run(tx)
+	for i, tx := range env.candidates {
+		out[tx.Hash()] = results[i]
 	}
 	return out, nil
 }

@@ -69,7 +69,7 @@ func applyBenchStrategy(name string, cfg *Config) error {
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
-	case "inorderv", "predictv":
+	case "inorderv", "predictv", "preexecv":
 		// as below, validating results against the version store
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
@@ -155,6 +155,10 @@ func benchProcessBlock(chain *core.BlockChain, parent *types.Header, block *type
 	return chain.Validator().ValidateState(block, statedb, res, false)
 }
 
+var buildBenchPreexecPar = flag.Int("buildbench.preexecpar", 1, "preexec strategies: goroutines pre-executing the candidates")
+
+var buildBenchPreexecMiss = flag.Float64("buildbench.preexecmiss", 0, "preexec strategies: leave this fraction of the candidates without a pre-executed result")
+
 var buildBenchPredictDrop = flag.Float64("buildbench.predictdrop", 0, "predict strategies: drop this fraction of the predicted accesses, to test incomplete predictions")
 
 // prepareBenchMiner installs what a strategy needs beyond the config.
@@ -170,16 +174,32 @@ func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
 			}
 			env.preexecuted, env.preexecNs = results, time.Since(started).Nanoseconds()
 		}
+		// -buildbench.preexecmiss: candidates without a result, as if they
+		// arrived too late; they have no prediction either
+		missing := make(map[common.Hash]bool)
+		if *buildBenchPreexecMiss > 0 {
+			rng := rand.New(rand.NewSource(*buildBenchSeed))
+			for _, tx := range env.candidates {
+				if rng.Float64() < *buildBenchPreexecMiss {
+					missing[tx.Hash()] = true
+				}
+			}
+		}
 		coinbase := env.params().coinbase
 		m.parallelPredict = func(hash common.Hash) parallel.Prediction {
-			if r := env.preexecuted[hash]; r != nil && r.Err == nil {
+			if r := env.preexecuted[hash]; r != nil && r.Err == nil && !missing[hash] {
 				return r.Prediction(coinbase)
 			}
 			return parallel.Prediction{}
 		}
 		if !strings.HasPrefix(strategy, "preexecp") {
 			// preexecp: the predictions alone, without starting from the results
-			m.parallelPreexecuted = func(hash common.Hash) *parallel.Result { return env.preexecuted[hash] }
+			m.parallelPreexecuted = func(hash common.Hash) *parallel.Result {
+				if missing[hash] {
+					return nil
+				}
+				return env.preexecuted[hash]
+			}
 		}
 		return nil
 	}

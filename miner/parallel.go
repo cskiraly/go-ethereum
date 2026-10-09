@@ -295,7 +295,8 @@ func (b *parallelBlock) Include(t *parallel.Task, r *parallel.Result) error {
 	receipt.BlockNumber = env.header.Number
 	receipt.TransactionIndex = uint(env.tcount)
 	receipt.Logs = env.state.GetLogs(tx.Hash(), env.header.Number.Uint64(), blockHash, env.header.Time)
-	receipt.Bloom = types.CreateBloom(receipt)
+	// the execution computed the bloom already: it covers the addresses and
+	// topics of the logs, which do not change here
 	env.header.GasUsed = env.gasPool.Used()
 
 	if t.Blob {

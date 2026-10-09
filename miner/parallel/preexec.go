@@ -3,6 +3,7 @@ package parallel
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -30,8 +31,11 @@ type Preexecutor struct {
 // state changes of other transactions: the parent state and the header fields
 // the EVM reads. A pre-executed result is used only in a build with the same
 // context, since validating its state reads cannot detect a different one.
-func executionContext(root common.Hash, h *types.Header, coinbase common.Address) common.Hash {
+func executionContext(config *params.ChainConfig, root common.Hash, h *types.Header, coinbase common.Address) common.Hash {
 	var buf []byte
+	// the rules and chain id in force, as opcodes like CHAINID see them
+	rules := config.Rules(h.Number, h.Difficulty == nil || h.Difficulty.Sign() == 0, h.Time)
+	buf = fmt.Appendf(buf, "%+v", rules)
 	u64 := func(v uint64) { buf = binary.BigEndian.AppendUint64(buf, v) }
 	bigInt := func(v *big.Int) {
 		if v == nil {
@@ -73,7 +77,7 @@ func NewPreexecutor(chain core.ChainContext, config *params.ChainConfig, db stat
 			return nil, err
 		}
 	}
-	return &Preexecutor{context: executionContext(root, header, header.Coinbase), exec: &executor{
+	return &Preexecutor{context: executionContext(config, root, header, header.Coinbase), exec: &executor{
 		chain:     chain,
 		config:    config,
 		db:        db,

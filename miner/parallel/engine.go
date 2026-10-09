@@ -153,7 +153,7 @@ func New(cfg Config) (*Engine, error) {
 		inlineGas: cfg.InlineGas,
 		predict:   cfg.Predict,
 		preexec:   cfg.Preexecuted,
-		context:   executionContext(cfg.Root, cfg.Header, cfg.Coinbase),
+		context:   executionContext(cfg.Params, cfg.Root, cfg.Header, cfg.Coinbase),
 		dropped:   make(map[common.Address]bool),
 	}, nil
 }

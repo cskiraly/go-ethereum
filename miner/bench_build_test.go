@@ -82,18 +82,19 @@ type benchEnv struct {
 	gasCeil     uint64
 	params      func() *generateParams
 
-	config      *params.ChainConfig
-	engine      consensus.Engine
-	chain       *core.BlockChain
-	pool        *txpool.TxPool
-	txs         int
-	candidates  []*types.Transaction
-	signer      types.Signer
-	predicted   map[common.Hash]parallel.Prediction // access of each candidate executed alone, computed once
-	predictNs   int64                               // time computing predicted
-	preexecuted map[common.Hash]*parallel.Result    // results of each candidate executed alone, computed once
-	preexecNs   int64                               // time computing preexecuted
-	origin      map[common.Hash]*types.Header       // mainnet: the block each candidate was included in
+	config        *params.ChainConfig
+	engine        consensus.Engine
+	chain         *core.BlockChain
+	pool          *txpool.TxPool
+	txs           int
+	candidates    []*types.Transaction
+	signer        types.Signer
+	predicted     map[common.Hash]parallel.Prediction // access of each candidate executed alone, computed once
+	predictNs     int64                               // time computing predicted
+	preexecuted   map[common.Hash]*parallel.Result    // results of each candidate executed alone, computed once
+	preexecNs     int64                               // time computing preexecuted
+	preexecBusyNs int64                               // of that, summed over the goroutines
+	origin        map[common.Hash]*types.Header       // mainnet: the block each candidate was included in
 
 	check    func(*types.Block) error // executes and validates a built block
 	verified map[common.Hash]error    // check results by block hash
@@ -258,26 +259,27 @@ func (e *benchEnv) newMiner(strategy string) (*Miner, error) {
 
 // benchRecord is one build.
 type benchRecord struct {
-	Workload   string           `json:"workload"`
-	Strategy   string           `json:"strategy"`
-	Rep        int              `json:"rep"`
-	Slot       int              `json:"slot"` // position of this build within the rep
-	Seed       int64            `json:"seed"`
-	Depth      float64          `json:"candidateBlocks"` // -buildbench.candidates
-	GOMAXPROCS int              `json:"gomaxprocs"`
-	WallNs     int64            `json:"wallNs"`
-	Txs        int              `json:"txs"`
-	Candidates int              `json:"candidates"`
-	GasUsed    uint64           `json:"gasUsed"`
-	Fees       string           `json:"fees"`
-	BlockHash  common.Hash      `json:"blockHash"`
-	StateRoot  common.Hash      `json:"stateRoot"`
-	Match      bool             `json:"match"` // block identical to the baseline strategy's
-	Error      string           `json:"error,omitempty"`
-	Invalid    string           `json:"invalid,omitempty"` // why the verifier rejected the block
-	Engine     map[string]any   `json:"engine,omitempty"`
-	PredictNs  int64            `json:"predictNs,omitempty"` // time predicting the candidates (outside wallNs)
-	PhasesNs   map[string]int64 `json:"phasesNs,omitempty"`
+	Workload      string           `json:"workload"`
+	Strategy      string           `json:"strategy"`
+	Rep           int              `json:"rep"`
+	Slot          int              `json:"slot"` // position of this build within the rep
+	Seed          int64            `json:"seed"`
+	Depth         float64          `json:"candidateBlocks"` // -buildbench.candidates
+	GOMAXPROCS    int              `json:"gomaxprocs"`
+	WallNs        int64            `json:"wallNs"`
+	Txs           int              `json:"txs"`
+	Candidates    int              `json:"candidates"`
+	GasUsed       uint64           `json:"gasUsed"`
+	Fees          string           `json:"fees"`
+	BlockHash     common.Hash      `json:"blockHash"`
+	StateRoot     common.Hash      `json:"stateRoot"`
+	Match         bool             `json:"match"` // block identical to the baseline strategy's
+	Error         string           `json:"error,omitempty"`
+	Invalid       string           `json:"invalid,omitempty"` // why the verifier rejected the block
+	Engine        map[string]any   `json:"engine,omitempty"`
+	PredictNs     int64            `json:"predictNs,omitempty"`     // time predicting the candidates (outside wallNs)
+	PreexecBusyNs int64            `json:"preexecBusyNs,omitempty"` // pre-execution time summed over its goroutines
+	PhasesNs      map[string]int64 `json:"phasesNs,omitempty"`
 }
 
 // spanRecorder captures miner telemetry spans when phase timing is enabled.
@@ -523,7 +525,7 @@ func TestBuildBench(t *testing.T) {
 					rec.PredictNs = env.predictNs
 				}
 				if strings.HasPrefix(rec.Strategy, "preexec") {
-					rec.PredictNs = env.preexecNs
+					rec.PredictNs, rec.PreexecBusyNs = env.preexecNs, env.preexecBusyNs
 				}
 				rec.Match = rec.Error == "" && rec.BlockHash == reference.Hash()
 				switch {
