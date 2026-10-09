@@ -428,6 +428,14 @@ func TestBuildBench(t *testing.T) {
 		defer f.Close()
 		out = json.NewEncoder(f)
 	}
+	if *buildBenchTrace != "" {
+		f, err := os.Create(*buildBenchTrace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		traceOut = json.NewEncoder(f)
+	}
 	var spans *spanRecorder
 	if *buildBenchSpans {
 		spans = newSpanRecorder()
@@ -461,6 +469,15 @@ func TestBuildBench(t *testing.T) {
 			}
 			if err := env.verify(reference); err != nil {
 				t.Fatalf("%s: invalid reference block: %v", strategies[0], err)
+			}
+			if traceOut != nil {
+				trace, err := traceReference(env, reference, 3)
+				if err != nil {
+					t.Fatalf("tracing the reference block: %v", err)
+				}
+				if err := traceOut.Encode(trace); err != nil {
+					t.Fatal(err)
+				}
 			}
 			// Build first and check afterwards, so that profiles cover only
 			// the builds.
