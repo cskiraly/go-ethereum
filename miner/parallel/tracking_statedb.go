@@ -2,6 +2,7 @@ package parallel
 
 import (
 	"maps"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -21,6 +22,14 @@ type trackingStateDB struct {
 	touched  map[key]struct{}
 	written  map[key]struct{}
 	fee      uint256.Int
+
+	// Balance changes commute when the execution does not observe the
+	// balance itself: adding to WETH's balance does not depend on it. Such
+	// changes are kept as deltas, and a transfer guard only requires a minimum
+	// balance, instead of making the exact balance a read.
+	credited   map[common.Address]bool         // balances changed by AddBalance or SubBalance
+	observed   map[common.Address]bool         // balances read exactly
+	minBalance map[common.Address]*uint256.Int // balance required before the transaction
 }
 
 var _ vm.StateDB = (*trackingStateDB)(nil)
@@ -32,6 +41,10 @@ func newTrackingStateDB(sdb *state.StateDB, reader *versionedStateReader, coinba
 		coinbase: coinbase,
 		touched:  make(map[key]struct{}),
 		written:  make(map[key]struct{}),
+
+		credited:   make(map[common.Address]bool),
+		observed:   make(map[common.Address]bool),
+		minBalance: make(map[common.Address]*uint256.Int),
 	}
 }
 
@@ -82,18 +95,68 @@ func (t *trackingStateDB) AddBalance(addr common.Address, amount *uint256.Int, r
 	return t.StateDB.AddBalance(addr, amount, reason)
 }
 
-// changeBalance records a balance change. A zero change still touches the
-// account, which decides whether an empty account gets deleted.
+// changeBalance records a balance change. A zero change only touches the
+// account, which matters if the account is empty: then it gets deleted. Every
+// zero-value call does this to its target, so for an account with code or a
+// nonce, which is never empty, it depends on those alone. Any other change is a
+// delta unless the balance gets observed.
 func (t *trackingStateDB) changeBalance(addr common.Address, amount *uint256.Int) {
 	if amount.IsZero() {
-		t.touchAll(addr)
+		t.touch(addr, exists, nonce, code)
+		if t.mayBeEmpty(addr) {
+			t.touchAll(addr)
+			t.write(addr, exists, balance)
+		}
+		return
 	}
-	t.write(addr, exists, balance)
+	t.write(addr, exists)
+	t.credited[addr] = true
+}
+
+// mayBeEmpty reports whether addr has neither a nonce nor code, so that its
+// balance decides whether it is empty.
+func (t *trackingStateDB) mayBeEmpty(addr common.Address) bool {
+	hash := t.StateDB.GetCodeHash(addr)
+	return t.StateDB.GetNonce(addr) == 0 && (hash == common.Hash{} || hash == types.EmptyCodeHash)
 }
 
 func (t *trackingStateDB) GetBalance(addr common.Address) *uint256.Int {
 	t.touch(addr, exists, balance)
+	t.observed[addr] = true
 	return t.StateDB.GetBalance(addr)
+}
+
+// canTransfer is the EVM's transfer guard. Instead of reading the balance, it
+// records the balance the account needs before the transaction for the guard
+// to pass, given the transaction's own changes so far. A failing guard reads
+// the balance exactly.
+func (t *trackingStateDB) canTransfer(_ vm.StateDB, addr common.Address, amount *uint256.Int) bool {
+	current := t.StateDB.GetBalance(addr)
+	if current.Cmp(amount) < 0 {
+		t.GetBalance(addr)
+		return false
+	}
+	initial, err := t.reader.base(key{addr: addr, field: balance})
+	if err != nil {
+		t.GetBalance(addr)
+		return true
+	}
+	// required = amount + initial - current, the initial balance that makes
+	// the guard pass
+	required := new(big.Int).Add(amount.ToBig(), initial.balance().ToBig())
+	required.Sub(required, current.ToBig())
+	if required.Sign() <= 0 {
+		return true
+	}
+	need, overflow := uint256.FromBig(required)
+	if overflow {
+		t.GetBalance(addr)
+		return true
+	}
+	if prev := t.minBalance[addr]; prev == nil || prev.Lt(need) {
+		t.minBalance[addr] = need
+	}
+	return true
 }
 
 func (t *trackingStateDB) GetNonce(addr common.Address) uint64 {
@@ -177,8 +240,31 @@ func (t *trackingStateDB) reads() (map[key]value, error) {
 	return reads, nil
 }
 
+// settleBalances decides, per credited account, whether its balance change is a
+// delta or an exact write: observed, created, destroyed or emptied accounts
+// fall back to exact. It returns the delta accounts.
+func (t *trackingStateDB) settleBalances() map[common.Address]bool {
+	deltas := make(map[common.Address]bool)
+	for addr := range t.credited {
+		_, exact := t.written[key{addr: addr, field: balance}]
+		if exact || t.observed[addr] || !t.StateDB.Exist(addr) {
+			t.write(addr, exists, balance)
+			continue
+		}
+		deltas[addr] = true
+	}
+	for addr := range t.minBalance {
+		if !deltas[addr] {
+			t.touch(addr, exists, balance)
+			delete(t.minBalance, addr)
+		}
+	}
+	return deltas
+}
+
 // result captures the reads and the final writes of a finalised execution.
 func (t *trackingStateDB) result() (*Result, error) {
+	deltas := t.settleBalances()
 	reads, err := t.reads()
 	if err != nil {
 		return nil, err
@@ -206,6 +292,23 @@ func (t *trackingStateDB) result() (*Result, error) {
 	}
 	if _, absolute := t.written[key{addr: t.coinbase, field: balance}]; !absolute && !t.fee.IsZero() {
 		res.fee = new(uint256.Int).Set(&t.fee)
+	}
+	for addr := range deltas {
+		initial, err := t.reader.base(key{addr: addr, field: balance})
+		if err != nil {
+			return nil, err
+		}
+		d := new(big.Int).Sub(t.StateDB.GetBalance(addr).ToBig(), initial.balance().ToBig())
+		if d.Sign() == 0 {
+			continue
+		}
+		if res.deltas == nil {
+			res.deltas = make(map[common.Address]*big.Int)
+		}
+		res.deltas[addr] = d
+	}
+	if len(t.minBalance) > 0 {
+		res.minBalance = t.minBalance
 	}
 	return res, nil
 }

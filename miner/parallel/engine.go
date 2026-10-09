@@ -42,6 +42,7 @@ type Stats struct {
 	Committed    int
 	Dropped      int
 	Inlined      int // transactions the committer executed on the block state
+	Reexecuted   int // of those, executed by a worker before (stale or failed results)
 
 	ExecutionTime time.Duration // time summed over all executions
 	ValidateTime  time.Duration // time the committer spent checking reads against the block state
@@ -49,6 +50,23 @@ type Stats struct {
 	WaitTime      time.Duration // time the committer spent waiting for results
 	InlineTime    time.Duration // time the committer spent executing transactions itself
 	ChainWaitTime time.Duration // the part of WaitTime spent with a chained task as the lowest one left
+
+	// StaleBy counts stale results by the location of the read that failed
+	// first: "<address>" for account fields, "<address>/storage".
+	StaleBy map[string]int
+}
+
+func (s *Stats) recordStale(k key) {
+	if s.StaleBy == nil {
+		s.StaleBy = make(map[string]int)
+	}
+	loc := k.addr.Hex()
+	if k.field == storage {
+		loc += "/storage"
+	} else if k.field == balance {
+		loc += "/balance"
+	}
+	s.StaleBy[loc]++
 }
 
 // Engine executes candidate transactions in parallel and commits them in

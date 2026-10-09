@@ -106,7 +106,9 @@ func benchStats(m *Miner) map[string]any {
 		"validateTimeNs":  s.ValidateTime.Nanoseconds(),
 		"chainWaitTimeNs": s.ChainWaitTime.Nanoseconds(),
 		"inlined":         s.Inlined,
+		"reexecuted":      s.Reexecuted,
 		"inlineTimeNs":    s.InlineTime.Nanoseconds(),
+		"staleBy":         s.StaleBy,
 	}
 }
 
