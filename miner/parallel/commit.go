@@ -177,6 +177,7 @@ func (c *committer) runInOrder(ctx context.Context, tasks []*Task) (bool, error)
 					continue
 				}
 				c.publishCoinbase(t.Position)
+				c.publishDeltas(t.Position, r)
 				c.stats.Committed++
 				t.markDone()
 				continue
@@ -320,6 +321,20 @@ func (c *committer) publishCommitted(pos int, r *Result) {
 	seq := c.stats.Committed
 	c.committed.publish(seq, r.writes, r.codes)
 	c.committed.publish(seq, coinbase, nil)
+}
+
+// publishDeltas makes the balances r changed additively visible to later
+// positions, as they are after the transaction at pos.
+func (c *committer) publishDeltas(pos int, r *Result) {
+	if len(r.deltas) == 0 {
+		return
+	}
+	sdb := c.block.State()
+	balances := make(map[key]value, len(r.deltas))
+	for addr := range r.deltas {
+		balances[key{addr: addr, field: balance}] = balanceValue(sdb.GetBalance(addr))
+	}
+	c.store.publish(pos, balances, nil)
 }
 
 // publishCoinbase makes the coinbase after the transaction at pos visible to
