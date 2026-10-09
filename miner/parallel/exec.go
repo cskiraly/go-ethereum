@@ -92,11 +92,12 @@ func (e *executor) execute(t *Task, reader *versionedStateReader) (res *Result) 
 		if readErr != nil {
 			err = readErr
 		}
-		return &Result{Err: err, reads: reads}
+		return &Result{Err: err, reads: reads, loads: reader.loads}
 	}
 	if res, err = trackedStateDB.result(); err != nil {
 		return &Result{Err: err}
 	}
+	res.loads = reader.loads
 	if res.Gas, err = gas.TransactionDelta(before); err != nil {
 		return &Result{Err: err}
 	}

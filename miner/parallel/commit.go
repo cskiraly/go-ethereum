@@ -54,6 +54,7 @@ type committer struct {
 	dropped   map[common.Address]bool
 	stats     *Stats
 	inlineGas uint64 // see Config.InlineGas
+	storeVal  bool   // see Config.StoreValidation
 }
 
 // run commits every task once its result has arrived and reports whether the
@@ -166,7 +167,15 @@ func (c *committer) runInOrder(ctx context.Context, tasks []*Task) (bool, error)
 		t.mu.Unlock()
 		if r != nil && r.Err == nil {
 			started := time.Now()
-			conflict, isStale := resultStale(c.block.State(), r)
+			var (
+				conflict key
+				isStale  bool
+			)
+			if c.storeVal {
+				conflict, isStale = c.storeStale(t, r)
+			} else {
+				conflict, isStale = resultStale(c.block.State(), r)
+			}
 			c.stats.ValidateTime += time.Since(started)
 			if !isStale {
 				started = time.Now()
@@ -186,9 +195,93 @@ func (c *committer) runInOrder(ctx context.Context, tasks []*Task) (bool, error)
 			c.stats.recordStale(conflict)
 			c.retract(t, r)
 		}
+		if c.storeVal {
+			c.inlineTracked(t, finished[t])
+			continue
+		}
 		c.inline(t, finished[t])
 	}
 	return false, nil
+}
+
+// storeStale validates r against the store: every key the execution read must
+// still have, below t, the value it loaded. Keys without a load record fall
+// back to the block state.
+func (c *committer) storeStale(t *Task, r *Result) (key, bool) {
+	sdb := c.block.State()
+	check := func(k key) (bool, bool) {
+		l, ok := r.loads[k]
+		if !ok {
+			return false, false
+		}
+		val, pos, has := c.store.read(k, t.Position)
+		switch {
+		case !has:
+			// a version it read was retracted since
+			return l.pos != fromParent, true
+		case k.field == destructed:
+			// the marker's value is always empty: its position tells
+			return pos != l.pos, true
+		default:
+			// lower writers often republish an unchanged value
+			return val != l.val, true
+		}
+	}
+	for k, v := range r.reads {
+		lk := k
+		if _, ok := r.loads[k]; !ok && k.field != storage {
+			lk = key{addr: k.addr, field: exists} // an absent account
+		}
+		stale, known := check(lk)
+		if !known {
+			stale = readStale(sdb, k, v)
+		}
+		if !stale && k.field == storage {
+			stale, _ = check(key{addr: k.addr, field: destructed})
+		}
+		if stale {
+			return k, true
+		}
+	}
+	if addr, ok := r.holds(sdb); !ok {
+		return key{addr: addr, field: minBalance}, true
+	}
+	return key{}, false
+}
+
+// inlineTracked executes t on the block state with tracking, includes the
+// result and publishes its writes, so the store keeps every committed write.
+func (c *committer) inlineTracked(t *Task, reexec bool) {
+	started := time.Now()
+	r := c.runOn(t, c.block.State())
+	c.stats.Executions++
+	c.stats.Inlined++
+	if reexec {
+		c.stats.Reexecuted++
+	}
+	if r.Err != nil {
+		c.stats.InlineTime += time.Since(started)
+		if errors.Is(r.Err, core.ErrNonceTooLow) {
+			c.drop(t)
+		} else {
+			c.reject(t)
+		}
+		return
+	}
+	err := c.block.Include(t, r)
+	c.stats.InlineTime += time.Since(started)
+	if err != nil {
+		c.reject(t)
+		return
+	}
+	t.mu.Lock()
+	c.store.publish(t.Position, r.writes, r.codes)
+	t.result = r
+	t.mu.Unlock()
+	c.publishCoinbase(t.Position)
+	c.publishDeltas(t.Position, r)
+	c.stats.Committed++
+	t.markDone()
 }
 
 // inline executes t on the block state and includes it. reexec tells whether a

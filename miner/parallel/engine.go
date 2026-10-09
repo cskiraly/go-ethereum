@@ -30,6 +30,12 @@ type Config struct {
 	// block state itself when it uses at most this much gas. For cheap
 	// transactions that costs less than validating and applying a result.
 	InlineGas uint64
+	// StoreValidation validates results against the store instead of the
+	// block state: a read is fresh if the newest version below the task is
+	// still the one it loaded. Needs InOrder; stale results are re-executed on
+	// the block state with tracking, so that every committed write is in the
+	// store.
+	StoreValidation bool
 	// Predict, if set, returns the expected state access of a transaction.
 	// An execution reading a key waits for the lower positions predicted to
 	// write it, instead of reading a value they are about to replace; for a
@@ -89,6 +95,7 @@ type Engine struct {
 	exec      *executor
 	workers   int
 	inOrder   bool
+	storeVal  bool
 	inlineGas uint64
 	predict   func(common.Hash) Prediction
 	next      int
@@ -119,6 +126,7 @@ func New(cfg Config) (*Engine, error) {
 		},
 		workers:   max(1, cfg.Workers),
 		inOrder:   cfg.InOrder,
+		storeVal:  cfg.StoreValidation,
 		inlineGas: cfg.InlineGas,
 		predict:   cfg.Predict,
 		dropped:   make(map[common.Address]bool),
@@ -221,6 +229,7 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 		dropped:   e.dropped,
 		stats:     &e.stats,
 		inlineGas: e.inlineGas,
+		storeVal:  e.storeVal,
 	}
 	if e.inOrder {
 		return c.runInOrder(ctx, tasks)

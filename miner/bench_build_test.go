@@ -516,7 +516,7 @@ func TestBuildBench(t *testing.T) {
 			records := make(map[string][]benchRecord)
 			for _, b := range builds {
 				rec := b.rec
-				if strings.HasPrefix(rec.Strategy, "predict-") {
+				if strings.HasPrefix(rec.Strategy, "predict") {
 					rec.PredictNs = env.predictNs
 				}
 				rec.Match = rec.Error == "" && rec.BlockHash == reference.Hash()

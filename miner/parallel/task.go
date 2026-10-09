@@ -198,6 +198,7 @@ type Result struct {
 
 	deltas     map[common.Address]*big.Int     // balance changes applied additively
 	minBalance map[common.Address]*uint256.Int // balances required before the transaction
+	loads      map[key]load                    // where the store-backed inputs came from
 }
 
 // holds reports whether the balance requirements of r hold on sdb.

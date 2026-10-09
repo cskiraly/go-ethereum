@@ -62,6 +62,13 @@ func applyBenchStrategy(name string, cfg *Config) error {
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
+	case "inorderv", "predictv":
+		// as below, validating results against the version store
+		if hasGas {
+			return fmt.Errorf("invalid strategy %q", name)
+		}
+		cfg.ParallelInOrder = true
+		cfg.ParallelStoreValidation = true
 	case "inorder", "predict":
 		// predict: in order, with the writes of every candidate predicted by
 		// executing it alone on the parent state (prepareBenchMiner)
@@ -141,7 +148,7 @@ func benchProcessBlock(chain *core.BlockChain, parent *types.Header, block *type
 
 // prepareBenchMiner installs what a strategy needs beyond the config.
 func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
-	if !strings.HasPrefix(strategy, "predict-") {
+	if !strings.HasPrefix(strategy, "predict") {
 		return nil
 	}
 	if env.predicted == nil {

@@ -17,6 +17,28 @@ type versionedStateReader struct {
 	accounts map[common.Address]*types.StateAccount
 	slots    map[key]common.Hash
 	wait     func(key) // if set, called before a key is read from the store
+	loads    map[key]load
+}
+
+// load is where a key's value came from: the store version at pos with
+// value val, or the parent state (pos fromParent).
+type load struct {
+	pos int
+	val value
+}
+
+const fromParent = noVersions
+
+// record notes the value k was loaded with and where it came from: the store
+// version at pos if ok, the parent state otherwise.
+func (r *versionedStateReader) record(k key, val value, pos int, ok bool) {
+	if _, seen := r.loads[k]; seen {
+		return
+	}
+	if !ok {
+		pos = fromParent
+	}
+	r.loads[k] = load{pos: pos, val: val}
 }
 
 var _ state.Reader = (*versionedStateReader)(nil)
@@ -28,6 +50,7 @@ func newVersionedStateReader(pos int, s *store, parent state.Reader) *versionedS
 		parent:   parent,
 		accounts: make(map[common.Address]*types.StateAccount),
 		slots:    make(map[key]common.Hash),
+		loads:    make(map[key]load),
 	}
 }
 
@@ -62,9 +85,12 @@ func (r *versionedStateReader) loadAccount(addr common.Address) (*types.StateAcc
 		return nil, err
 	}
 	present := acct != nil
-	if val, _, ok := r.store.read(key{addr: addr, field: exists}, r.pos); ok {
+	ek := key{addr: addr, field: exists}
+	val, pos, ok := r.store.read(ek, r.pos)
+	if ok {
 		present = val.bool()
 	}
+	r.record(ek, boolValue(present), pos, ok)
 	if !present {
 		return nil, nil
 	}
@@ -73,15 +99,24 @@ func (r *versionedStateReader) loadAccount(addr common.Address) (*types.StateAcc
 	} else {
 		acct = acct.Copy()
 	}
-	if val, _, ok := r.store.read(key{addr: addr, field: balance}, r.pos); ok {
+	bk := key{addr: addr, field: balance}
+	val, pos, ok = r.store.read(bk, r.pos)
+	if ok {
 		acct.Balance = val.balance()
 	}
-	if val, _, ok := r.store.read(key{addr: addr, field: nonce}, r.pos); ok {
+	r.record(bk, balanceValue(acct.Balance), pos, ok)
+	nk := key{addr: addr, field: nonce}
+	val, pos, ok = r.store.read(nk, r.pos)
+	if ok {
 		acct.Nonce = val.uint()
 	}
-	if val, _, ok := r.store.read(key{addr: addr, field: code}, r.pos); ok {
+	r.record(nk, uintValue(acct.Nonce), pos, ok)
+	ck := key{addr: addr, field: code}
+	val, pos, ok = r.store.read(ck, r.pos)
+	if ok {
 		acct.CodeHash = val.hash().Bytes()
 	}
+	r.record(ck, hashValue(common.BytesToHash(acct.CodeHash)), pos, ok)
 	return acct, nil
 }
 
@@ -112,8 +147,20 @@ func (r *versionedStateReader) loadSlot(k key) (common.Hash, error) {
 	if r.wait != nil {
 		r.wait(k)
 	}
-	_, deletedAt, deleted := r.store.read(key{addr: k.addr, field: destructed}, r.pos)
+	dk := key{addr: k.addr, field: destructed}
+	dval, deletedAt, deleted := r.store.read(dk, r.pos)
+	r.record(dk, dval, deletedAt, deleted)
 	val, pos, ok := r.store.read(k, r.pos)
+	var parent common.Hash
+	if ok {
+		r.record(k, val, pos, true)
+	} else {
+		var err error
+		if parent, err = r.parent.Storage(k.addr, k.slot); err != nil {
+			return common.Hash{}, err
+		}
+		r.record(k, hashValue(parent), 0, false)
+	}
 	switch {
 	// slot exists and was written after the accounts storage was destructed
 	// so it is the most recent value. This is for the case when the account
@@ -125,7 +172,7 @@ func (r *versionedStateReader) loadSlot(k key) (common.Hash, error) {
 	case deleted:
 		return common.Hash{}, nil
 	}
-	return r.parent.Storage(k.addr, k.slot)
+	return parent, nil
 }
 
 // Code retrieves a particular contract's code. Returns nil code if the

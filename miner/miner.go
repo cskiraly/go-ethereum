@@ -45,17 +45,18 @@ type Backend interface {
 
 // Config is the configuration parameters of mining.
 type Config struct {
-	Etherbase           common.Address `toml:"-"`          // Deprecated
-	PendingFeeRecipient common.Address `toml:"-"`          // Address for pending block rewards.
-	ExtraData           hexutil.Bytes  `toml:",omitempty"` // Block extra data set by the miner
-	GasCeil             uint64         // Target gas ceiling for mined blocks.
-	GasPrice            *big.Int       // Minimum gas price for mining a transaction
-	Recommit            time.Duration  // The time interval for miner to re-create mining work.
-	MaxBlobsPerBlock    int            // Maximum number of blobs per block (0 for unset uses protocol default)
-	ParallelExecution   bool           // Execute transactions optimistically with a shared worker pool.
-	ParallelWorkers     int            // Maximum optimistic execution workers.
-	ParallelInOrder     bool           // Commit parallel results in priority order, building the sequential block.
-	ParallelInlineGas   uint64         // With ParallelInOrder, execute txs using at most this much gas on the block state.
+	Etherbase               common.Address `toml:"-"`          // Deprecated
+	PendingFeeRecipient     common.Address `toml:"-"`          // Address for pending block rewards.
+	ExtraData               hexutil.Bytes  `toml:",omitempty"` // Block extra data set by the miner
+	GasCeil                 uint64         // Target gas ceiling for mined blocks.
+	GasPrice                *big.Int       // Minimum gas price for mining a transaction
+	Recommit                time.Duration  // The time interval for miner to re-create mining work.
+	MaxBlobsPerBlock        int            // Maximum number of blobs per block (0 for unset uses protocol default)
+	ParallelExecution       bool           // Execute transactions optimistically with a shared worker pool.
+	ParallelWorkers         int            // Maximum optimistic execution workers.
+	ParallelInOrder         bool           // Commit parallel results in priority order, building the sequential block.
+	ParallelInlineGas       uint64         // With ParallelInOrder, execute txs using at most this much gas on the block state.
+	ParallelStoreValidation bool           // With ParallelInOrder, validate results against the version store (see parallel.Config).
 
 	ParallelBenchmarkMode    string // Parallel execution benchmark mode: off or alternate.
 	ParallelBenchmarkOutput  string // JSONL output file for parallel execution benchmark events.
