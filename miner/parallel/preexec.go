@@ -4,7 +4,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/holiman/uint256"
 )
 
 // Preexecutor executes transactions alone on a parent state, as a node could
@@ -95,9 +98,46 @@ func NewPreexecutor(chain core.ChainContext, config *params.ChainConfig, db stat
 // lies ahead of its sender's is executed as if it did not, which predicts its
 // access but gives no result a build can use.
 func (p *Preexecutor) Run(tx *types.Transaction) *Result {
+	return p.RunAfter(tx, nil)
+}
+
+// RunAfter executes tx on the parent state as changed by the results in
+// basis, which are those of the earlier transactions of the same sender, in
+// nonce order. A build can then use the result if it uses those of basis too.
+func (p *Preexecutor) RunAfter(tx *types.Transaction, basis []*Result) *Result {
+	store := p.exec.store
+	if len(basis) > 0 {
+		store = newStore()
+		for i, b := range basis {
+			writes := b.writes
+			if len(b.deltas) > 0 {
+				// additive changes become the balances they lead to
+				writes = maps.Clone(b.writes)
+				for addr, d := range b.deltas {
+					k := key{addr: addr, field: balance}
+					cur := new(big.Int)
+					if v, _, has := store.read(k, i); has {
+						cur = v.balance().ToBig()
+					} else if acct, err := p.exec.parent.Account(addr); err == nil && acct != nil {
+						cur = acct.Balance.ToBig()
+					}
+					if cur.Add(cur, d).Sign() < 0 {
+						continue
+					}
+					next, overflow := uint256.FromBig(cur)
+					if overflow {
+						continue
+					}
+					writes[k] = balanceValue(next)
+					writes[key{addr: addr, field: exists}] = boolValue(true)
+				}
+			}
+			store.publish(i, writes, b.codes)
+		}
+	}
 	run := func(skipNonce bool) *Result {
 		t := &Task{Lazy: &txpool.LazyTransaction{Hash: tx.Hash(), Tx: tx}, done: make(chan struct{}), skipNonce: skipNonce}
-		return p.exec.execute(t, newVersionedStateReader(noVersions, p.exec.store, p.exec.parent))
+		return p.exec.execute(t, newVersionedStateReader(len(basis), store, p.exec.parent))
 	}
 	r := run(false)
 	r.context = p.context
@@ -108,7 +148,16 @@ func (p *Preexecutor) Run(tx *types.Transaction) *Result {
 			return ahead
 		}
 	}
+	if r.Err == nil && len(basis) > 0 {
+		r.basis = basis
+	}
 	return r
+}
+
+// Usable reports whether a build can start from r, and later
+// transactions of the sender be pre-executed on top of it.
+func (r *Result) Usable() bool {
+	return r.Err == nil && !r.predictOnly
 }
 
 // Prediction returns the state access of r, for Config.Predict.
@@ -179,21 +228,39 @@ func (r *Result) copyForBuild() *Result {
 // own pre-executed result, or its prediction.
 func seedable(tasks []*Task, coinbase common.Address, inlineGas uint64) map[*Task]*Result {
 	seeds := make(map[*Task]*Result)
-	written := make(map[key]bool)
-	credited := map[common.Address]bool{coinbase: true} // every transaction pays a fee
+	seeded := make(map[*Result]bool)
+	// the last lower writer of each key and balance changed additively, by
+	// its pre-executed result, or unknown (nil) for a prediction or the fees
+	written := make(map[key]*Result)
+	credited := map[common.Address]*Result{coinbase: nil} // every transaction pays a fee
 	conflicts := func(r *Result) bool {
-		for k := range r.reads {
-			switch {
-			case written[k]:
-				return true
-			case k.field == balance && credited[k.addr]:
-				return true
-			case k.field == storage && written[key{addr: k.addr, field: destructed}]:
+		// a result executed on top of seeded results may read their writes
+		ok := func(w *Result) bool { return w != nil && slices.Contains(r.basis, w) }
+		for _, b := range r.basis {
+			if !seeded[b] {
 				return true
 			}
 		}
+		for k := range r.reads {
+			if w, found := written[k]; found && !ok(w) {
+				return true
+			}
+			if k.field == balance {
+				if w, found := credited[k.addr]; found && !ok(w) {
+					return true
+				}
+			}
+			if k.field == storage {
+				if w, found := written[key{addr: k.addr, field: destructed}]; found && !ok(w) {
+					return true
+				}
+			}
+		}
 		for addr := range r.minBalance {
-			if credited[addr] || written[key{addr: addr, field: balance}] {
+			if w, found := credited[addr]; found && !ok(w) {
+				return true
+			}
+			if w, found := written[key{addr: addr, field: balance}]; found && !ok(w) {
 				return true
 			}
 		}
@@ -203,24 +270,25 @@ func seedable(tasks []*Task, coinbase common.Address, inlineGas uint64) map[*Tas
 		r := t.pre
 		if r != nil && r.Err == nil && !r.predictOnly && !t.cheap(inlineGas) && !conflicts(r) {
 			seeds[t] = r.copyForBuild()
+			seeded[r] = true
 		}
 		if r != nil && r.Err == nil {
 			for k := range r.changes() {
-				written[k] = true
+				written[k] = r
 			}
 			for addr := range r.deltas {
-				credited[addr] = true
+				credited[addr] = r
 			}
 			continue
 		}
 		for _, k := range t.predicted {
-			written[k] = true
+			written[k] = nil
 			if k.field == exists {
-				written[key{addr: k.addr, field: destructed}] = true
+				written[key{addr: k.addr, field: destructed}] = nil
 			}
 		}
 		for _, addr := range t.deltas {
-			credited[addr] = true
+			credited[addr] = nil
 		}
 	}
 	return seeds

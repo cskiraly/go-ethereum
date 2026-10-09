@@ -216,8 +216,10 @@ type Result struct {
 	// because an earlier transaction of the sender comes first: it predicts
 	// the access, but cannot stand in for an execution.
 	predictOnly bool
-	// context is the execution context of a pre-executed result.
+	// context is the execution context of a pre-executed result, and basis
+	// the pre-executed results of the same sender it was executed on top of.
 	context common.Hash
+	basis   []*Result
 }
 
 // holds reports whether the balance requirements of r hold on sdb.

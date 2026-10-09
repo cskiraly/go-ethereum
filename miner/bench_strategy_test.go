@@ -157,6 +157,8 @@ func benchProcessBlock(chain *core.BlockChain, parent *types.Header, block *type
 
 var buildBenchPreexecPar = flag.Int("buildbench.preexecpar", 1, "preexec strategies: goroutines pre-executing the candidates")
 
+var buildBenchPreexecAlone = flag.Bool("buildbench.preexecalone", false, "preexec strategies: execute every candidate on the parent state alone, not on top of the earlier ones of its sender")
+
 var buildBenchPreexecMiss = flag.Float64("buildbench.preexecmiss", 0, "preexec strategies: leave this fraction of the candidates without a pre-executed result")
 
 var buildBenchPredictDrop = flag.Float64("buildbench.predictdrop", 0, "predict strategies: drop this fraction of the predicted accesses, to test incomplete predictions")

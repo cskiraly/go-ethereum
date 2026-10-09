@@ -448,8 +448,27 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 	if err != nil {
 		return nil, err
 	}
-	// executions run on -buildbench.preexecpar goroutines; busy is their
-	// summed time
+	// The transactions of one sender run in nonce order, each on top of the
+	// results of the earlier ones (unless -buildbench.preexecalone), on
+	// -buildbench.preexecpar goroutines; busy is their summed time.
+	signer := types.LatestSigner(env.chain.Config())
+	var (
+		chains  [][]int
+		chainOf = make(map[common.Address]int)
+	)
+	for i, tx := range env.candidates {
+		from, err := types.Sender(signer, tx)
+		if err != nil {
+			return nil, err
+		}
+		c, ok := chainOf[from]
+		if !ok || *buildBenchPreexecAlone {
+			c = len(chains)
+			chainOf[from] = c
+			chains = append(chains, nil)
+		}
+		chains[c] = append(chains[c], i)
+	}
 	results := make([]*parallel.Result, len(env.candidates))
 	var (
 		next atomic.Int64
@@ -461,12 +480,19 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 		go func() {
 			defer wg.Done()
 			for {
-				i := int(next.Add(1)) - 1
-				if i >= len(results) {
+				c := int(next.Add(1)) - 1
+				if c >= len(chains) {
 					return
 				}
 				started := time.Now()
-				results[i] = pre.Run(env.candidates[i])
+				var basis []*parallel.Result
+				for _, i := range chains[c] {
+					r := pre.RunAfter(env.candidates[i], basis)
+					results[i] = r
+					if r.Usable() {
+						basis = append(basis, r)
+					}
+				}
 				busy.Add(time.Since(started).Nanoseconds())
 			}
 		}()
