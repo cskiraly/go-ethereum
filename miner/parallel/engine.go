@@ -112,6 +112,7 @@ type Engine struct {
 	predict   func(common.Hash) Prediction
 	preexec   func(common.Hash) *Result
 	context   common.Hash // execution context, which pre-executed results must share
+	seeded    map[*Result]bool
 	next      int
 	dropped   map[common.Address]bool
 	stats     Stats
@@ -254,7 +255,10 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 	}
 	var seeds map[*Task]*Result
 	if e.preexec != nil && e.inOrder {
-		seeds = seedable(tasks, e.exec.coinbase, e.inlineGas)
+		if e.seeded == nil {
+			e.seeded = make(map[*Result]bool)
+		}
+		seeds = seedable(tasks, e.exec.coinbase, e.inlineGas, e.seeded)
 		e.stats.Seeded += len(seeds)
 	}
 	sched.start(tasks, seeds)

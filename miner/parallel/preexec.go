@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
@@ -36,9 +37,6 @@ type Preexecutor struct {
 // context, since validating its state reads cannot detect a different one.
 func executionContext(config *params.ChainConfig, root common.Hash, h *types.Header, coinbase common.Address) common.Hash {
 	var buf []byte
-	// the rules and chain id in force, as opcodes like CHAINID see them
-	rules := config.Rules(h.Number, h.Difficulty == nil || h.Difficulty.Sign() == 0, h.Time)
-	buf = fmt.Appendf(buf, "%+v", rules)
 	u64 := func(v uint64) { buf = binary.BigEndian.AppendUint64(buf, v) }
 	bigInt := func(v *big.Int) {
 		if v == nil {
@@ -56,6 +54,14 @@ func executionContext(config *params.ChainConfig, root common.Hash, h *types.Hea
 		}
 		buf = append(buf, 1)
 		u64(*v)
+	}
+	// the rules and chain id in force, as opcodes like CHAINID see them
+	rules := config.Rules(h.Number, h.Difficulty == nil || h.Difficulty.Sign() == 0, h.Time)
+	buf = fmt.Appendf(buf, "%+v", rules)
+	bigInt(config.ChainID)
+	if h.ExcessBlobGas != nil {
+		// BLOBBASEFEE also depends on the fork's blob schedule
+		bigInt(eip4844.CalcBlobFee(config, h))
 	}
 	buf = append(buf, root[:]...)
 	buf = append(buf, h.ParentHash[:]...)
@@ -225,10 +231,10 @@ func (r *Result) copyForBuild() *Result {
 // seedable returns, for each task, the pre-executed result to start from: one
 // that executed without error and that no lower task is expected to
 // invalidate, by writing what it read. A lower task's writes are those of its
-// own pre-executed result, or its prediction.
-func seedable(tasks []*Task, coinbase common.Address, inlineGas uint64) map[*Task]*Result {
+// own pre-executed result, or its prediction. seeded collects the
+// pre-executed results seeded, across the batches of a build.
+func seedable(tasks []*Task, coinbase common.Address, inlineGas uint64, seeded map[*Result]bool) map[*Task]*Result {
 	seeds := make(map[*Task]*Result)
-	seeded := make(map[*Result]bool)
 	// the last lower writer of each key and balance changed additively, by
 	// its pre-executed result, or unknown (nil) for a prediction or the fees
 	written := make(map[key]*Result)
