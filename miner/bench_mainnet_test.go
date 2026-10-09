@@ -221,11 +221,12 @@ func newMainnetEnv(chain *core.BlockChain, engine consensus.Engine, number uint6
 			slotNum:     header.SlotNumber,
 		}
 	}
-	pool, err := newBenchPool(chain, signer, txs)
+	pool, closePool, err := newBenchPool(chain, signer, txs)
 	if err != nil {
 		return nil, err
 	}
 	env.pool = pool
+	env.closers = append(env.closers, closePool)
 	return env, nil
 }
 

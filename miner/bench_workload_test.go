@@ -20,12 +20,14 @@ import (
 	"crypto/ecdsa"
 	"encoding/binary"
 	"fmt"
+	"github.com/holiman/uint256"
 	"math/big"
 	"math/rand"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -54,6 +56,7 @@ var (
 
 const (
 	benchBlockGas   = 60_000_000
+	benchMaxBlobs   = 9 // blobs per block in the test chain's blob schedule (Prague's)
 	benchTokenGas   = 60_000
 	benchCounterGas = 60_000
 	benchComputeGas = 200_000
@@ -160,6 +163,24 @@ var benchWorkloads = []benchWorkload{
 				g.transfer(g.newSender(), g.newAccount())
 				gas += benchTransferUse
 			}
+		}
+	}},
+	{"blobs", "transfers with 3 blob transactions of 3 blobs each per block of candidates, as on mainnet", func(g *benchGen) {
+		inbox := g.newAccount()
+		for range max(1, int(3*g.blocks())) {
+			g.blobTx(g.newSender(), inbox, 3)
+		}
+		for gas := uint64(0); gas < g.candidateGas; gas += benchTransferUse {
+			g.transfer(g.newSender(), g.newAccount())
+		}
+	}},
+	{"blob-many", "transfers with twice as many single-blob transactions as blocks hold blobs", func(g *benchGen) {
+		inbox := g.newAccount()
+		for range max(2, int(2*benchMaxBlobs*g.blocks())) {
+			g.blobTx(g.newSender(), inbox, 1)
+		}
+		for gas := uint64(0); gas < g.candidateGas; gas += benchTransferUse {
+			g.transfer(g.newSender(), g.newAccount())
 		}
 	}},
 	{"mixed", "50% transfers, 30% token, 10% token-hot, 10% compute", func(g *benchGen) {
@@ -302,6 +323,61 @@ func (g *benchGen) create(sender int, init []byte) {
 	})
 	g.nonces[sender]++
 	g.txs = append(g.txs, tx)
+}
+
+// blocks returns how many blocks' worth of gas the candidate set is.
+func (g *benchGen) blocks() float64 {
+	return float64(g.candidateGas) / benchBlockGas
+}
+
+// blobTx signs a blob transaction carrying blobs random blobs to to, with a
+// version 1 sidecar (cell proofs), as the blob pool takes them since Osaka.
+func (g *benchGen) blobTx(sender int, to common.Address, blobs int) {
+	sidecar := benchBlobSidecar(g.rng, blobs)
+	tx := types.MustSignNewTx(g.keys[sender], g.signer, &types.BlobTx{
+		ChainID: uint256.MustFromBig(g.config.ChainID),
+		Nonce:   g.nonces[sender],
+		// a tip no other transaction has: the blob pool stamps arrival times
+		// itself, so equal tips could be ordered differently on every build
+		GasTipCap:  uint256.NewInt(uint64(1+g.rng.Intn(20))*params.GWei/2 + uint64(len(g.txs)) + 1),
+		GasFeeCap:  uint256.NewInt(100 * params.GWei),
+		Gas:        50_000,
+		To:         to,
+		Value:      new(uint256.Int),
+		BlobFeeCap: uint256.NewInt(params.GWei),
+		BlobHashes: sidecar.BlobHashes(),
+		Sidecar:    sidecar,
+	})
+	g.nonces[sender]++
+	g.txs = append(g.txs, tx)
+}
+
+// benchBlobSidecar returns a sidecar of n random blobs with their commitments
+// and cell proofs. Computing the proofs takes a while; it is done once per case.
+func benchBlobSidecar(rng *rand.Rand, n int) *types.BlobTxSidecar {
+	var (
+		blobs       = make([]kzg4844.Blob, n)
+		commitments []kzg4844.Commitment
+		proofs      []kzg4844.Proof
+	)
+	for i := range blobs {
+		// every 32-byte field element starts with a zero byte, so it is below
+		// the field modulus
+		for j := 0; j < len(blobs[i]); j += 32 {
+			rng.Read(blobs[i][j+1 : j+32])
+		}
+		c, err := kzg4844.BlobToCommitment(&blobs[i])
+		if err != nil {
+			panic(err)
+		}
+		p, err := kzg4844.ComputeCellProofs(&blobs[i])
+		if err != nil {
+			panic(err)
+		}
+		commitments = append(commitments, c)
+		proofs = append(proofs, p...)
+	}
+	return types.NewBlobTxSidecar(types.BlobSidecarVersion1, blobs, commitments, proofs)
 }
 
 func (g *benchGen) transfer(sender int, to common.Address) {

@@ -55,6 +55,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/txpool"
+	"github.com/ethereum/go-ethereum/core/txpool/blobpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/miner/parallel"
 	"github.com/ethereum/go-ethereum/params"
@@ -110,7 +111,9 @@ func (e *benchEnv) BlockChain() *core.BlockChain { return e.chain }
 func (e *benchEnv) TxPool() *txpool.TxPool       { return e.pool }
 
 func (e *benchEnv) close() {
-	e.pool.Close()
+	if e.pool != nil {
+		e.pool.Close()
+	}
 	for i := len(e.closers) - 1; i >= 0; i-- {
 		e.closers[i]()
 	}
@@ -128,6 +131,8 @@ func (e *benchEnv) verify(block *types.Block) error {
 }
 
 var buildBenchMetrics = flag.Bool("buildbench.metrics", false, "record how far geth's meters and counters (pathdb layer hits and misses, ...) move during each build")
+
+var buildBenchBlobsInMemory = flag.Bool("buildbench.blobsinmemory", false, "serve blob transactions, sidecars included, from memory instead of a blob pool on disk")
 
 var benchCoinbase = common.HexToAddress("0xc0ffee")
 
@@ -149,7 +154,10 @@ func newBenchEnv(w benchWorkload, seed int64) (*benchEnv, error) {
 		Config:   config,
 		GasLimit: benchBlockGas,
 		BaseFee:  big.NewInt(params.InitialBaseFee),
-		Alloc:    gen.alloc,
+		// post-merge from genesis on, so that the pools apply the chain's
+		// rules (blob transactions) to it as the head
+		Difficulty: common.Big0,
+		Alloc:      gen.alloc,
 	}
 	engine := beacon.New(ethash.NewFaker())
 	chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), gspec, engine, core.DefaultConfig().WithStateScheme(rawdb.PathScheme))
@@ -197,20 +205,55 @@ func newBenchEnv(w benchWorkload, seed int64) (*benchEnv, error) {
 		_, err := verifier.InsertChain(types.Blocks{block})
 		return err
 	}
-	if env.pool, err = newBenchPool(chain, gen.signer, gen.txs); err != nil {
+	var closePool func()
+	if env.pool, closePool, err = newBenchPool(chain, gen.signer, gen.txs); err != nil {
 		env.close()
 		return nil, err
 	}
+	env.closers = append(env.closers, closePool)
 	return env, nil
 }
 
-// newBenchPool returns a pool serving txs as candidates.
-func newBenchPool(chain *core.BlockChain, signer types.Signer, txs []*types.Transaction) (*txpool.TxPool, error) {
-	fixed, err := newFixedPool(signer, txs)
-	if err != nil {
-		return nil, err
+// newBenchPool returns a pool serving txs as candidates. Blob transactions go
+// into a real blob pool on disk, so that a build fetches them, blobs and proofs
+// included, as a node's miner does; the others are served from memory. The
+// returned function removes the blob pool's files.
+func newBenchPool(chain *core.BlockChain, signer types.Signer, txs []*types.Transaction) (*txpool.TxPool, func(), error) {
+	var plain, blobs []*types.Transaction
+	for _, tx := range txs {
+		if tx.Type() == types.BlobTxType && !*buildBenchBlobsInMemory {
+			blobs = append(blobs, tx)
+		} else {
+			plain = append(plain, tx)
+		}
 	}
-	return txpool.New(0, chain, []txpool.SubPool{fixed})
+	fixed, err := newFixedPool(signer, plain)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(blobs) == 0 {
+		pool, err := txpool.New(0, chain, []txpool.SubPool{fixed})
+		return pool, func() {}, err
+	}
+	dir, err := os.MkdirTemp("", "buildbench-blobpool-")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() { os.RemoveAll(dir) }
+	bp := blobpool.New(blobpool.Config{Datadir: dir, Datacap: 1 << 30, PriceBump: 100}, chain, func(common.Address) bool { return false })
+	pool, err := txpool.New(0, chain, []txpool.SubPool{fixed, bp})
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	for i, err := range bp.Add(blobs, true) {
+		if err != nil {
+			pool.Close()
+			cleanup()
+			return nil, nil, fmt.Errorf("blob tx %d: %w", i, err)
+		}
+	}
+	return pool, cleanup, nil
 }
 
 // blockDiff describes where got's transactions first diverge from ref's.
@@ -275,6 +318,7 @@ type benchRecord struct {
 	GOMAXPROCS    int              `json:"gomaxprocs"`
 	WallNs        int64            `json:"wallNs"`
 	CPUNs         int64            `json:"cpuNs"`                  // user and system CPU of the process during the build
+	Blobs         int              `json:"blobs,omitempty"`        // blobs in the built block
 	IO            *benchIO         `json:"io,omitempty"`           // what the process read during the build
 	Metrics       map[string]int64 `json:"metrics,omitempty"`      // how far each geth meter and counter moved during the build (-buildbench.metrics)
 	PreexecCPUNs  int64            `json:"preexecCpuNs,omitempty"` // the same, pre-executing the candidates (outside wallNs)
@@ -414,6 +458,9 @@ func buildOnce(env *benchEnv, m *Miner, spans *spanRecorder) (*newPayloadResult,
 	}
 	rec.Txs = len(res.block.Transactions())
 	rec.GasUsed = res.block.GasUsed()
+	for _, tx := range res.block.Transactions() {
+		rec.Blobs += len(tx.BlobHashes())
+	}
 	rec.Fees = res.fees.String()
 	rec.BlockHash = res.block.Hash()
 	rec.StateRoot = res.block.Root()
