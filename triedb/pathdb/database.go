@@ -200,8 +200,9 @@ func New(diskdb ethdb.Database, config *Config, isUBT bool) *Database {
 }
 
 // setHistoryIndexer initializes the indexers for both state history and
-// trienode history if available. Note that this function may be called while
-// existing indexers are still running, so they must be closed beforehand.
+// trienode history if available. At a reactivation (Enable, AdoptSyncedState),
+// the indexers of the old state were stopped already, before the histories were
+// purged; closing them again here is harmless.
 func (db *Database) setHistoryIndexer() {
 	// TODO (rjl493456442) disable the background indexing in read-only mode
 	if !db.config.EnableStateIndexing {
@@ -377,6 +378,16 @@ func (db *Database) resetForReactivation(root common.Hash) error {
 	if stored != root {
 		return fmt.Errorf("state root mismatch: stored %x, synced %x", stored, root)
 	}
+	// Stop the history indexers before the histories are purged: they work in
+	// the background, and one still indexing the old histories would write
+	// their index back after the purge. Enable and AdoptSyncedState replace
+	// them afterwards.
+	if db.stateIndexer != nil {
+		db.stateIndexer.close()
+	}
+	if db.trienodeIndexer != nil {
+		db.trienodeIndexer.close()
+	}
 	// Drop the stale state journal marker and reset the persistent state id
 	// back to zero.
 	batch := db.diskdb.NewBatch()
@@ -417,9 +428,8 @@ func (db *Database) Enable(root common.Hash) error {
 	db.tree.init(generateSnapshot(db, root, db.isUBT || db.config.SnapshotNoBuild))
 
 	// After snap sync, the state of the database may have changed completely.
-	// To ensure the history indexer always matches the current state, we must:
-	//   1. Close any existing indexer
-	//   2. Re-initialize the indexer so it starts indexing from the new state root.
+	// The indexers of the old state were stopped before the purge: start new
+	// ones, indexing from the new state root.
 	db.setHistoryIndexer()
 
 	log.Info("Rebuilt trie database", "root", root)
