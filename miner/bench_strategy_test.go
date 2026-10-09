@@ -23,7 +23,9 @@ package miner
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
 	"time"
@@ -151,6 +153,8 @@ func benchProcessBlock(chain *core.BlockChain, parent *types.Header, block *type
 	return chain.Validator().ValidateState(block, statedb, res, false)
 }
 
+var buildBenchPredictDrop = flag.Float64("buildbench.predictdrop", 0, "predict strategies: drop this fraction of the predicted accesses, to test incomplete predictions")
+
 // prepareBenchMiner installs what a strategy needs beyond the config.
 func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
 	if !strings.HasPrefix(strategy, "predict") {
@@ -165,5 +169,34 @@ func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
 		env.predicted, env.predictNs = predicted, time.Since(started).Nanoseconds()
 	}
 	m.parallelPredict = func(hash common.Hash) parallel.Prediction { return env.predicted[hash] }
+	if *buildBenchPredictDrop > 0 {
+		// incomplete predictions: drop a seeded fraction of every list
+		rng := rand.New(rand.NewSource(*buildBenchSeed))
+		drop := func(n int) []int {
+			var keep []int
+			for i := range n {
+				if rng.Float64() >= *buildBenchPredictDrop {
+					keep = append(keep, i)
+				}
+			}
+			return keep
+		}
+		thinned := make(map[common.Hash]parallel.Prediction, len(env.predicted))
+		for _, tx := range env.candidates {
+			p := env.predicted[tx.Hash()]
+			var q parallel.Prediction
+			for _, i := range drop(len(p.Writes)) {
+				q.Writes = append(q.Writes, p.Writes[i])
+			}
+			for _, i := range drop(len(p.Deltas)) {
+				q.Deltas = append(q.Deltas, p.Deltas[i])
+			}
+			for _, i := range drop(len(p.Observes)) {
+				q.Observes = append(q.Observes, p.Observes[i])
+			}
+			thinned[tx.Hash()] = q
+		}
+		m.parallelPredict = func(hash common.Hash) parallel.Prediction { return thinned[hash] }
+	}
 	return nil
 }

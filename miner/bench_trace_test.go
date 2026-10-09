@@ -449,9 +449,22 @@ func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction,
 	}
 	signer := types.LatestSigner(config)
 	out := make(map[common.Hash]parallel.Prediction, len(env.candidates))
+	// predictions on the same state share their parent reads, as a mempool
+	// pre-executing arriving transactions on the head would
+	db := state.NewMPTDatabase(env.chain.TrieDB(), env.chain.CodeDB()).WithSnapshot(env.chain.Snapshots())
+	readers := make(map[common.Hash]*parallel.SharedReader)
 	for _, tx := range env.candidates {
 		parent, header := contextFor(tx)
-		statedb, err := env.chain.StateAt(parent)
+		shared := readers[parent.Root]
+		if shared == nil {
+			reader, err := db.Reader(parent.Root)
+			if err != nil {
+				return nil, err
+			}
+			shared = parallel.NewSharedReader(reader)
+			readers[parent.Root] = shared
+		}
+		statedb, err := state.NewWithReader(parent.Root, db, shared)
 		if err != nil {
 			return nil, err
 		}
