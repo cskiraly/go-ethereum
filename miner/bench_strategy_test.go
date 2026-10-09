@@ -165,6 +165,8 @@ var buildBenchPreexecPar = flag.Int("buildbench.preexecpar", 1, "preexec strateg
 
 var buildBenchPreexecAlone = flag.Bool("buildbench.preexecalone", false, "preexec strategies: execute every candidate on the parent state alone, not on top of the earlier ones of its sender")
 
+var buildBenchPreexecRebase = flag.Bool("buildbench.preexecrebase", false, "preexec strategies: re-execute candidates that depend on lower ones on top of them, in block order")
+
 var buildBenchPreexecMiss = flag.Float64("buildbench.preexecmiss", 0, "preexec strategies: leave this fraction of the candidates without a pre-executed result")
 
 var buildBenchPredictDrop = flag.Float64("buildbench.predictdrop", 0, "predict strategies: drop this fraction of the predicted accesses, to test incomplete predictions")

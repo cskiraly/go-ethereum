@@ -498,6 +498,21 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 		}()
 	}
 	wg.Wait()
+	if *buildBenchPreexecRebase {
+		// in the order the builder will commit them, as it would know
+		started := time.Now()
+		order := priceAndNonceOrder(env.candidates, chains, header.BaseFee)
+		txs := make([]*types.Transaction, len(order))
+		ordered := make([]*parallel.Result, len(order))
+		for n, i := range order {
+			txs[n], ordered[n] = env.candidates[i], results[i]
+		}
+		pre.Rebase(txs, ordered)
+		for n, i := range order {
+			results[i] = ordered[n]
+		}
+		busy.Add(time.Since(started).Nanoseconds())
+	}
 	env.preexecBusyNs = busy.Load()
 	out := make(map[common.Hash]*parallel.Result, len(env.candidates))
 	for i, tx := range env.candidates {
@@ -682,4 +697,30 @@ func learnTargets(env *benchEnv, predicted map[common.Hash]parallel.Prediction) 
 		}
 	}
 	targets.learned = true
+}
+
+// priceAndNonceOrder returns the candidates' indexes in the order a builder
+// takes them: the highest effective tip first among each sender's next
+// transaction, earlier candidates first on ties. chains holds each sender's
+// candidates in nonce order.
+func priceAndNonceOrder(txs []*types.Transaction, chains [][]int, baseFee *big.Int) []int {
+	next := make([]int, len(chains))
+	order := make([]int, 0, len(txs))
+	for len(order) < len(txs) {
+		best := -1
+		var bestTip *big.Int
+		for c, chain := range chains {
+			if next[c] >= len(chain) {
+				continue
+			}
+			i := chain[next[c]]
+			tip := txs[i].EffectiveGasTipValue(baseFee)
+			if best < 0 || tip.Cmp(bestTip) > 0 || (tip.Cmp(bestTip) == 0 && i < chains[best][next[best]]) {
+				best, bestTip = c, tip
+			}
+		}
+		order = append(order, chains[best][next[best]])
+		next[best]++
+	}
+	return order
 }

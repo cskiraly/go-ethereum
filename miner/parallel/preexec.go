@@ -162,6 +162,78 @@ func (p *Preexecutor) RunAfter(tx *types.Transaction, basis []*Result) *Result {
 	return r
 }
 
+// Rebase re-executes, lowest first, each of results (those of txs, in block
+// order) that read what a lower result changed, on top of the lower results it
+// depends on and their own bases. A build that seeds those can then seed it
+// too, instead of executing it after them.
+func (p *Preexecutor) Rebase(txs []*types.Transaction, results []*Result) {
+	index := make(map[*Result]int, len(results))
+	written := make(map[key]int)
+	credited := make(map[common.Address]int)
+	for i, r := range results {
+		if r == nil {
+			continue
+		}
+		index[r] = i // also for later results built on this one, if it changes
+		deps := make(map[int]bool)
+		depend := func(j int, found bool) {
+			if found && !slices.Contains(r.basis, results[j]) {
+				deps[j] = true
+			}
+		}
+		for k := range r.reads {
+			j, found := written[k]
+			depend(j, found)
+			if k.field == balance {
+				j, found = credited[k.addr]
+				depend(j, found)
+			}
+			if k.field == storage {
+				j, found = written[key{addr: k.addr, field: destructed}]
+				depend(j, found)
+			}
+		}
+		for addr := range r.minBalance {
+			j, found := credited[addr]
+			depend(j, found)
+			j, found = written[key{addr: addr, field: balance}]
+			depend(j, found)
+		}
+		if len(deps) > 0 && (r.Usable() || r.predictOnly) {
+			// the basis: the dependencies, their bases and r's own, in order
+			addBasis := func(basis []*Result) {
+				for _, b := range basis {
+					if j, ok := index[b]; ok {
+						deps[j] = true
+					}
+				}
+			}
+			addBasis(r.basis)
+			for j := range maps.Clone(deps) {
+				addBasis(results[j].basis)
+			}
+			order := slices.Sorted(maps.Keys(deps))
+			basis := make([]*Result, len(order))
+			for n, j := range order {
+				basis[n] = results[j]
+			}
+			if rebased := p.RunAfter(txs[i], basis); rebased.Usable() {
+				results[i], r = rebased, rebased
+			}
+		}
+		if !r.Usable() {
+			continue
+		}
+		index[r] = i
+		for _, k := range r.changes() {
+			written[k] = i
+		}
+		for addr := range r.deltas {
+			credited[addr] = i
+		}
+	}
+}
+
 // Usable reports whether a build can start from r, and later
 // transactions of the sender be pre-executed on top of it.
 func (r *Result) Usable() bool {
