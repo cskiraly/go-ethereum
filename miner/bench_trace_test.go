@@ -479,6 +479,7 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 		}
 		chains[c] = append(chains[c], i)
 	}
+	late := preexecMissing(env)
 	results := make([]*parallel.Result, len(env.candidates))
 	var (
 		next atomic.Int64
@@ -497,6 +498,9 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 				started := time.Now()
 				var basis []*parallel.Result
 				for _, i := range chains[c] {
+					if late[env.candidates[i].Hash()] {
+						continue
+					}
 					r := pre.RunAfter(env.candidates[i], basis)
 					results[i] = r
 					if r.Usable() {

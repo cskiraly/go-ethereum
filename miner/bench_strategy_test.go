@@ -187,15 +187,7 @@ func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
 		}
 		// -buildbench.preexecmiss: candidates without a result, as if they
 		// arrived too late; they have no prediction either
-		missing := make(map[common.Hash]bool)
-		if *buildBenchPreexecMiss > 0 {
-			rng := rand.New(rand.NewSource(*buildBenchSeed))
-			for _, tx := range env.candidates {
-				if rng.Float64() < *buildBenchPreexecMiss {
-					missing[tx.Hash()] = true
-				}
-			}
-		}
+		missing := preexecMissing(env)
 		// predictions are derived once, as a node would keep them with the results
 		coinbase := env.params().coinbase
 		predictions := make(map[common.Hash]parallel.Prediction, len(env.preexecuted))
@@ -258,4 +250,20 @@ func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
 		m.parallelPredict = func(hash common.Hash) parallel.Prediction { return thinned[hash] }
 	}
 	return nil
+}
+
+// preexecMissing returns the candidates -buildbench.preexecmiss leaves
+// without a pre-executed result, as if they arrived too late: they are not
+// pre-executed, and no other result is built on them.
+func preexecMissing(env *benchEnv) map[common.Hash]bool {
+	missing := make(map[common.Hash]bool)
+	if *buildBenchPreexecMiss > 0 {
+		rng := rand.New(rand.NewSource(*buildBenchSeed))
+		for _, tx := range env.candidates {
+			if rng.Float64() < *buildBenchPreexecMiss {
+				missing[tx.Hash()] = true
+			}
+		}
+	}
+	return missing
 }
