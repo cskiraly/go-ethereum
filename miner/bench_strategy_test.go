@@ -169,12 +169,13 @@ func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
 		// preexec: every candidate executed alone on the parent state, once,
 		// gives both the prediction and a result the build starts from
 		if env.preexecuted == nil {
-			started := time.Now()
+			started, cpu := time.Now(), processCPU()
 			results, err := preexecuteCandidates(env)
 			if err != nil {
 				return err
 			}
 			env.preexecuted, env.preexecNs = results, time.Since(started).Nanoseconds()
+			env.preexecCPUNs = (processCPU() - cpu).Nanoseconds()
 		}
 		// -buildbench.preexecmiss: candidates without a result, as if they
 		// arrived too late; they have no prediction either

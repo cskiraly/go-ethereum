@@ -41,6 +41,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -94,6 +95,7 @@ type benchEnv struct {
 	preexecuted   map[common.Hash]*parallel.Result    // results of each candidate executed alone, computed once
 	preexecNs     int64                               // time computing preexecuted
 	preexecBusyNs int64                               // of that, summed over the goroutines
+	preexecCPUNs  int64                               // process CPU computing preexecuted
 	origin        map[common.Hash]*types.Header       // mainnet: the block each candidate was included in
 
 	check    func(*types.Block) error // executes and validates a built block
@@ -267,6 +269,8 @@ type benchRecord struct {
 	Depth         float64          `json:"candidateBlocks"` // -buildbench.candidates
 	GOMAXPROCS    int              `json:"gomaxprocs"`
 	WallNs        int64            `json:"wallNs"`
+	CPUNs         int64            `json:"cpuNs"`                  // user and system CPU of the process during the build
+	PreexecCPUNs  int64            `json:"preexecCpuNs,omitempty"` // the same, pre-executing the candidates (outside wallNs)
 	Txs           int              `json:"txs"`
 	Candidates    int              `json:"candidates"`
 	GasUsed       uint64           `json:"gasUsed"`
@@ -370,14 +374,17 @@ func buildOnce(env *benchEnv, m *Miner, spans *spanRecorder) (*newPayloadResult,
 	}
 	resetBenchStats(m)
 	ctx, phases := spans.start()
+	cpu := processCPU()
 	start := time.Now()
 	res := m.generateWork(ctx, env.params(), false)
 	wall := time.Since(start)
+	cpu = processCPU() - cpu
 
 	rec := benchRecord{
 		Workload:   env.name,
 		GOMAXPROCS: runtime.GOMAXPROCS(0),
 		WallNs:     wall.Nanoseconds(),
+		CPUNs:      cpu.Nanoseconds(),
 		Candidates: env.txs,
 		Engine:     benchStats(m),
 		PhasesNs:   phases(),
@@ -525,7 +532,7 @@ func TestBuildBench(t *testing.T) {
 					rec.PredictNs = env.predictNs
 				}
 				if strings.HasPrefix(rec.Strategy, "preexec") {
-					rec.PredictNs, rec.PreexecBusyNs = env.preexecNs, env.preexecBusyNs
+					rec.PredictNs, rec.PreexecBusyNs, rec.PreexecCPUNs = env.preexecNs, env.preexecBusyNs, env.preexecCPUNs
 				}
 				rec.Match = rec.Error == "" && rec.BlockHash == reference.Hash()
 				switch {
@@ -719,4 +726,13 @@ func BenchmarkBuild(b *testing.B) {
 			})
 		}
 	}
+}
+
+// processCPU returns the user and system CPU time the process used so far.
+func processCPU() time.Duration {
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+		return 0
+	}
+	return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
 }
