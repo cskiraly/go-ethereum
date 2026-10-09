@@ -21,9 +21,15 @@ package miner
 // collects engine-internal statistics. Port it when moving the harness.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 )
 
 // applyBenchStrategy configures cfg for the named strategy:
@@ -102,4 +108,21 @@ func benchStats(m *Miner) map[string]any {
 		"inlined":         s.Inlined,
 		"inlineTimeNs":    s.InlineTime.Nanoseconds(),
 	}
+}
+
+// benchProcessBlock executes block on the state of parent and validates the
+// result, as a node importing it would, without writing anything.
+func benchProcessBlock(chain *core.BlockChain, parent *types.Header, block *types.Block) error {
+	if err := chain.Validator().ValidateBody(block); err != nil && !errors.Is(err, core.ErrKnownBlock) {
+		return err
+	}
+	statedb, err := chain.StateAt(parent)
+	if err != nil {
+		return err
+	}
+	res, err := chain.Processor().Process(context.Background(), block, statedb, nil, vm.Config{})
+	if err != nil {
+		return err
+	}
+	return chain.Validator().ValidateState(block, statedb, res, false)
 }

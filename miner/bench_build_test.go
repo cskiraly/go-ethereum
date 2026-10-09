@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"math/big"
 	"os"
 	"runtime"
@@ -71,19 +72,25 @@ var (
 	buildBenchSpans      = flag.Bool("buildbench.spans", false, "record miner telemetry spans for a per-phase breakdown (adds overhead)")
 )
 
-// benchEnv is a chain at genesis plus a pool holding a workload's candidates.
+// benchEnv is a chain plus a pool holding one case's candidates: a synthetic
+// workload on its own genesis, or a mainnet block's successors on its parent.
 type benchEnv struct {
-	workload benchWorkload
-	config   *params.ChainConfig
-	engine   consensus.Engine
-	chain    *core.BlockChain
-	pool     *txpool.TxPool
-	txs      int
-	signer   types.Signer
-	gspec    *core.Genesis
+	name        string
+	description string
+	depth       float64 // candidate set size, in blocks
+	gasCeil     uint64
+	params      func() *generateParams
 
-	verifier *core.BlockChain      // imports built blocks to validate them
-	verified map[common.Hash]error // verifier results by block hash
+	config *params.ChainConfig
+	engine consensus.Engine
+	chain  *core.BlockChain
+	pool   *txpool.TxPool
+	txs    int
+	signer types.Signer
+
+	check    func(*types.Block) error // executes and validates a built block
+	verified map[common.Hash]error    // check results by block hash
+	closers  []func()
 }
 
 func (e *benchEnv) BlockChain() *core.BlockChain { return e.chain }
@@ -91,27 +98,18 @@ func (e *benchEnv) TxPool() *txpool.TxPool       { return e.pool }
 
 func (e *benchEnv) close() {
 	e.pool.Close()
-	e.chain.Stop()
-	if e.verifier != nil {
-		e.verifier.Stop()
+	for i := len(e.closers) - 1; i >= 0; i-- {
+		e.closers[i]()
 	}
 }
 
-// verify imports block into a separate chain on the same genesis, which
-// executes and validates it as a node receiving it would. Results are cached
-// by block hash.
+// verify executes and validates block as a node receiving it would. Results
+// are cached by block hash.
 func (e *benchEnv) verify(block *types.Block) error {
 	if err, ok := e.verified[block.Hash()]; ok {
 		return err
 	}
-	if e.verifier == nil {
-		chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), e.gspec, e.engine, core.DefaultConfig().WithStateScheme(rawdb.PathScheme))
-		if err != nil {
-			return err
-		}
-		e.verifier = chain
-	}
-	_, err := e.verifier.InsertChain(types.Blocks{block})
+	err := e.check(block)
 	e.verified[block.Hash()] = err
 	return err
 }
@@ -143,17 +141,60 @@ func newBenchEnv(w benchWorkload, seed int64) (*benchEnv, error) {
 	if err != nil {
 		return nil, err
 	}
-	fixed, err := newFixedPool(gen.signer, gen.txs)
-	if err != nil {
-		chain.Stop()
+	env := &benchEnv{
+		name:        w.name,
+		description: w.description,
+		depth:       *buildBenchCandidates,
+		gasCeil:     benchBlockGas,
+		config:      config,
+		engine:      engine,
+		chain:       chain,
+		txs:         len(gen.txs),
+		signer:      gen.signer,
+		verified:    make(map[common.Hash]error),
+		closers:     []func(){chain.Stop},
+	}
+	env.params = func() *generateParams {
+		parent := chain.CurrentBlock()
+		beaconRoot := common.Hash{0x01}
+		slot := uint64(1)
+		return &generateParams{
+			timestamp:   parent.Time + 12,
+			forceTime:   true,
+			parentHash:  parent.Hash(),
+			coinbase:    benchCoinbase,
+			random:      common.Hash{0x02},
+			withdrawals: types.Withdrawals{},
+			beaconRoot:  &beaconRoot,
+			slotNum:     &slot,
+		}
+	}
+	// Built blocks are imported into a separate chain on the same genesis.
+	var verifier *core.BlockChain
+	env.check = func(block *types.Block) error {
+		if verifier == nil {
+			if verifier, err = core.NewBlockChain(rawdb.NewMemoryDatabase(), gspec, engine, core.DefaultConfig().WithStateScheme(rawdb.PathScheme)); err != nil {
+				return err
+			}
+			env.closers = append(env.closers, verifier.Stop)
+		}
+		_, err := verifier.InsertChain(types.Blocks{block})
+		return err
+	}
+	if env.pool, err = newBenchPool(chain, gen.signer, gen.txs); err != nil {
+		env.close()
 		return nil, err
 	}
-	pool, err := txpool.New(0, chain, []txpool.SubPool{fixed})
+	return env, nil
+}
+
+// newBenchPool returns a pool serving txs as candidates.
+func newBenchPool(chain *core.BlockChain, signer types.Signer, txs []*types.Transaction) (*txpool.TxPool, error) {
+	fixed, err := newFixedPool(signer, txs)
 	if err != nil {
-		chain.Stop()
 		return nil, err
 	}
-	return &benchEnv{workload: w, config: config, engine: engine, chain: chain, pool: pool, txs: len(gen.txs), signer: gen.signer, gspec: gspec, verified: make(map[common.Hash]error)}, nil
+	return txpool.New(0, chain, []txpool.SubPool{fixed})
 }
 
 // blockDiff describes where got's transactions first diverge from ref's.
@@ -195,28 +236,12 @@ func (e *benchEnv) blockDiff(ref, got *types.Block) string {
 // set far away so that builds always run to completion.
 func (e *benchEnv) newMiner(strategy string) (*Miner, error) {
 	cfg := DefaultConfig
-	cfg.GasCeil = benchBlockGas
+	cfg.GasCeil = e.gasCeil
 	cfg.Recommit = time.Hour
 	if err := applyBenchStrategy(strategy, &cfg); err != nil {
 		return nil, err
 	}
 	return New(e, cfg, e.engine), nil
-}
-
-func (e *benchEnv) params() *generateParams {
-	parent := e.chain.CurrentBlock()
-	beaconRoot := common.Hash{0x01}
-	slot := uint64(1)
-	return &generateParams{
-		timestamp:   parent.Time + 12,
-		forceTime:   true,
-		parentHash:  parent.Hash(),
-		coinbase:    benchCoinbase,
-		random:      common.Hash{0x02},
-		withdrawals: types.Withdrawals{},
-		beaconRoot:  &beaconRoot,
-		slotNum:     &slot,
-	}
 }
 
 // benchRecord is one build.
@@ -335,7 +360,7 @@ func buildOnce(env *benchEnv, m *Miner, spans *spanRecorder) (*newPayloadResult,
 	wall := time.Since(start)
 
 	rec := benchRecord{
-		Workload:   env.workload.name,
+		Workload:   env.name,
 		GOMAXPROCS: runtime.GOMAXPROCS(0),
 		WallNs:     wall.Nanoseconds(),
 		Candidates: env.txs,
@@ -386,7 +411,7 @@ func TestBuildBench(t *testing.T) {
 	if !*buildBenchFlag {
 		t.Skip("enable with -buildbench")
 	}
-	workloads, err := selectedWorkloads()
+	cases, err := selectedCases(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,9 +432,10 @@ func TestBuildBench(t *testing.T) {
 	if *buildBenchSpans {
 		spans = newSpanRecorder()
 	}
-	for _, w := range workloads {
-		t.Run(w.name, func(t *testing.T) {
-			env, err := newBenchEnv(w, *buildBenchSeed)
+	speedups := make(map[string][]float64) // per strategy, the median speedup of each case
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env, err := c.open()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -443,14 +469,14 @@ func TestBuildBench(t *testing.T) {
 				block *types.Block
 			}
 			var builds []build
-			stopProfile := startBuildProfile(t, w.name)
+			stopProfile := startBuildProfile(t, env.name)
 			for rep := 0; rep < *buildBenchReps; rep++ {
 				// Rotate the order every rep so each strategy runs in every
 				// position equally often.
 				for slot := range strategies {
 					i := (slot + rep) % len(strategies)
 					res, rec := buildOnce(env, miners[i], spans)
-					rec.Strategy, rec.Rep, rec.Slot, rec.Seed, rec.Depth = strategies[i], rep, slot, *buildBenchSeed, *buildBenchCandidates
+					rec.Strategy, rec.Rep, rec.Slot, rec.Seed, rec.Depth = strategies[i], rep, slot, *buildBenchSeed, env.depth
 					builds = append(builds, build{rec, res.block})
 				}
 			}
@@ -486,18 +512,73 @@ func TestBuildBench(t *testing.T) {
 					}
 				}
 			}
-			t.Log(summarizeBench(w, strategies, records))
+			t.Log(summarizeBench(env, strategies, records))
+			for _, s := range strategies {
+				speedups[s] = append(speedups[s], medianSpeedup(records[strategies[0]], records[s]))
+			}
 		})
 	}
+	if len(cases) > 1 {
+		t.Log(summarizeCases(strategies, speedups))
+	}
+}
+
+// benchCase is one input to build blocks from.
+type benchCase struct {
+	name string
+	open func() (*benchEnv, error)
+}
+
+// selectedCases returns the mainnet blocks if -buildbench.mainnet is set, the
+// synthetic workloads otherwise.
+func selectedCases(t *testing.T) ([]benchCase, error) {
+	if *buildBenchMainnet != "" {
+		return mainnetCases(t)
+	}
+	workloads, err := selectedWorkloads()
+	if err != nil {
+		return nil, err
+	}
+	cases := make([]benchCase, len(workloads))
+	for i, w := range workloads {
+		cases[i] = benchCase{name: w.name, open: func() (*benchEnv, error) { return newBenchEnv(w, *buildBenchSeed) }}
+	}
+	return cases, nil
+}
+
+// medianSpeedup is the median per-rep ratio of base's build time to recs'.
+func medianSpeedup(base, recs []benchRecord) float64 {
+	ratios := make([]float64, len(recs))
+	for i, r := range recs {
+		ratios[i] = float64(base[i].WallNs) / float64(r.WallNs)
+	}
+	return median(ratios)
+}
+
+// summarizeCases renders, per strategy, the geometric mean, median and range
+// of the cases' median speedups.
+func summarizeCases(strategies []string, speedups map[string][]float64) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nall %d cases: median speedup per case\n", len(speedups[strategies[0]]))
+	fmt.Fprintf(&b, "  %-18s %8s %8s %8s %8s\n", "strategy", "geomean", "median", "min", "max")
+	for _, s := range strategies {
+		xs := speedups[s]
+		logs := 0.0
+		for _, x := range xs {
+			logs += math.Log(x)
+		}
+		fmt.Fprintf(&b, "  %-18s %7.2fx %7.2fx %7.2fx %7.2fx\n", s, math.Exp(logs/float64(len(xs))), median(xs), slices.Min(xs), slices.Max(xs))
+	}
+	return b.String()
 }
 
 // summarizeBench renders per-strategy medians and the median per-rep speedup
 // over the first (baseline) strategy.
-func summarizeBench(w benchWorkload, strategies []string, records map[string][]benchRecord) string {
+func summarizeBench(env *benchEnv, strategies []string, records map[string][]benchRecord) string {
 	var b strings.Builder
 	base := records[strategies[0]]
 	first := base[0]
-	fmt.Fprintf(&b, "\n%s: %s\n  block: %d/%d txs, %.1f Mgas\n", w.name, w.description, first.Txs, first.Candidates, float64(first.GasUsed)/1e6)
+	fmt.Fprintf(&b, "\n%s: %s\n  block: %d/%d txs, %.1f Mgas\n", env.name, env.description, first.Txs, first.Candidates, float64(first.GasUsed)/1e6)
 	fmt.Fprintf(&b, "  %-14s %10s %10s %10s %9s %9s %7s %6s %8s\n", "strategy", "median", "min", "max", "Mgas/s", "speedup", "same", "txs", "fees")
 	baseFees := median(benchFees(base))
 	for _, s := range strategies {
