@@ -76,7 +76,7 @@ func applyBenchStrategy(name string, cfg *Config) error {
 		}
 		cfg.ParallelInOrder = true
 		cfg.ParallelStoreValidation = true
-	case "inorder", "predict":
+	case "inorder", "predict", "preexec", "preexecp":
 		// predict: in order, with the writes of every candidate predicted by
 		// executing it alone on the parent state (prepareBenchMiner)
 		if hasGas {
@@ -129,6 +129,8 @@ func benchStats(m *Miner) map[string]any {
 		"chainWaitTimeNs": s.ChainWaitTime.Nanoseconds(),
 		"inlined":         s.Inlined,
 		"waits":           s.Waits,
+		"seeded":          s.Seeded,
+		"prefetchNs":      s.PrefetchTime.Nanoseconds(),
 		"waitedNs":        s.WaitedTime.Nanoseconds(),
 		"reexecuted":      s.Reexecuted,
 		"inlineTimeNs":    s.InlineTime.Nanoseconds(),
@@ -157,6 +159,30 @@ var buildBenchPredictDrop = flag.Float64("buildbench.predictdrop", 0, "predict s
 
 // prepareBenchMiner installs what a strategy needs beyond the config.
 func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
+	if strings.HasPrefix(strategy, "preexec") {
+		// preexec: every candidate executed alone on the parent state, once,
+		// gives both the prediction and a result the build starts from
+		if env.preexecuted == nil {
+			started := time.Now()
+			results, err := preexecuteCandidates(env)
+			if err != nil {
+				return err
+			}
+			env.preexecuted, env.preexecNs = results, time.Since(started).Nanoseconds()
+		}
+		coinbase := env.params().coinbase
+		m.parallelPredict = func(hash common.Hash) parallel.Prediction {
+			if r := env.preexecuted[hash]; r != nil && r.Err == nil {
+				return r.Prediction(coinbase)
+			}
+			return parallel.Prediction{}
+		}
+		if !strings.HasPrefix(strategy, "preexecp") {
+			// preexecp: the predictions alone, without starting from the results
+			m.parallelPreexecuted = func(hash common.Hash) *parallel.Result { return env.preexecuted[hash] }
+		}
+		return nil
+	}
 	if !strings.HasPrefix(strategy, "predict") {
 		return nil
 	}

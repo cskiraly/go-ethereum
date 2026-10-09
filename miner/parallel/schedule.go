@@ -123,12 +123,26 @@ func (s *scheduler) suspend(done <-chan struct{}) bool {
 	return true
 }
 
-// start releases every task that has no predecessor to wait for. Cheap tasks
-// are never released, and do not hold back their successors.
-func (s *scheduler) start(tasks []*Task) {
+// start finishes the seeded tasks with their results and releases every
+// other task that has no predecessor to wait for. Cheap tasks are never
+// released, and do not hold back their successors.
+func (s *scheduler) start(tasks []*Task, seeds map[*Task]*Result) {
 	// every task finishes once, plus once per requeue
 	s.finished = make(chan *Task, len(tasks)*(1+maxRequeues))
+	for t := range seeds {
+		t.mu.Lock()
+		t.released = true
+		t.mu.Unlock()
+	}
 	for _, t := range tasks {
+		if r := seeds[t]; r != nil {
+			s.finish(t, r)
+		}
+	}
+	for _, t := range tasks {
+		if seeds[t] != nil {
+			continue
+		}
 		if !t.cheap(s.inlineGas) && (t.prev == nil || t.prev.cheap(s.inlineGas)) {
 			s.release(t)
 		}

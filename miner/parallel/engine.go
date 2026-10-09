@@ -46,6 +46,11 @@ type Config struct {
 	// write it, instead of reading a value they are about to replace; for a
 	// balance changed by deltas, only if it is predicted to read it exactly.
 	Predict func(common.Hash) Prediction
+	// Preexecuted, if set, returns the result of a Preexecutor for the same
+	// parent state and header, or nil. With InOrder, such a result stands in
+	// for the first execution of its transaction unless a lower transaction is
+	// expected to write what it read.
+	Preexecuted func(common.Hash) *Result
 }
 
 // Stats counts what happened during a build.
@@ -61,6 +66,7 @@ type Stats struct {
 	Inlined      int // transactions the committer executed on the block state
 	Reexecuted   int // of those, executed by a worker before (stale or failed results)
 	Waits        int // reads that waited for a predicted writer
+	Seeded       int // tasks started from a pre-executed result
 
 	ExecutionTime time.Duration // time summed over all executions
 	ValidateTime  time.Duration // time the committer spent checking reads against the block state
@@ -68,6 +74,7 @@ type Stats struct {
 	WaitTime      time.Duration // time the committer spent waiting for results
 	InlineTime    time.Duration // time the committer spent executing transactions itself
 	WaitedTime    time.Duration // time executions spent waiting for predicted writers
+	PrefetchTime  time.Duration // time summed over the goroutines loading the state seeded results read
 	ChainWaitTime time.Duration // the part of WaitTime spent with a chained task as the lowest one left
 
 	// StaleBy counts stale results by the location of the read that failed
@@ -103,6 +110,8 @@ type Engine struct {
 	storeVal  bool
 	inlineGas uint64
 	predict   func(common.Hash) Prediction
+	preexec   func(common.Hash) *Result
+	context   common.Hash // execution context, which pre-executed results must share
 	next      int
 	dropped   map[common.Address]bool
 	stats     Stats
@@ -143,6 +152,8 @@ func New(cfg Config) (*Engine, error) {
 		storeVal:  cfg.StoreValidation,
 		inlineGas: cfg.InlineGas,
 		predict:   cfg.Predict,
+		preexec:   cfg.Preexecuted,
+		context:   executionContext(cfg.Root, cfg.Header, cfg.Coinbase),
 		dropped:   make(map[common.Address]bool),
 	}, nil
 }
@@ -167,6 +178,11 @@ func (e *Engine) NewTask(lazy *txpool.LazyTransaction, sender common.Address, bl
 			for _, a := range p.Observes {
 				t.observes[a] = true
 			}
+		}
+	}
+	if e.preexec != nil && e.inOrder {
+		if r := e.preexec(lazy.Hash); r != nil && r.context == e.context {
+			t.pre = r
 		}
 	}
 	e.next++
@@ -236,7 +252,16 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 	if e.predict != nil {
 		e.exec.waiter = newWriteWaiter(tasks, sched)
 	}
-	sched.start(tasks)
+	var seeds map[*Task]*Result
+	if e.preexec != nil && e.inOrder {
+		seeds = seedable(tasks, e.exec.coinbase, e.inlineGas)
+		e.stats.Seeded += len(seeds)
+	}
+	sched.start(tasks, seeds)
+	if shared, ok := e.exec.parent.(*SharedReader); ok && len(seeds) > 0 {
+		stop := prefetchSeeds(tasks, seeds, shared, max(1, e.workers/2), &e.stats)
+		defer stop()
+	}
 	defer func() {
 		executions, executionTime := sched.stop()
 		e.stats.Executions += executions

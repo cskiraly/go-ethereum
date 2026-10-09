@@ -430,11 +430,36 @@ var buildBenchPredictStatic = flag.Bool("buildbench.predictstatic", false, "pred
 
 var buildBenchPredict = flag.String("buildbench.predict", "parent", "predict mainnet candidates on the parent state of the block built (parent) or of the block each was included in (origin), as a node would on the head at the transaction's arrival")
 
-func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction, error) {
+// preexecuteCandidates executes every candidate alone on the parent state,
+// with the header of the block being built, as a node would on arrival.
+func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, error) {
+	parent, header, err := predictionHeader(env)
+	if err != nil {
+		return nil, err
+	}
+	db := state.NewMPTDatabase(env.chain.TrieDB(), env.chain.CodeDB()).WithSnapshot(env.chain.Snapshots())
+	reader, err := db.Reader(parent.Root)
+	if err != nil {
+		return nil, err
+	}
+	pre, err := parallel.NewPreexecutor(env.chain, env.chain.Config(), db, parent.Root, header, parallel.NewSharedReader(reader))
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[common.Hash]*parallel.Result, len(env.candidates))
+	for _, tx := range env.candidates {
+		out[tx.Hash()] = pre.Run(tx)
+	}
+	return out, nil
+}
+
+// predictionHeader returns the parent and the header of the block being
+// built, as far as executions depend on it.
+func predictionHeader(env *benchEnv) (*types.Header, *types.Header, error) {
 	params := env.params()
 	parent := env.chain.GetHeaderByHash(params.parentHash)
 	if parent == nil {
-		return nil, fmt.Errorf("parent %x not found", params.parentHash)
+		return nil, nil, fmt.Errorf("parent %x not found", params.parentHash)
 	}
 	config := env.chain.Config()
 	header := &types.Header{
@@ -452,6 +477,18 @@ func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction,
 		excess := eip4844.CalcExcessBlobGas(config, parent, header.Time)
 		header.ExcessBlobGas = &excess
 	}
+	if config.IsAmsterdam(header.Number, header.Time) {
+		header.SlotNumber = params.slotNum
+	}
+	return parent, header, nil
+}
+
+func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction, error) {
+	parent, header, err := predictionHeader(env)
+	if err != nil {
+		return nil, err
+	}
+	config := env.chain.Config()
 	// contextFor returns the state and block context a candidate is predicted on
 	contextFor := func(tx *types.Transaction) (*types.Header, *types.Header) {
 		if *buildBenchPredict == "origin" {

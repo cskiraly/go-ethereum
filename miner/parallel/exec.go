@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
@@ -97,7 +98,20 @@ func (e *executor) execute(t *Task, reader *versionedStateReader) (res *Result) 
 	gas := core.NewGasPool(e.header.GasLimit)
 	before := gas.Snapshot()
 	sdb.SetTxContext(tx.Hash(), t.Position, uint32(t.Position+1))
-	receipt, accessList, err := core.ApplyTransaction(evm, gas, sdb, e.header, tx)
+	var (
+		receipt    *types.Receipt
+		accessList *bal.ConstructionBlockAccessList
+	)
+	if t.skipNonce {
+		var msg *core.Message
+		msg, err = core.TransactionToMessage(tx, types.MakeSigner(e.config, e.header.Number, e.header.Time), e.header.BaseFee)
+		if err == nil {
+			msg.SkipNonceChecks = true
+			receipt, accessList, err = core.ApplyTransactionWithEVM(msg, gas, sdb, e.header.Number, e.header.Hash(), e.header.Time, tx, evm)
+		}
+	} else {
+		receipt, accessList, err = core.ApplyTransaction(evm, gas, sdb, e.header, tx)
+	}
 	if err != nil {
 		reads, readErr := trackedStateDB.reads()
 		if readErr != nil {

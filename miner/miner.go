@@ -99,6 +99,9 @@ type Miner struct {
 	// parallelPredict, if set, predicts the writes of candidate transactions
 	// for the parallel engine (see parallel.Config.Predict).
 	parallelPredict func(common.Hash) parallel.Prediction
+	// parallelPreexecuted, if set, returns pre-executed results of candidate
+	// transactions (see parallel.Config.Preexecuted).
+	parallelPreexecuted func(common.Hash) *parallel.Result
 
 	benchmarkCounter        atomic.Uint64
 	benchmarkPayloadCounter atomic.Uint64

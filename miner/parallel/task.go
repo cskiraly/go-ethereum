@@ -106,6 +106,11 @@ type Task struct {
 	predicted []key
 	deltas    []common.Address
 	observes  map[common.Address]bool
+	// pre is the result of executing the task alone on the parent state.
+	pre *Result
+	// skipNonce executes the transaction whatever its sender's nonce, for a
+	// prediction only.
+	skipNonce bool
 }
 
 func (t *Task) isReleased() bool {
@@ -206,6 +211,13 @@ type Result struct {
 	deltas     map[common.Address]*big.Int     // balance changes applied additively
 	minBalance map[common.Address]*uint256.Int // balances required before the transaction
 	loads      map[key]load                    // where the store-backed inputs came from
+
+	// predictOnly marks a pre-executed result that skipped the nonce check
+	// because an earlier transaction of the sender comes first: it predicts
+	// the access, but cannot stand in for an execution.
+	predictOnly bool
+	// context is the execution context of a pre-executed result.
+	context common.Hash
 }
 
 // holds reports whether the balance requirements of r hold on sdb.

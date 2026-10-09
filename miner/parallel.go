@@ -109,6 +109,8 @@ func (miner *Miner) commitTransactionsParallel(ctx context.Context, env *environ
 		InlineGas: miner.config.ParallelInlineGas,
 		Predict:   miner.parallelPredict,
 
+		Preexecuted: miner.parallelPreexecuted,
+
 		StoreValidation: miner.config.ParallelStoreValidation,
 		Reader:          parallelReader(env),
 	})

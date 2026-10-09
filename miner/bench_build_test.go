@@ -82,16 +82,18 @@ type benchEnv struct {
 	gasCeil     uint64
 	params      func() *generateParams
 
-	config     *params.ChainConfig
-	engine     consensus.Engine
-	chain      *core.BlockChain
-	pool       *txpool.TxPool
-	txs        int
-	candidates []*types.Transaction
-	signer     types.Signer
-	predicted  map[common.Hash]parallel.Prediction // access of each candidate executed alone, computed once
-	predictNs  int64                               // time computing predicted
-	origin     map[common.Hash]*types.Header       // mainnet: the block each candidate was included in
+	config      *params.ChainConfig
+	engine      consensus.Engine
+	chain       *core.BlockChain
+	pool        *txpool.TxPool
+	txs         int
+	candidates  []*types.Transaction
+	signer      types.Signer
+	predicted   map[common.Hash]parallel.Prediction // access of each candidate executed alone, computed once
+	predictNs   int64                               // time computing predicted
+	preexecuted map[common.Hash]*parallel.Result    // results of each candidate executed alone, computed once
+	preexecNs   int64                               // time computing preexecuted
+	origin      map[common.Hash]*types.Header       // mainnet: the block each candidate was included in
 
 	check    func(*types.Block) error // executes and validates a built block
 	verified map[common.Hash]error    // check results by block hash
@@ -519,6 +521,9 @@ func TestBuildBench(t *testing.T) {
 				rec := b.rec
 				if strings.HasPrefix(rec.Strategy, "predict") {
 					rec.PredictNs = env.predictNs
+				}
+				if strings.HasPrefix(rec.Strategy, "preexec") {
+					rec.PredictNs = env.preexecNs
 				}
 				rec.Match = rec.Error == "" && rec.BlockHash == reference.Hash()
 				switch {
