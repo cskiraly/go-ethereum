@@ -78,11 +78,17 @@ func applyBenchStrategy(name string, cfg *Config) error {
 		cfg.ParallelStoreValidation = true
 	case "inorder", "predict", "preexec", "preexecp":
 		// predict: in order, with the writes of every candidate predicted by
-		// executing it alone on the parent state (prepareBenchMiner)
-		if hasGas {
-			return fmt.Errorf("invalid strategy %q", name)
-		}
+		// executing it alone on the parent state (prepareBenchMiner).
+		// preexec-w<N>-g<gas>: the committer executes cheap ones itself.
 		cfg.ParallelInOrder = true
+		if hasGas {
+			if kind != "preexec" {
+				return fmt.Errorf("invalid strategy %q", name)
+			}
+			if cfg.ParallelInlineGas, err = strconv.ParseUint(gasStr, 10, 64); err != nil {
+				return fmt.Errorf("invalid strategy %q", name)
+			}
+		}
 	case "hybrid":
 		cfg.ParallelInOrder = true
 		cfg.ParallelInlineGas = 50_000
