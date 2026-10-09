@@ -18,9 +18,11 @@ package p2p
 
 import (
 	"encoding/hex"
+	"math"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/beacon/params"
+	"github.com/ethereum/go-ethereum/p2p/enode"
 )
 
 // TestMainnetForkDigest checks the digests mainnet uses (seen in ENRs and gossip topics).
@@ -51,5 +53,34 @@ func TestSepoliaForkDigest(t *testing.T) {
 	v, e := NextFork(params.SepoliaLightConfig, epoch)
 	if got := hex.EncodeToString(v[:]); got != "90000076" || e != 353024 {
 		t.Errorf("next fork %s at %d, want 90000076 at 353024", got, e)
+	}
+}
+
+// TestHoodiForkDigest checks Hoodi's current digest (BPO2 in force, no fork scheduled), as in
+// the ENR of Lodestar's Hoodi node on 2026-10-09: c6ecb76c 70000910 FAR_FUTURE_EPOCH.
+func TestHoodiForkDigest(t *testing.T) {
+	net := Networks[params.HoodiLightConfig.GenesisValidatorsRoot]
+	const epoch = 128523
+	d, _ := ForkDigest(params.HoodiLightConfig, net.BlobSchedule, net.ElectraBlobs, epoch)
+	if got := hex.EncodeToString(d[:]); got != "c6ecb76c" {
+		t.Errorf("digest %s, want c6ecb76c", got)
+	}
+	v, e := NextFork(params.HoodiLightConfig, epoch)
+	if got := hex.EncodeToString(v[:]); got != "70000910" || e != math.MaxUint64 {
+		t.Errorf("next fork %s at %d, want 70000910 at FAR_FUTURE_EPOCH", got, e)
+	}
+}
+
+// TestBuiltinBootnodes checks that every built-in network's bootnodes are valid ENRs.
+func TestBuiltinBootnodes(t *testing.T) {
+	for _, net := range Networks {
+		if len(net.Bootnodes) == 0 {
+			t.Errorf("%s: no bootnodes", net.Name)
+		}
+		for i, s := range net.Bootnodes {
+			if _, err := enode.Parse(enode.ValidSchemes, s); err != nil {
+				t.Errorf("%s bootnode %d: %v", net.Name, i, err)
+			}
+		}
 	}
 }

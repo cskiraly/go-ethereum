@@ -398,7 +398,7 @@ var (
 	}
 	BeaconP2PBootnodesFlag = &cli.StringSliceFlag{
 		Name:     "beacon.p2p.bootnodes",
-		Usage:    "Consensus layer discv5 bootnodes (ENRs) for --beacon.p2p (default: built in for mainnet)",
+		Usage:    "Consensus layer discv5 bootnodes (ENRs) for --beacon.p2p (default: built in for mainnet, sepolia and hoodi)",
 		Category: flags.BeaconCategory,
 	}
 	BeaconP2PDigestFlag = &cli.StringFlag{

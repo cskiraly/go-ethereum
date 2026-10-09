@@ -137,7 +137,7 @@ func (c *Client) startP2P() error {
 		}
 	}
 	if len(boot) == 0 {
-		return errors.New("--beacon.p2p: no consensus bootnodes for this network (built in for mainnet and sepolia; --beacon.p2p.bootnodes)")
+		return errors.New("--beacon.p2p: no consensus bootnodes for this network (built in for mainnet, sepolia and hoodi; --beacon.p2p.bootnodes)")
 	}
 	if !known && c.config.ChainConfigFile != "" {
 		// a custom network: its blob schedule from its config file
