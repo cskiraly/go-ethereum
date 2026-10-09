@@ -27,6 +27,7 @@ import (
 	"flag"
 	"fmt"
 	"math/big"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -414,11 +415,16 @@ var traceOut *json.Encoder
 // exactly.
 var buildBenchPredictTargeted = flag.Bool("buildbench.predicttargeted", false, "pre-execute only calls to contracts that wrote contended keys in earlier cases (learned across cases); implies -buildbench.predictstatic")
 
+// explore picks the unknown targets to predict anyway.
+var explore = rand.New(rand.NewSource(1))
+
 // targets learns, across cases, which call targets write contended keys.
 var targets = struct {
 	hot     map[common.Address]bool // call targets whose calls wrote contended addresses
 	learned bool
 }{hot: make(map[common.Address]bool)}
+
+var buildBenchPredictExplore = flag.Float64("buildbench.predictexplore", 0, "with -buildbench.predicttargeted, also pre-execute this fraction of calls to unknown targets (seeded), to discover new hot contracts")
 
 var buildBenchPredictStatic = flag.Bool("buildbench.predictstatic", false, "predict plain ETH transfers statically instead of executing them")
 
@@ -471,7 +477,8 @@ func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction,
 				continue
 			}
 		}
-		if *buildBenchPredictTargeted && targets.learned && tx.To() != nil && !targets.hot[*tx.To()] {
+		if *buildBenchPredictTargeted && targets.learned && tx.To() != nil && !targets.hot[*tx.To()] &&
+			explore.Float64() >= *buildBenchPredictExplore {
 			continue // not known to contend: no prediction, validation catches conflicts
 		}
 		shared := readers[parent.Root]
