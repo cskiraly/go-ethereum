@@ -36,7 +36,15 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
-const parallelPlanningGasFactor = 2
+// parallelPlanningGasFactor sizes a batch: candidates are planned until their
+// gas limits add up to this many times the gas left. Gas limits overstate the
+// gas used, and a batch that leaves gas over is followed by more batches, each
+// planned and executed only after the previous one committed. On mainnet blocks
+// with four blocks of candidates, a factor of 2 took 7 batches per block and
+// was slower than sequential; 4 fits the block in one. Planning more costs
+// executions of candidates that end up not fitting, but the workers execute in
+// position order, so those come last.
+const parallelPlanningGasFactor = 4
 
 // parallelBlock presents the miners environment to the engine as a Block.
 type parallelBlock struct {
@@ -47,8 +55,20 @@ type parallelBlock struct {
 
 type parallelBuildMetrics struct {
 	parallel.Stats
-	batches int
-	wall    time.Duration
+	batches  int
+	planning time.Duration // time spent planning batches
+	lastRun  time.Duration // wall time of the batches after the first
+	wall     time.Duration
+	log      []parallelBatchLog
+}
+
+// parallelBatchLog describes one batch, for diagnosis.
+type parallelBatchLog struct {
+	Planned   int    `json:"planned"`
+	Committed int    `json:"committed"`
+	GasLeft   uint64 `json:"gasLeft"` // before the batch
+	WallUs    int64  `json:"wallUs"`
+	ExecUs    int64  `json:"execUs"` // executions summed over workers
 }
 
 func (miner *Miner) parallelWorkerCount() int {
@@ -132,12 +152,26 @@ func (miner *Miner) commitTransactionsParallel(ctx context.Context, env *environ
 		if !blobTxs.Empty() && env.blobs >= miner.maxBlobsPerBlock(env.header.Time) {
 			blobTxs.Clear()
 		}
+		planStarted := time.Now()
 		tasks := miner.planParallel(engine, env, plainTxs, blobTxs)
+		metrics.planning += time.Since(planStarted)
 		if len(tasks) == 0 {
 			return nil
 		}
 		metrics.batches++
+		runStarted, gasLeft, before := time.Now(), env.gasPool.Gas(), engine.Stats()
 		full, err := engine.Run(ctx, tasks, block)
+		if metrics.batches > 1 {
+			metrics.lastRun += time.Since(runStarted)
+		}
+		after := engine.Stats()
+		metrics.log = append(metrics.log, parallelBatchLog{
+			Planned:   len(tasks),
+			Committed: after.Committed - before.Committed,
+			GasLeft:   gasLeft,
+			WallUs:    time.Since(runStarted).Microseconds(),
+			ExecUs:    (after.ExecutionTime - before.ExecutionTime).Microseconds(),
+		})
 		if err != nil || full {
 			return err
 		}
@@ -213,6 +247,8 @@ func (b *parallelBlock) Check(t *parallel.Task) (parallel.Verdict, error) {
 	switch {
 	case tx == nil:
 		return parallel.Reject, nil
+	case env.gasPool.Gas() < params.TxGas:
+		return parallel.Full, nil
 	case env.gasPool.Gas() < t.Lazy.Gas:
 		return parallel.Reject, nil
 	case tx.Protected() && !b.miner.chainConfig.IsEIP155(env.header.Number):
