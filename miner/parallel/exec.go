@@ -37,7 +37,8 @@ type executor struct {
 	store     *store
 	committed *store
 	parent    state.Reader
-	waiter    *writeWaiter // set during a run with predictions
+	waiter    *writeWaiter     // set during a run with predictions
+	jumpDests vm.JumpDestCache // code analysis shared by the executions, as one EVM would
 }
 
 // run executes t on the parent state plus the versions below its position. A
@@ -89,6 +90,9 @@ func (e *executor) execute(t *Task, reader *versionedStateReader) (res *Result) 
 	blockCtx.CanTransfer = trackedStateDB.canTransfer
 	evm := vm.NewEVM(blockCtx, trackedStateDB, e.config, vm.Config{})
 	defer evm.Release()
+	if e.jumpDests != nil {
+		evm.SetJumpDestCache(e.jumpDests)
+	}
 
 	gas := core.NewGasPool(e.header.GasLimit)
 	before := gas.Snapshot()
