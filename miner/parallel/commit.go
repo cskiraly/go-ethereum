@@ -147,7 +147,11 @@ func (c *committer) runInOrder(ctx context.Context, tasks []*Task) (bool, error)
 			}
 		}
 		if t.cheap(c.inlineGas) {
-			c.inline(t, false)
+			if c.storeVal {
+				c.inlineTracked(t, false)
+			} else {
+				c.inline(t, false)
+			}
 			continue
 		}
 		if !finished[t] {
@@ -209,8 +213,9 @@ func (c *committer) runInOrder(ctx context.Context, tasks []*Task) (bool, error)
 // back to the block state.
 func (c *committer) storeStale(t *Task, r *Result) (key, bool) {
 	sdb := c.block.State()
-	check := func(k key) (bool, bool) {
-		l, ok := r.loads[k]
+	// checkAs compares the load recorded under rec with the store's key k
+	checkAs := func(rec, k key) (bool, bool) {
+		l, ok := r.loads[rec]
 		if !ok {
 			return false, false
 		}
@@ -227,6 +232,7 @@ func (c *committer) storeStale(t *Task, r *Result) (key, bool) {
 			return val != l.val, true
 		}
 	}
+	check := func(k key) (bool, bool) { return checkAs(k, k) }
 	for k, v := range r.reads {
 		lk := k
 		if _, ok := r.loads[k]; !ok && k.field != storage {
@@ -237,7 +243,7 @@ func (c *committer) storeStale(t *Task, r *Result) (key, bool) {
 			stale = readStale(sdb, k, v)
 		}
 		if !stale && k.field == storage {
-			stale, _ = check(key{addr: k.addr, field: destructed})
+			stale, _ = checkAs(key{addr: k.addr, field: destructed, slot: k.slot}, key{addr: k.addr, field: destructed})
 		}
 		if stale {
 			return k, true
@@ -398,6 +404,7 @@ func (c *committer) reject(t *Task) {
 func (c *committer) drop(t *Task) {
 	defer t.markDone()
 	t.mu.Lock()
+	t.discarded = true
 	if t.result != nil {
 		c.store.unpublish(t.Position, t.result.writes)
 		t.result = nil

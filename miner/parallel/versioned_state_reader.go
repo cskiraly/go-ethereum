@@ -149,7 +149,8 @@ func (r *versionedStateReader) loadSlot(k key) (common.Hash, error) {
 	}
 	dk := key{addr: k.addr, field: destructed}
 	dval, deletedAt, deleted := r.store.read(dk, r.pos)
-	r.record(dk, dval, deletedAt, deleted)
+	// the marker this slot was read under, which may differ per slot
+	r.record(key{addr: k.addr, field: destructed, slot: k.slot}, dval, deletedAt, deleted)
 	val, pos, ok := r.store.read(k, r.pos)
 	var parent common.Hash
 	if ok {
