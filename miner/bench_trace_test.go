@@ -412,6 +412,8 @@ var traceOut *json.Encoder
 // state, as a builder could from its mempool, and returns what each one
 // writes exactly, the balances it changes additively and those it reads
 // exactly.
+var buildBenchPredict = flag.String("buildbench.predict", "parent", "predict mainnet candidates on the parent state of the block built (parent) or of the block each was included in (origin), as a node would on the head at the transaction's arrival")
+
 func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction, error) {
 	params := env.params()
 	parent := env.chain.GetHeaderByHash(params.parentHash)
@@ -434,9 +436,21 @@ func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction,
 		excess := eip4844.CalcExcessBlobGas(config, parent, header.Time)
 		header.ExcessBlobGas = &excess
 	}
+	// contextFor returns the state and block context a candidate is predicted on
+	contextFor := func(tx *types.Transaction) (*types.Header, *types.Header) {
+		if *buildBenchPredict == "origin" {
+			if h := env.origin[tx.Hash()]; h != nil {
+				if p := env.chain.GetHeaderByHash(h.ParentHash); p != nil && env.chain.HasState(p.Root) {
+					return p, h
+				}
+			}
+		}
+		return parent, header
+	}
 	signer := types.LatestSigner(config)
 	out := make(map[common.Hash]parallel.Prediction, len(env.candidates))
 	for _, tx := range env.candidates {
+		parent, header := contextFor(tx)
 		statedb, err := env.chain.StateAt(parent)
 		if err != nil {
 			return nil, err

@@ -91,6 +91,7 @@ type benchEnv struct {
 	signer     types.Signer
 	predicted  map[common.Hash]parallel.Prediction // access of each candidate executed alone, computed once
 	predictNs  int64                               // time computing predicted
+	origin     map[common.Hash]*types.Header       // mainnet: the block each candidate was included in
 
 	check    func(*types.Block) error // executes and validates a built block
 	verified map[common.Hash]error    // check results by block hash

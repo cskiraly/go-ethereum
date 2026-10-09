@@ -165,6 +165,7 @@ func newMainnetEnv(chain *core.BlockChain, engine consensus.Engine, number uint6
 	config := chain.Config()
 	signer := types.LatestSigner(config)
 	var txs []*types.Transaction
+	origin := make(map[common.Hash]*types.Header)
 	for i := range depth {
 		b := chain.GetBlockByNumber(number + uint64(i))
 		if b == nil {
@@ -173,6 +174,7 @@ func newMainnetEnv(chain *core.BlockChain, engine consensus.Engine, number uint6
 		for _, tx := range b.Transactions() {
 			if tx.Type() != types.BlobTxType {
 				txs = append(txs, tx)
+				origin[tx.Hash()] = b.Header()
 			}
 		}
 	}
@@ -187,6 +189,7 @@ func newMainnetEnv(chain *core.BlockChain, engine consensus.Engine, number uint6
 		chain:       chain,
 		txs:         len(txs),
 		candidates:  txs,
+		origin:      origin,
 		signer:      signer,
 		verified:    make(map[common.Hash]error),
 		check:       func(b *types.Block) error { return benchProcessBlock(chain, parent, b) },
