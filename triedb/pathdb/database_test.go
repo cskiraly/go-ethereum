@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -789,6 +790,157 @@ func TestDisable(t *testing.T) {
 	if tester.db.tree.bottom().rootHash() != stored {
 		t.Fatalf("Root hash is not matched exp %x got %x", stored, tester.db.tree.bottom().rootHash())
 	}
+}
+
+// batchHook is a database that calls hook before the first write of a batch
+// made through it.
+type batchHook struct {
+	ethdb.Database
+	hook func()
+	once sync.Once
+}
+
+func (db *batchHook) NewBatch() ethdb.Batch {
+	return &hookedBatch{Batch: db.Database.NewBatch(), db: db}
+}
+
+type hookedBatch struct {
+	ethdb.Batch
+	db *batchHook
+}
+
+func (b *hookedBatch) Write() error {
+	b.db.once.Do(b.db.hook)
+	return b.Batch.Write()
+}
+
+// TestReactivationStopsIndexers checks that the reactivation at the end of a
+// state sync stops the history indexers before it writes anything: one still
+// running could write the index of the purged histories back.
+func TestReactivationStopsIndexers(t *testing.T) {
+	t.Run("Enable", func(t *testing.T) {
+		testReactivationStopsIndexers(t, func(db *Database, root common.Hash) error { return db.Enable(root) })
+	})
+	t.Run("AdoptSyncedState", func(t *testing.T) {
+		testReactivationStopsIndexers(t, func(db *Database, root common.Hash) error { return db.AdoptSyncedState(root) })
+	})
+}
+
+func testReactivationStopsIndexers(t *testing.T, reactivate func(db *Database, root common.Hash) error) {
+	maxDiffLayers = 4
+	defer func() {
+		maxDiffLayers = 128
+	}()
+
+	tester := newTester(t, &testerConfig{layers: 12, enableIndex: true})
+	defer tester.release()
+
+	if err := tester.db.Commit(tester.lastHash(), false); err != nil {
+		t.Fatalf("Failed to commit, err: %v", err)
+	}
+	stored := crypto.Keccak256Hash(rawdb.ReadAccountTrieNode(tester.db.diskdb, nil))
+
+	indexers := []*historyIndexer{tester.db.stateIndexer, tester.db.trienodeIndexer}
+	for _, indexer := range indexers {
+		if indexer == nil {
+			t.Fatal("History indexing is not enabled")
+		}
+	}
+	// The indexers write through the database they were given, the hook sees
+	// only the reactivation's own writes: the state id reset comes first.
+	var written bool
+	tester.db.diskdb = &batchHook{Database: tester.db.diskdb, hook: func() {
+		written = true
+		for _, indexer := range indexers {
+			for _, closed := range []chan struct{}{indexer.initer.closed, indexer.pruner.closed} {
+				select {
+				case <-closed:
+				default:
+					t.Error("History indexer still running when the reactivation writes")
+				}
+			}
+		}
+	}}
+	if err := tester.db.Disable(); err != nil {
+		t.Fatalf("Failed to disable database: %v", err)
+	}
+	if err := reactivate(tester.db, stored); err != nil {
+		t.Fatalf("Failed to reactivate database: %v", err)
+	}
+	if !written {
+		t.Fatal("The reactivation wrote nothing")
+	}
+	if tester.db.stateIndexer == indexers[0] || tester.db.trienodeIndexer == indexers[1] {
+		t.Fatal("The history indexers weren't replaced")
+	}
+}
+
+// TestReactivationDropsJournal checks that the reactivation at the end of a state
+// sync drops the layer journal of the old state, kept in the key-value store or
+// in a file: if its root is the synced one, a restart would load it, with a state
+// id the purged histories no longer cover.
+func TestReactivationDropsJournal(t *testing.T) {
+	var (
+		enable = func(db *Database, root common.Hash) error { return db.Enable(root) }
+		adopt  = func(db *Database, root common.Hash) error { return db.AdoptSyncedState(root) }
+	)
+	t.Run("kv/Enable", func(t *testing.T) { testReactivationDropsJournal(t, "", enable) })
+	t.Run("kv/AdoptSyncedState", func(t *testing.T) { testReactivationDropsJournal(t, "", adopt) })
+	t.Run("file/Enable", func(t *testing.T) { testReactivationDropsJournal(t, filepath.Join(t.TempDir(), "journal"), enable) })
+	t.Run("file/AdoptSyncedState", func(t *testing.T) { testReactivationDropsJournal(t, filepath.Join(t.TempDir(), "journal"), adopt) })
+}
+
+func testReactivationDropsJournal(t *testing.T, journalDir string, reactivate func(db *Database, root common.Hash) error) {
+	maxDiffLayers = 4
+	defer func() {
+		maxDiffLayers = 128
+	}()
+
+	tester := newTester(t, &testerConfig{layers: 12, journalDir: journalDir})
+	defer tester.release()
+
+	// Persist everything and journal the layers at a clean shutdown, then
+	// start again: the journal stays where it was written.
+	if err := tester.db.Commit(tester.lastHash(), false); err != nil {
+		t.Fatalf("Failed to commit, err: %v", err)
+	}
+	if err := tester.db.Journal(tester.lastHash()); err != nil {
+		t.Fatalf("Failed to journal, err: %v", err)
+	}
+	if path := tester.db.journalPath(); path != "" {
+		// A journal file, and an older copy in the key-value store, which
+		// is read when the file is missing.
+		blob, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("Failed to read the journal file: %v", err)
+		}
+		rawdb.WriteTrieJournal(tester.db.diskdb, blob)
+	}
+	tester.db.Close()
+	tester.db = New(tester.db.diskdb, tester.db.config, false)
+
+	// A state sync ends at the state on disk, the root of the journal.
+	stored := crypto.Keccak256Hash(rawdb.ReadAccountTrieNode(tester.db.diskdb, nil))
+	if err := tester.db.Disable(); err != nil {
+		t.Fatalf("Failed to disable database: %v", err)
+	}
+	if err := reactivate(tester.db, stored); err != nil {
+		t.Fatalf("Failed to reactivate database: %v", err)
+	}
+	// A restart without a new journal (after a crash) loads the layers and
+	// repairs the history against them, as New does. Not New itself: on a
+	// failed repair it exits the process.
+	tester.db.Close()
+	restart := &Database{config: tester.db.config, diskdb: tester.db.diskdb, hasher: tester.db.hasher}
+	id := restart.loadLayers().stateID()
+	if want := rawdb.ReadPersistentStateID(tester.db.diskdb); id != want {
+		t.Errorf("Restart loads the old journal: state id %d, persistent %d", id, want)
+	}
+	states, _, err := repairHistory(tester.db.diskdb, false, false, id, false)
+	if err != nil {
+		t.Fatalf("Database can't be opened after the reactivation: %v", err)
+	}
+	states.Close()
 }
 
 // TestAdoptSyncedState verifies that AdoptSyncedState rejects a wrong root,
