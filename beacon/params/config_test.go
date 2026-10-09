@@ -55,27 +55,22 @@ func TestSaveCheckpointToFile(t *testing.T) {
 	}
 	// A hard link keeps the file the first save wrote. It sees the second
 	// checkpoint only if the second save rewrites that file in place.
-	if err := os.Link(file, link); err != nil {
-		t.Fatal(err)
-	}
-	// A temporary file left behind by a crash doesn't get in the way.
-	if err := os.WriteFile(file+".tmp", []byte("left by a crash"), 0600); err != nil {
-		t.Fatal(err)
+	linked := os.Link(file, link) == nil
+	if !linked {
+		t.Log("No hard links on this file system: not checking that the file is replaced")
 	}
 	if saved, err := c.SaveCheckpointToFile(cp2); !saved || err != nil {
 		t.Fatalf("second save: saved %v, error %v", saved, err)
 	}
-	if old, err := os.ReadFile(link); err != nil || string(old) != cp1.Hex() {
-		t.Errorf("the second save rewrote the file in place: %q, %v", old, err)
+	if linked {
+		if old, err := os.ReadFile(link); err != nil || string(old) != cp1.Hex() {
+			t.Errorf("the second save rewrote the file in place: %q, %v", old, err)
+		}
 	}
 	// The second checkpoint loads, and no temporary file is left behind.
 	checkLoad(t, file, cp2)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 2 {
-		t.Errorf("want only the file and the link in the directory, have %v", entries)
+	if tmp, _ := filepath.Glob(filepath.Join(dir, ".checkpoint.tmp*")); len(tmp) != 0 {
+		t.Errorf("temporary files left behind: %v", tmp)
 	}
 }
 
@@ -83,8 +78,11 @@ func TestSaveCheckpointToFileSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symbolic links need privileges on Windows")
 	}
+	dir := t.TempDir()
+
+	// A link to an existing file: the file gets the checkpoint and keeps its
+	// permissions.
 	var (
-		dir    = t.TempDir()
 		target = filepath.Join(dir, "target")
 		link   = filepath.Join(dir, "link")
 	)
@@ -101,14 +99,33 @@ func TestSaveCheckpointToFileSymlink(t *testing.T) {
 	if saved, err := c.SaveCheckpointToFile(common.Hash{2}); !saved || err != nil {
 		t.Fatalf("save: saved %v, error %v", saved, err)
 	}
-	// The link still points at the target, which holds the new checkpoint and
-	// kept its permissions.
-	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
-		t.Errorf("the save replaced the symbolic link (%v)", err)
-	}
+	checkLink(t, link)
 	checkLoad(t, target, common.Hash{2})
 	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0640 {
 		t.Errorf("the save changed the file's permissions (%v)", err)
+	}
+
+	// A link to a file that doesn't exist yet, by absolute and by relative path:
+	// the save creates the file.
+	for _, dest := range []string{filepath.Join(dir, "later"), "later-relative"} {
+		link := filepath.Join(dir, "link-"+filepath.Base(dest))
+		if err := os.Symlink(dest, link); err != nil {
+			t.Fatal(err)
+		}
+		c := &ChainConfig{CheckpointFile: link}
+		if saved, err := c.SaveCheckpointToFile(common.Hash{3}); !saved || err != nil {
+			t.Fatalf("save through a link to %s: saved %v, error %v", dest, saved, err)
+		}
+		checkLink(t, link)
+		checkLoad(t, filepath.Join(dir, filepath.Base(dest)), common.Hash{3})
+	}
+}
+
+// checkLink checks that the save left the symbolic link a link.
+func checkLink(t *testing.T, link string) {
+	t.Helper()
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the save replaced the symbolic link %s (%v)", link, err)
 	}
 }
 
@@ -120,10 +137,11 @@ func TestSaveCheckpointToFileInPlace(t *testing.T) {
 		dir  = t.TempDir()
 		file = filepath.Join(dir, "checkpoint")
 	)
-	if err := os.WriteFile(file, nil, 0600); err != nil {
+	if err := os.WriteFile(file, bytes.Repeat([]byte{'x'}, 100), 0600); err != nil {
 		t.Fatal(err)
 	}
-	// The file is writable but its directory isn't: the save writes in place.
+	// The file is writable but its directory isn't: the save writes over it in
+	// place, and cuts it to the checkpoint's length.
 	if err := os.Chmod(dir, 0500); err != nil {
 		t.Fatal(err)
 	}

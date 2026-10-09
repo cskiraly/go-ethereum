@@ -18,6 +18,7 @@ package params
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -27,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/beacon/merkle"
 	"github.com/ethereum/go-ethereum/common"
@@ -287,52 +289,85 @@ func (c *ChainConfig) SaveCheckpointToFile(checkpoint common.Hash) (bool, error)
 		return false, nil
 	}
 	data := []byte(checkpoint.Hex())
-	if err := replaceFile(c.CheckpointFile, data); err != nil {
-		// The file can't be replaced where it is a mount point itself, or where
-		// its directory isn't writable: write it in place there. A crash during
-		// the write can leave it empty, which SetCheckpointFile ignores.
-		log.Debug("Writing beacon checkpoint file in place", "file", c.CheckpointFile, "err", err)
-		if err := writeFileSync(c.CheckpointFile, data, 0600); err != nil {
-			return false, fmt.Errorf("failed to write beacon checkpoint file: %v", err)
+	err := replaceFile(c.CheckpointFile, data)
+	if errors.Is(err, errNotReplaceable) {
+		// A mount point itself, in a directory that isn't writable, or a link to a
+		// file that doesn't exist yet: write over the old checkpoint instead.
+		if !inPlaceWarned.Swap(true) {
+			log.Warn("Saving beacon checkpoint file in place", "file", c.CheckpointFile, "err", err)
 		}
+		err = overwriteFile(c.CheckpointFile, data)
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to write beacon checkpoint file: %v", err)
 	}
 	return true, nil
 }
 
+var (
+	// errNotReplaceable reports that a file can't be replaced by a new one.
+	errNotReplaceable = errors.New("can't replace the file")
+
+	// inPlaceWarned is set once a checkpoint file has been saved in place.
+	inPlaceWarned atomic.Bool
+)
+
 // replaceFile replaces the named file, or the file a symbolic link points to,
-// with a new one holding data and having the same permissions. The new file is
-// written and synced next to the old one first, so that a crash leaves either
-// the old or the new content. The directory isn't synced: after a crash, the
-// old checkpoint is still a valid one.
+// with a new one holding data, with the old one's permission bits. The new file
+// is written and synced next to the old one first, so that a crash leaves either
+// the old or the new content where renaming is atomic, as on Linux and macOS.
+// The directory isn't synced: after a crash, the old checkpoint is still a valid
+// one. Where the file can't be replaced, it returns errNotReplaceable and leaves
+// the file as it was; other errors are failures to write the new file.
 func replaceFile(name string, data []byte) error {
 	if target, err := filepath.EvalSymlinks(name); err == nil {
 		name = target
+	} else if _, err := os.Lstat(name); err == nil {
+		// It exists, but where it leads can't be resolved: a link to a file that
+		// doesn't exist yet, for example.
+		return fmt.Errorf("%w: %s doesn't resolve", errNotReplaceable, name)
 	}
 	perm := os.FileMode(0600)
 	if info, err := os.Stat(name); err == nil {
 		perm = info.Mode().Perm()
 	}
-	tmp := name + ".tmp"
-	err := writeFileSync(tmp, data, perm)
+	f, err := os.CreateTemp(filepath.Dir(name), "."+filepath.Base(name)+".tmp*")
+	if err != nil {
+		return fmt.Errorf("%w: %v", errNotReplaceable, err)
+	}
+	_, err = f.Write(data)
 	if err == nil {
-		err = os.Chmod(tmp, perm) // the umask may have changed it, or a stale file has its own
+		err = f.Chmod(perm)
 	}
 	if err == nil {
-		err = os.Rename(tmp, name)
+		err = f.Sync()
+	}
+	if err1 := f.Close(); err1 != nil && err == nil {
+		err = err1
+	}
+	if err == nil {
+		if err = os.Rename(f.Name(), name); err != nil {
+			err = fmt.Errorf("%w: %v", errNotReplaceable, err)
+		}
 	}
 	if err != nil {
-		os.Remove(tmp)
+		os.Remove(f.Name())
 	}
 	return err
 }
 
-// writeFileSync is like os.WriteFile, but syncs the file before closing it.
-func writeFileSync(name string, data []byte, perm os.FileMode) error {
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+// overwriteFile writes data over the beginning of the named file, cuts the file
+// to the length of data and syncs it. It doesn't truncate the file first, so a
+// file as long as data, as checkpoint files are, never becomes empty.
+func overwriteFile(name string, data []byte) error {
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
 		return err
 	}
-	_, err = f.Write(data)
+	_, err = f.WriteAt(data, 0)
+	if err == nil {
+		err = f.Truncate(int64(len(data)))
+	}
 	if err == nil {
 		err = f.Sync()
 	}
