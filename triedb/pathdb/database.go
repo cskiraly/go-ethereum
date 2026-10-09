@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -388,19 +389,38 @@ func (db *Database) resetForReactivation(root common.Hash) error {
 	if db.trienodeIndexer != nil {
 		db.trienodeIndexer.close()
 	}
-	// Drop the stale state journal marker and reset the persistent state id
-	// back to zero.
+	// Drop the layer journal of the old state: its root can be the synced one,
+	// and loading it at the next start would bring back its state id, which
+	// the purged histories no longer cover. The journal file goes first, and
+	// its removal is made durable before anything else changes: the directory
+	// is synced even if the file is gone already, since an earlier attempt may
+	// have removed it and then failed, or crashed, before the sync.
+	if path := db.journalPath(); path != "" {
+		err := os.Remove(path)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove stale journal %s: %v", path, err)
+		}
+		if err := syncDir(db.config.JournalDirectory); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to sync the journal directory: %v", err)
+		}
+		if err == nil {
+			log.Debug("Removed stale journal", "path", path)
+		}
+	}
+	// Drop the stale state journal marker and the journal in the key-value
+	// store, and reset the persistent state id back to zero.
 	batch := db.diskdb.NewBatch()
 	rawdb.DeleteSnapshotRoot(batch)
 	rawdb.WritePersistentStateID(batch, 0)
+	rawdb.DeleteTrieJournal(batch)
 	if err := batch.Write(); err != nil {
 		return err
 	}
 	// Clean up all state histories in the freezer. Theoretically all root->id
 	// mappings should be removed as well; since those can be huge, leave them
 	// on disk and let them be overwritten. Before it resets a freezer,
-	// purgeHistory syncs the key-value store, which makes the state id reset
-	// above durable too. (A freezer without histories isn't reset, but then the
+	// purgeHistory syncs the key-value store, which makes the batch above
+	// durable too. (A freezer without histories isn't reset, but then the
 	// state id was zero already.)
 	purgeHistory(db.stateFreezer, db.diskdb, typeStateHistory)
 	purgeHistory(db.trienodeFreezer, db.diskdb, typeTrienodeHistory)
