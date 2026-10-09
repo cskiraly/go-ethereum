@@ -16,6 +16,7 @@ type versionedStateReader struct {
 	parent   state.Reader
 	accounts map[common.Address]*types.StateAccount
 	slots    map[key]common.Hash
+	wait     func(key) // if set, called before a key is read from the store
 }
 
 var _ state.Reader = (*versionedStateReader)(nil)
@@ -51,6 +52,11 @@ func (r *versionedStateReader) Account(addr common.Address) (*types.StateAccount
 }
 
 func (r *versionedStateReader) loadAccount(addr common.Address) (*types.StateAccount, error) {
+	if r.wait != nil {
+		for _, f := range []field{exists, balance, nonce, code} {
+			r.wait(key{addr: addr, field: f})
+		}
+	}
 	acct, err := r.parent.Account(addr)
 	if err != nil {
 		return nil, err
@@ -103,6 +109,9 @@ func (r *versionedStateReader) Storage(addr common.Address, slot common.Hash) (c
 }
 
 func (r *versionedStateReader) loadSlot(k key) (common.Hash, error) {
+	if r.wait != nil {
+		r.wait(k)
+	}
 	_, deletedAt, deleted := r.store.read(key{addr: k.addr, field: destructed}, r.pos)
 	val, pos, ok := r.store.read(k, r.pos)
 	switch {

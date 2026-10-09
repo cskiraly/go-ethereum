@@ -186,6 +186,7 @@ func newMainnetEnv(chain *core.BlockChain, engine consensus.Engine, number uint6
 		engine:      engine,
 		chain:       chain,
 		txs:         len(txs),
+		candidates:  txs,
 		signer:      signer,
 		verified:    make(map[common.Hash]error),
 		check:       func(b *types.Block) error { return benchProcessBlock(chain, parent, b) },

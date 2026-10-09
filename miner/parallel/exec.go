@@ -34,6 +34,7 @@ type executor struct {
 	store     *store
 	committed *store
 	parent    state.Reader
+	waiter    *writeWaiter // set during a run with predictions
 }
 
 // run executes t on the parent state plus the versions below its position. A
@@ -43,7 +44,17 @@ func (e *executor) run(t *Task) *Result {
 	if t.requeues > 0 {
 		return e.execute(t, newVersionedStateReader(allVersions, e.committed, e.parent))
 	}
-	return e.execute(t, newVersionedStateReader(t.Position, e.store, e.parent))
+	reader := newVersionedStateReader(t.Position, e.store, e.parent)
+	if e.waiter != nil {
+		w := e.waiter
+		reader.wait = func(k key) {
+			w.wait(k, t.Position)
+			if k.field == balance && t.observes[k.addr] {
+				w.waitDeltas(k.addr, t.Position)
+			}
+		}
+	}
+	return e.execute(t, reader)
 }
 
 // runOn executes t on the block state alone, as a sequential builder would.

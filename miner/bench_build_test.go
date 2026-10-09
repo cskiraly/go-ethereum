@@ -52,6 +52,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/miner/parallel"
 	"github.com/ethereum/go-ethereum/params"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -81,12 +82,14 @@ type benchEnv struct {
 	gasCeil     uint64
 	params      func() *generateParams
 
-	config *params.ChainConfig
-	engine consensus.Engine
-	chain  *core.BlockChain
-	pool   *txpool.TxPool
-	txs    int
-	signer types.Signer
+	config     *params.ChainConfig
+	engine     consensus.Engine
+	chain      *core.BlockChain
+	pool       *txpool.TxPool
+	txs        int
+	candidates []*types.Transaction
+	signer     types.Signer
+	predicted  map[common.Hash]parallel.Prediction // access of each candidate executed alone, computed once
 
 	check    func(*types.Block) error // executes and validates a built block
 	verified map[common.Hash]error    // check results by block hash
@@ -150,6 +153,7 @@ func newBenchEnv(w benchWorkload, seed int64) (*benchEnv, error) {
 		engine:      engine,
 		chain:       chain,
 		txs:         len(gen.txs),
+		candidates:  gen.txs,
 		signer:      gen.signer,
 		verified:    make(map[common.Hash]error),
 		closers:     []func(){chain.Stop},
@@ -241,7 +245,11 @@ func (e *benchEnv) newMiner(strategy string) (*Miner, error) {
 	if err := applyBenchStrategy(strategy, &cfg); err != nil {
 		return nil, err
 	}
-	return New(e, cfg, e.engine), nil
+	m := New(e, cfg, e.engine)
+	if err := prepareBenchMiner(e, m, strategy); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // benchRecord is one build.

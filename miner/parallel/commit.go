@@ -178,6 +178,7 @@ func (c *committer) runInOrder(ctx context.Context, tasks []*Task) (bool, error)
 				}
 				c.publishCoinbase(t.Position)
 				c.stats.Committed++
+				t.markDone()
 				continue
 			}
 			c.stats.Stale++
@@ -194,6 +195,7 @@ func (c *committer) runInOrder(ctx context.Context, tasks []*Task) (bool, error)
 func (c *committer) inline(t *Task, reexec bool) {
 	started := time.Now()
 	err := c.block.Execute(t)
+	t.markDone()
 	c.stats.InlineTime += time.Since(started)
 	c.stats.Inlined++
 	if reexec {
@@ -300,6 +302,7 @@ func (c *committer) reject(t *Task) {
 }
 
 func (c *committer) drop(t *Task) {
+	defer t.markDone()
 	t.mu.Lock()
 	if t.result != nil {
 		c.store.unpublish(t.Position, t.result.writes)

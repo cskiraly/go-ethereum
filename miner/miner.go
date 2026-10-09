@@ -20,6 +20,7 @@ package miner
 import (
 	"context"
 	"fmt"
+	"github.com/ethereum/go-ethereum/miner/parallel"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -92,6 +93,10 @@ type Miner struct {
 	// lastParallelMetrics holds the metrics of the most recent parallel commit
 	// phase. It exists so tests can inspect the executor's behavior.
 	lastParallelMetrics atomic.Pointer[parallelBuildMetrics]
+
+	// parallelPredict, if set, predicts the writes of candidate transactions
+	// for the parallel engine (see parallel.Config.Predict).
+	parallelPredict func(common.Hash) parallel.Prediction
 
 	benchmarkCounter        atomic.Uint64
 	benchmarkPayloadCounter atomic.Uint64

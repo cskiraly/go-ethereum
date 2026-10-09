@@ -27,9 +27,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/miner/parallel"
 )
 
 // applyBenchStrategy configures cfg for the named strategy:
@@ -59,7 +61,9 @@ func applyBenchStrategy(name string, cfg *Config) error {
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
-	case "inorder":
+	case "inorder", "predict":
+		// predict: in order, with the writes of every candidate predicted by
+		// executing it alone on the parent state (prepareBenchMiner)
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
@@ -109,6 +113,8 @@ func benchStats(m *Miner) map[string]any {
 		"validateTimeNs":  s.ValidateTime.Nanoseconds(),
 		"chainWaitTimeNs": s.ChainWaitTime.Nanoseconds(),
 		"inlined":         s.Inlined,
+		"waits":           s.Waits,
+		"waitedNs":        s.WaitedTime.Nanoseconds(),
 		"reexecuted":      s.Reexecuted,
 		"inlineTimeNs":    s.InlineTime.Nanoseconds(),
 		"staleBy":         s.StaleBy,
@@ -130,4 +136,20 @@ func benchProcessBlock(chain *core.BlockChain, parent *types.Header, block *type
 		return err
 	}
 	return chain.Validator().ValidateState(block, statedb, res, false)
+}
+
+// prepareBenchMiner installs what a strategy needs beyond the config.
+func prepareBenchMiner(env *benchEnv, m *Miner, strategy string) error {
+	if !strings.HasPrefix(strategy, "predict-") {
+		return nil
+	}
+	if env.predicted == nil {
+		predicted, err := predictCandidateWrites(env)
+		if err != nil {
+			return err
+		}
+		env.predicted = predicted
+	}
+	m.parallelPredict = func(hash common.Hash) parallel.Prediction { return env.predicted[hash] }
+	return nil
 }

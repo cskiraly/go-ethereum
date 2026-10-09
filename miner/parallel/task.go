@@ -92,6 +92,60 @@ type Task struct {
 	result   *Result
 	released bool
 	requeues int // times the committer handed the task back as stale
+
+	// done is closed once the task's writes became visible or never will:
+	// its first execution finished, or the committer settled it.
+	done     chan struct{}
+	doneOnce sync.Once
+	// predicted are the keys the task is expected to write exactly,
+	// deltas the balances it is expected to change additively, and observes
+	// the balances it is expected to read exactly.
+	predicted []key
+	deltas    []common.Address
+	observes  map[common.Address]bool
+}
+
+func (t *Task) markDone() {
+	t.doneOnce.Do(func() { close(t.done) })
+}
+
+func (t *Task) isDone() bool {
+	select {
+	case <-t.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// Prediction is the expected state access of a transaction.
+type Prediction struct {
+	Writes   []WriteKey       // keys written exactly
+	Deltas   []common.Address // balances changed additively
+	Observes []common.Address // balances read exactly
+}
+
+// WriteKey names a piece of state a transaction is predicted to write: an
+// account field ('e'xistence, 'b'alance, 'n'once, 'c'ode) or a storage slot
+// ('s').
+type WriteKey struct {
+	Addr  common.Address
+	Field byte
+	Slot  common.Hash
+}
+
+func (w WriteKey) key() key {
+	switch w.Field {
+	case 'e':
+		return key{addr: w.Addr, field: exists}
+	case 'b':
+		return key{addr: w.Addr, field: balance}
+	case 'n':
+		return key{addr: w.Addr, field: nonce}
+	case 'c':
+		return key{addr: w.Addr, field: code}
+	}
+	return key{addr: w.Addr, field: storage, slot: w.Slot}
 }
 
 // cheap reports whether the committer executes t itself rather than a worker:

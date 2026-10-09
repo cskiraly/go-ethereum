@@ -26,14 +26,19 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math/big"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/miner/parallel"
 	"github.com/holiman/uint256"
 )
 
@@ -399,3 +404,77 @@ func predictWrites(env *benchEnv, block *types.Block, parent *types.Header, trac
 
 // traceOut is the encoder of -buildbench.trace, opened by TestBuildBench.
 var traceOut *json.Encoder
+
+// predictCandidateWrites executes every candidate of env alone on the parent
+// state, as a builder could from its mempool, and returns what each one
+// writes exactly, the balances it changes additively and those it reads
+// exactly.
+func predictCandidateWrites(env *benchEnv) (map[common.Hash]parallel.Prediction, error) {
+	params := env.params()
+	parent := env.chain.GetHeaderByHash(params.parentHash)
+	if parent == nil {
+		return nil, fmt.Errorf("parent %x not found", params.parentHash)
+	}
+	config := env.chain.Config()
+	header := &types.Header{
+		ParentHash:       parent.Hash(),
+		Number:           new(big.Int).Add(parent.Number, common.Big1),
+		Time:             params.timestamp,
+		Coinbase:         params.coinbase,
+		GasLimit:         core.CalcGasLimit(parent.GasLimit, env.gasCeil),
+		BaseFee:          eip1559.CalcBaseFee(config, parent),
+		Difficulty:       new(big.Int),
+		MixDigest:        params.random,
+		ParentBeaconRoot: params.beaconRoot,
+	}
+	if config.IsCancun(header.Number, header.Time) {
+		excess := eip4844.CalcExcessBlobGas(config, parent, header.Time)
+		header.ExcessBlobGas = &excess
+	}
+	signer := types.LatestSigner(config)
+	out := make(map[common.Hash]parallel.Prediction, len(env.candidates))
+	for _, tx := range env.candidates {
+		statedb, err := env.chain.StateAt(parent)
+		if err != nil {
+			return nil, err
+		}
+		rec := &accessRecorder{StateDB: statedb, coinbase: header.Coinbase}
+		blockCtx := core.NewEVMBlockContext(header, env.chain, nil)
+		blockCtx.CanTransfer = rec.canTransfer
+		evm := vm.NewEVM(blockCtx, rec, config, vm.Config{})
+		msg, err := core.TransactionToMessage(tx, signer, header.BaseFee)
+		if err != nil {
+			evm.Release()
+			continue
+		}
+		msg.SkipNonceChecks = true
+		statedb.SetTxContext(tx.Hash(), 0, 1)
+		rec.begin()
+		_, err = core.ApplyMessage(evm, msg, core.NewGasPool(header.GasLimit))
+		evm.Release()
+		if err != nil {
+			continue
+		}
+		var p parallel.Prediction
+		for _, e := range rec.finish() {
+			addr, rest, _ := strings.Cut(e.Key, "/")
+			a := common.HexToAddress(addr)
+			switch {
+			case e.Kind == accessDelta:
+				p.Deltas = append(p.Deltas, a)
+			case e.Kind == accessRead && rest == "b":
+				p.Observes = append(p.Observes, a)
+			case e.Kind == accessWrite:
+				w := parallel.WriteKey{Addr: a}
+				if len(rest) == 1 {
+					w.Field = rest[0]
+				} else {
+					w.Field, w.Slot = 's', common.HexToHash(rest)
+				}
+				p.Writes = append(p.Writes, w)
+			}
+		}
+		out[tx.Hash()] = p
+	}
+	return out, nil
+}

@@ -29,6 +29,11 @@ type Config struct {
 	// block state itself when it uses at most this much gas. For cheap
 	// transactions that costs less than validating and applying a result.
 	InlineGas uint64
+	// Predict, if set, returns the expected state access of a transaction.
+	// An execution reading a key waits for the lower positions predicted to
+	// write it, instead of reading a value they are about to replace; for a
+	// balance changed by deltas, only if it is predicted to read it exactly.
+	Predict func(common.Hash) Prediction
 }
 
 // Stats counts what happened during a build.
@@ -43,12 +48,14 @@ type Stats struct {
 	Dropped      int
 	Inlined      int // transactions the committer executed on the block state
 	Reexecuted   int // of those, executed by a worker before (stale or failed results)
+	Waits        int // reads that waited for a predicted writer
 
 	ExecutionTime time.Duration // time summed over all executions
 	ValidateTime  time.Duration // time the committer spent checking reads against the block state
 	CommitTime    time.Duration // time the committer spent applying results
 	WaitTime      time.Duration // time the committer spent waiting for results
 	InlineTime    time.Duration // time the committer spent executing transactions itself
+	WaitedTime    time.Duration // time executions spent waiting for predicted writers
 	ChainWaitTime time.Duration // the part of WaitTime spent with a chained task as the lowest one left
 
 	// StaleBy counts stale results by the location of the read that failed
@@ -78,6 +85,7 @@ type Engine struct {
 	workers   int
 	inOrder   bool
 	inlineGas uint64
+	predict   func(common.Hash) Prediction
 	next      int
 	dropped   map[common.Address]bool
 	stats     Stats
@@ -107,6 +115,7 @@ func New(cfg Config) (*Engine, error) {
 		workers:   max(1, cfg.Workers),
 		inOrder:   cfg.InOrder,
 		inlineGas: cfg.InlineGas,
+		predict:   cfg.Predict,
 		dropped:   make(map[common.Address]bool),
 	}, nil
 }
@@ -118,6 +127,20 @@ func (e *Engine) NewTask(lazy *txpool.LazyTransaction, sender common.Address, bl
 		Sender:   sender,
 		Lazy:     lazy,
 		Blob:     blob,
+		done:     make(chan struct{}),
+	}
+	if e.predict != nil {
+		p := e.predict(lazy.Hash)
+		for _, w := range p.Writes {
+			t.predicted = append(t.predicted, w.key())
+		}
+		t.deltas = p.Deltas
+		if len(p.Observes) > 0 {
+			t.observes = make(map[common.Address]bool, len(p.Observes))
+			for _, a := range p.Observes {
+				t.observes[a] = true
+			}
+		}
 	}
 	e.next++
 	e.stats.Planned++
@@ -169,11 +192,17 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 		e.stats.LongestChain = max(e.stats.LongestChain, chain[t])
 	}
 	sched := newScheduler(e.store, e.workers, e.exec.run, e.inlineGas)
+	if e.predict != nil {
+		e.exec.waiter = newWriteWaiter(tasks, sched)
+	}
 	sched.start(tasks)
 	defer func() {
 		executions, executionTime := sched.stop()
 		e.stats.Executions += executions
 		e.stats.ExecutionTime += executionTime
+		e.stats.Waits += int(sched.waits.Load())
+		e.stats.WaitedTime += time.Duration(sched.waitTime.Load())
+		e.exec.waiter = nil
 	}()
 
 	c := &committer{

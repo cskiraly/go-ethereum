@@ -107,6 +107,7 @@ func (miner *Miner) commitTransactionsParallel(ctx context.Context, env *environ
 		Coinbase:  env.coinbase,
 		InOrder:   miner.config.ParallelInOrder,
 		InlineGas: miner.config.ParallelInlineGas,
+		Predict:   miner.parallelPredict,
 	})
 	if err != nil {
 		return err
