@@ -56,7 +56,7 @@ require (
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/naoina/toml v0.1.2-0.20170918210437-9fafd6967416
 	github.com/peterh/liner v1.1.1-0.20190123174540-a2c9a5303de7
-	github.com/pion/stun/v3 v3.1.2
+	github.com/pion/stun/v3 v3.1.7
 	github.com/protolambda/bls12-381-util v0.1.0
 	github.com/rs/cors v1.7.0
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible
@@ -135,7 +135,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pion/datachannel v1.5.10 // indirect
-	github.com/pion/dtls/v3 v3.1.2 // indirect
+	github.com/pion/dtls/v3 v3.1.5 // indirect
 	github.com/pion/ice/v4 v4.0.10 // indirect
 	github.com/pion/interceptor v0.1.40 // indirect
 	github.com/pion/mdns/v2 v2.0.7 // indirect
@@ -146,7 +146,7 @@ require (
 	github.com/pion/sdp/v3 v3.0.18 // indirect
 	github.com/pion/srtp/v3 v3.0.6 // indirect
 	github.com/pion/transport/v3 v3.0.7 // indirect
-	github.com/pion/transport/v4 v4.0.1 // indirect
+	github.com/pion/transport/v4 v4.1.0 // indirect
 	github.com/pion/turn/v4 v4.0.2 // indirect
 	github.com/pion/webrtc/v4 v4.1.2 // indirect
 	github.com/pk910/dynamic-ssz v1.3.2 // indirect

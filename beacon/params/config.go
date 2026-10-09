@@ -22,6 +22,7 @@ import (
 	"math"
 	"math/big"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -252,7 +253,7 @@ func (f Forks) Less(i, j int) bool {
 
 // SetCheckpointFile sets the checkpoint import/export file name and attempts to
 // read the checkpoint from the file if it already exists. It returns true if
-// a checkpoint has been loaded.
+// a checkpoint has been loaded. An empty file is ignored, like a missing one.
 func (c *ChainConfig) SetCheckpointFile(checkpointFile string) (bool, error) {
 	c.CheckpointFile = checkpointFile
 	file, err := os.ReadFile(checkpointFile)
@@ -261,6 +262,12 @@ func (c *ChainConfig) SetCheckpointFile(checkpointFile string) (bool, error) {
 	}
 	if err != nil {
 		return false, fmt.Errorf("failed to read beacon checkpoint file: %v", err)
+	}
+	if len(file) == 0 {
+		// A crash while the file was written in place can leave it empty, and
+		// an empty file may also have been created ahead of the first start.
+		log.Warn("Ignoring empty beacon checkpoint file", "file", checkpointFile)
+		return false, nil
 	}
 	cp, err := hexutil.Decode(string(file))
 	if err != nil {
@@ -279,6 +286,58 @@ func (c *ChainConfig) SaveCheckpointToFile(checkpoint common.Hash) (bool, error)
 	if c.CheckpointFile == "" {
 		return false, nil
 	}
-	err := os.WriteFile(c.CheckpointFile, []byte(checkpoint.Hex()), 0600)
-	return err == nil, err
+	data := []byte(checkpoint.Hex())
+	if err := replaceFile(c.CheckpointFile, data); err != nil {
+		// The file can't be replaced where it is a mount point itself, or where
+		// its directory isn't writable: write it in place there. A crash during
+		// the write can leave it empty, which SetCheckpointFile ignores.
+		log.Debug("Writing beacon checkpoint file in place", "file", c.CheckpointFile, "err", err)
+		if err := writeFileSync(c.CheckpointFile, data, 0600); err != nil {
+			return false, fmt.Errorf("failed to write beacon checkpoint file: %v", err)
+		}
+	}
+	return true, nil
+}
+
+// replaceFile replaces the named file, or the file a symbolic link points to,
+// with a new one holding data and having the same permissions. The new file is
+// written and synced next to the old one first, so that a crash leaves either
+// the old or the new content. The directory isn't synced: after a crash, the
+// old checkpoint is still a valid one.
+func replaceFile(name string, data []byte) error {
+	if target, err := filepath.EvalSymlinks(name); err == nil {
+		name = target
+	}
+	perm := os.FileMode(0600)
+	if info, err := os.Stat(name); err == nil {
+		perm = info.Mode().Perm()
+	}
+	tmp := name + ".tmp"
+	err := writeFileSync(tmp, data, perm)
+	if err == nil {
+		err = os.Chmod(tmp, perm) // the umask may have changed it, or a stale file has its own
+	}
+	if err == nil {
+		err = os.Rename(tmp, name)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
+}
+
+// writeFileSync is like os.WriteFile, but syncs the file before closing it.
+func writeFileSync(name string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if err1 := f.Close(); err1 != nil && err == nil {
+		err = err1
+	}
+	return err
 }
