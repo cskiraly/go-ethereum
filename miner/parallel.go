@@ -110,6 +110,7 @@ func (miner *Miner) commitTransactionsParallel(ctx context.Context, env *environ
 		Predict:   miner.parallelPredict,
 
 		StoreValidation: miner.config.ParallelStoreValidation,
+		Reader:          parallelReader(env),
 	})
 	if err != nil {
 		return err
@@ -308,4 +309,12 @@ func (b *parallelBlock) Include(t *parallel.Task, r *parallel.Result) error {
 	env.bal.Merge(r.AccessList)
 	env.tcount++
 	return nil
+}
+
+// parallelReader returns the shared parent reader of env, or nil.
+func parallelReader(env *environment) state.Reader {
+	if env.shared == nil {
+		return nil
+	}
+	return env.shared
 }

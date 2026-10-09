@@ -46,6 +46,11 @@ func applyBenchStrategy(name string, cfg *Config) error {
 		cfg.ParallelExecution = false
 		return nil
 	}
+	if base, ok := strings.CutSuffix(name, "-c"); ok {
+		// -c: share parent reads between the engine and the block state
+		cfg.ParallelSharedReads = true
+		name = base
+	}
 	kind, rest, ok := strings.Cut(name, "-w")
 	if !ok {
 		return fmt.Errorf("unknown strategy %q", name)

@@ -30,6 +30,9 @@ type Config struct {
 	// block state itself when it uses at most this much gas. For cheap
 	// transactions that costs less than validating and applying a result.
 	InlineGas uint64
+	// Reader, if set, reads the parent state instead of DB.Reader(Root), such
+	// as a SharedReader the block state also reads through.
+	Reader state.Reader
 	// StoreValidation validates results against the store instead of the
 	// block state: a read is fresh if the newest version below the task is
 	// still the one it loaded. Needs InOrder; stale results are re-executed on
@@ -105,9 +108,12 @@ type Engine struct {
 
 // New returns an engine building on the parent state described by cfg.
 func New(cfg Config) (*Engine, error) {
-	parent, err := cfg.DB.Reader(cfg.Root)
-	if err != nil {
-		return nil, err
+	parent := cfg.Reader
+	if parent == nil {
+		var err error
+		if parent, err = cfg.DB.Reader(cfg.Root); err != nil {
+			return nil, err
+		}
 	}
 	if !cfg.InOrder {
 		// only the in-order committer executes cheap transactions itself
