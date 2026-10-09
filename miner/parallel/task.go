@@ -220,6 +220,7 @@ type Result struct {
 	// the pre-executed results of the same sender it was executed on top of.
 	context common.Hash
 	basis   []*Result
+	changed []key // the keys of writes that change the value, once computed
 }
 
 // holds reports whether the balance requirements of r hold on sdb.

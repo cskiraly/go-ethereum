@@ -151,12 +151,14 @@ func (p *Preexecutor) RunAfter(tx *types.Transaction, basis []*Result) *Result {
 		if ahead := run(true); ahead.Err == nil {
 			ahead.predictOnly = true
 			ahead.context = p.context
+			ahead.changed = ahead.changes()
 			return ahead
 		}
 	}
 	if r.Err == nil && len(basis) > 0 {
 		r.basis = basis
 	}
+	r.changed = r.changes()
 	return r
 }
 
@@ -169,7 +171,7 @@ func (r *Result) Usable() bool {
 // Prediction returns the state access of r, for Config.Predict.
 func (r *Result) Prediction(coinbase common.Address) Prediction {
 	var p Prediction
-	for k := range r.changes() {
+	for _, k := range r.changes() {
 		var f byte
 		switch k.field {
 		case exists:
@@ -198,20 +200,22 @@ func (r *Result) Prediction(coinbase common.Address) Prediction {
 	return p
 }
 
-// changes yields the keys r wrote with a value other than the one it read
+// changes returns the keys r wrote with a value other than the one it read
 // first: a write restoring the original value, such as a reentrancy lock
-// released again, does not affect other transactions.
-func (r *Result) changes() func(func(key) bool) {
-	return func(yield func(key) bool) {
-		for k, v := range r.writes {
-			if before, ok := r.reads[k]; ok && before == v {
-				continue
-			}
-			if !yield(k) {
-				return
-			}
-		}
+// released again, does not affect other transactions. Pre-executed results
+// compute them once.
+func (r *Result) changes() []key {
+	if r.changed != nil {
+		return r.changed
 	}
+	changed := make([]key, 0, len(r.writes))
+	for k, v := range r.writes {
+		if before, ok := r.reads[k]; ok && before == v {
+			continue
+		}
+		changed = append(changed, k)
+	}
+	return changed
 }
 
 // copyForBuild returns a copy of r that a build can complete and apply
@@ -279,7 +283,7 @@ func seedable(tasks []*Task, coinbase common.Address, inlineGas uint64, seeded m
 			seeded[r] = true
 		}
 		if r != nil && r.Err == nil {
-			for k := range r.changes() {
+			for _, k := range r.changes() {
 				written[k] = r
 			}
 			for addr := range r.deltas {
