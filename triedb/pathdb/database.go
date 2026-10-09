@@ -554,6 +554,13 @@ func (db *Database) Recoverable(root common.Hash) bool {
 	return m.parent == root
 }
 
+// ResetCleanCaches empties the clean caches of trie nodes and states, so
+// that the following reads go to the database, as on a node that has not
+// read that state recently. For benchmarks.
+func (db *Database) ResetCleanCaches() {
+	db.tree.bottom().resetCache()
+}
+
 // Close closes the trie database and the held freezer.
 func (db *Database) Close() error {
 	db.lock.Lock()

@@ -20,6 +20,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"golang.org/x/sys/unix"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -41,6 +43,7 @@ import (
 var (
 	buildBenchMainnet = flag.String("buildbench.mainnet", "", "geth datadir to replay mainnet blocks from, instead of the synthetic workloads; it is opened read-write, so use a disposable copy")
 	buildBenchBlocks  = flag.String("buildbench.blocks", "last:10", "mainnet blocks N to build: FROM-TO, N, or last:COUNT (the latest whose candidates and parent state exist)")
+	buildBenchEvict   = flag.Bool("buildbench.evict", false, "mainnet: before every build, empty the trie database clean caches and drop the database files from the OS page cache (posix_fadvise, no root needed); with -buildbench.cold, state reads reach the disk")
 	buildBenchCold    = flag.Bool("buildbench.cold", false, "mainnet: shrink geth's own caches (pebble block cache, pathdb clean caches) so state reads reach the OS page cache")
 	buildBenchLog     = flag.Bool("buildbench.log", false, "print geth's info logs, such as opening the chain")
 	buildBenchDepth   = flag.Int("buildbench.depth", 2, "mainnet candidates: the transactions of blocks N to N+depth-1, built on N-1")
@@ -224,4 +227,25 @@ func newMainnetEnv(chain *core.BlockChain, engine consensus.Engine, number uint6
 	}
 	env.pool = pool
 	return env, nil
+}
+
+// evictPageCache drops the files under dir from the OS page cache. Only clean
+// pages go, and only for this machine; the files are not changed.
+func evictPageCache(dir string) (int64, error) {
+	var evicted int64
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil // gone meanwhile, e.g. compacted away
+		}
+		defer f.Close()
+		if info, err := f.Stat(); err == nil {
+			evicted += info.Size()
+		}
+		return unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED)
+	})
+	return evicted, err
 }

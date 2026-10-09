@@ -33,9 +33,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/ethereum/go-ethereum/metrics"
 	"math"
 	"math/big"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"slices"
@@ -124,6 +126,8 @@ func (e *benchEnv) verify(block *types.Block) error {
 	e.verified[block.Hash()] = err
 	return err
 }
+
+var buildBenchMetrics = flag.Bool("buildbench.metrics", false, "record how far geth's meters and counters (pathdb layer hits and misses, ...) move during each build")
 
 var benchCoinbase = common.HexToAddress("0xc0ffee")
 
@@ -272,6 +276,7 @@ type benchRecord struct {
 	WallNs        int64            `json:"wallNs"`
 	CPUNs         int64            `json:"cpuNs"`                  // user and system CPU of the process during the build
 	IO            *benchIO         `json:"io,omitempty"`           // what the process read during the build
+	Metrics       map[string]int64 `json:"metrics,omitempty"`      // how far each geth meter and counter moved during the build (-buildbench.metrics)
 	PreexecCPUNs  int64            `json:"preexecCpuNs,omitempty"` // the same, pre-executing the candidates (outside wallNs)
 	Txs           int              `json:"txs"`
 	Candidates    int              `json:"candidates"`
@@ -375,13 +380,22 @@ func buildOnce(env *benchEnv, m *Miner, spans *spanRecorder) (*newPayloadResult,
 		runtime.GC()
 	}
 	resetBenchStats(m)
+	if *buildBenchEvict && *buildBenchMainnet != "" {
+		// geth's clean caches first, then the OS page cache under them
+		env.chain.TrieDB().ResetCleanCaches()
+		if _, err := evictPageCache(filepath.Join(*buildBenchMainnet, "geth", "chaindata")); err != nil {
+			return &newPayloadResult{err: err}, benchRecord{Workload: env.name, Error: err.Error()}
+		}
+	}
 	ctx, phases := spans.start()
+	counts := meterCounts()
 	cpu, io := processCPU(), processIO()
 	start := time.Now()
 	res := m.generateWork(ctx, env.params(), false)
 	wall := time.Since(start)
 	cpu = processCPU() - cpu
 	io = processIO().sub(io)
+	moved := meterDeltas(counts)
 
 	rec := benchRecord{
 		Workload:   env.name,
@@ -389,6 +403,7 @@ func buildOnce(env *benchEnv, m *Miner, spans *spanRecorder) (*newPayloadResult,
 		WallNs:     wall.Nanoseconds(),
 		CPUNs:      cpu.Nanoseconds(),
 		IO:         &io,
+		Metrics:    moved,
 		Candidates: env.txs,
 		Engine:     benchStats(m),
 		PhasesNs:   phases(),
@@ -436,6 +451,9 @@ func selectedWorkloads() ([]benchWorkload, error) {
 func TestBuildBench(t *testing.T) {
 	if !*buildBenchFlag {
 		t.Skip("enable with -buildbench")
+	}
+	if *buildBenchMetrics && !metrics.Enabled() {
+		metrics.Enable()
 	}
 	cases, err := selectedCases(t)
 	if err != nil {
@@ -778,4 +796,37 @@ func processIO() benchIO {
 		io.MajFaults, io.InBlocks = ru.Majflt, ru.Inblock
 	}
 	return io
+}
+
+// meterCounts returns the counts of geth's registered meters and counters,
+// with -buildbench.metrics.
+func meterCounts() map[string]int64 {
+	if !*buildBenchMetrics {
+		return nil
+	}
+	counts := make(map[string]int64)
+	metrics.DefaultRegistry.Each(func(name string, m any) {
+		switch m := m.(type) {
+		case *metrics.Meter:
+			counts[name] = m.Snapshot().Count()
+		case *metrics.Counter:
+			counts[name] = m.Snapshot().Count()
+		}
+	})
+	return counts
+}
+
+// meterDeltas returns how far the meters and counters moved since before, the
+// ones that moved only.
+func meterDeltas(before map[string]int64) map[string]int64 {
+	if before == nil {
+		return nil
+	}
+	moved := make(map[string]int64)
+	for name, n := range meterCounts() {
+		if d := n - before[name]; d != 0 {
+			moved[name] = d
+		}
+	}
+	return moved
 }

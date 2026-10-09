@@ -133,6 +133,14 @@ func (db *Database) StateReader(blockRoot common.Hash) (database.StateReader, er
 	return db.backend.StateReader(blockRoot)
 }
 
+// ResetCleanCaches empties the clean caches of a path-based database (see
+// pathdb.Database.ResetCleanCaches); other backends have none to empty.
+func (db *Database) ResetCleanCaches() {
+	if pdb, ok := db.backend.(*pathdb.Database); ok {
+		pdb.ResetCleanCaches()
+	}
+}
+
 // HistoricStateReader constructs a reader for accessing the requested historic state.
 func (db *Database) HistoricStateReader(root common.Hash) (*pathdb.HistoricalStateReader, error) {
 	pdb, ok := db.backend.(*pathdb.Database)
