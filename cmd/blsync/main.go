@@ -79,7 +79,9 @@ func sync(ctx *cli.Context) error {
 	// set up blsync
 	client := blsync.NewClient(utils.MakeBeaconLightConfig(ctx))
 	client.SetEngineRPC(makeRPCClient(ctx))
-	client.Start()
+	if err := client.Start(); err != nil {
+		utils.Fatalf("Could not start the light client: %v", err)
+	}
 
 	// run until stopped
 	<-ctx.Done()
