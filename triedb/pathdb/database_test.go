@@ -927,13 +927,26 @@ func TestReactivationCrash(t *testing.T) {
 		kvdb    = newSyncTracker()
 		ancient = t.TempDir()
 		tester  = newTester(t, &testerConfig{layers: 12, kvdb: kvdb, ancient: ancient})
+
+		released bool
+		addr     = common.Hash{0xaa}
+		slot     = common.Hash{0xbb}
 	)
+	defer func() {
+		if !released {
+			tester.release()
+		}
+	}()
 	// Persist everything: a state id above zero, state histories and an index
 	// over them, all on disk.
 	if err := tester.db.Commit(tester.lastHash(), false); err != nil {
 		t.Fatalf("Failed to commit, err: %v", err)
 	}
 	storeIndexMetadata(kvdb, typeStateHistory, rawdb.ReadPersistentStateID(kvdb))
+	rawdb.WriteAccountHistoryIndex(kvdb, addr, []byte{1})
+	rawdb.WriteAccountHistoryIndexBlock(kvdb, addr, 0, []byte{1})
+	rawdb.WriteStorageHistoryIndex(kvdb, addr, slot, []byte{1})
+	rawdb.WriteStorageHistoryIndexBlock(kvdb, addr, slot, 0, []byte{1})
 	if err := kvdb.SyncKeyValue(); err != nil {
 		t.Fatalf("Failed to sync, err: %v", err)
 	}
@@ -957,6 +970,7 @@ func TestReactivationCrash(t *testing.T) {
 		t.Fatal("The state histories weren't purged")
 	}
 	tester.release()
+	released = true
 
 	disk, err := rawdb.Open(crashed, rawdb.OpenOptions{Ancient: ancient})
 	if err != nil {
@@ -967,6 +981,10 @@ func TestReactivationCrash(t *testing.T) {
 	// No index of the purged histories may be left to be taken for new ones.
 	if loadIndexMetadata(disk, typeStateHistory) != nil {
 		t.Error("Index metadata of the purged state histories survived the crash")
+	}
+	if rawdb.ReadAccountHistoryIndex(disk, addr) != nil || rawdb.ReadAccountHistoryIndexBlock(disk, addr, 0) != nil ||
+		rawdb.ReadStorageHistoryIndex(disk, addr, slot) != nil || rawdb.ReadStorageHistoryIndexBlock(disk, addr, slot, 0) != nil {
+		t.Error("Index entries of the purged state histories survived the crash")
 	}
 	// The history repair at startup must accept the persisted state id.
 	states, _, err := repairHistory(disk, false, false, rawdb.ReadPersistentStateID(disk), false)
