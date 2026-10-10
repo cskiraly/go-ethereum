@@ -100,6 +100,7 @@ type benchEnv struct {
 	preexecNs     int64                               // time computing preexecuted
 	preexecBusyNs int64                               // of that, summed over the goroutines
 	preexecCPUNs  int64                               // process CPU computing preexecuted
+	carry         parallel.CarryStats                 // -buildbench.preexecahead: carrying the results to the build's parent
 	origin        map[common.Hash]*types.Header       // mainnet: the block each candidate was included in
 
 	check    func(*types.Block) error // executes and validates a built block
@@ -334,7 +335,17 @@ type benchRecord struct {
 	Engine        map[string]any   `json:"engine,omitempty"`
 	PredictNs     int64            `json:"predictNs,omitempty"`     // time predicting the candidates (outside wallNs)
 	PreexecBusyNs int64            `json:"preexecBusyNs,omitempty"` // pre-execution time summed over its goroutines
+	Carry         *carryRecord     `json:"carry,omitempty"`
 	PhasesNs      map[string]int64 `json:"phasesNs,omitempty"`
+}
+
+// carryRecord is what carrying the pre-executed results to the build's parent
+// did, over all the pending transactions (-buildbench.preexecahead).
+type carryRecord struct {
+	Carried  int   `json:"carried"`
+	Refused  int   `json:"refused"`
+	Unusable int   `json:"unusable"`
+	Ns       int64 `json:"ns"`
 }
 
 // spanRecorder captures miner telemetry spans when phase timing is enabled.
@@ -602,6 +613,9 @@ func TestBuildBench(t *testing.T) {
 				}
 				if strings.HasPrefix(rec.Strategy, "preexec") {
 					rec.PredictNs, rec.PreexecBusyNs, rec.PreexecCPUNs = env.preexecNs, env.preexecBusyNs, env.preexecCPUNs
+					if c := env.carry; c.Carried+c.Refused+c.Unusable > 0 {
+						rec.Carry = &carryRecord{Carried: c.Carried, Refused: c.Refused, Unusable: c.Unusable, Ns: c.Time.Nanoseconds()}
+					}
 				}
 				rec.Match = rec.Error == "" && rec.BlockHash == reference.Hash()
 				switch {

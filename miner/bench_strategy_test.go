@@ -185,6 +185,10 @@ var buildBenchPreexecRebase = flag.Bool("buildbench.preexecrebase", false, "pree
 
 var buildBenchPreexecHeader = flag.String("buildbench.preexecheader", "", "preexec strategies: pre-execute with a header that differs from the build's in coinbase, time (time, prevrandao and beacon root), basefee-down or basefee-up (base and blob base fee), or all")
 
+var buildBenchPreexecAhead = flag.Int("buildbench.preexecahead", 0, "preexec strategies: pre-execute on the state this many blocks before the build's parent, with the transactions of the blocks in between pending too, then carry the results to the build's parent")
+
+var buildBenchPreexecCarry = flag.Bool("buildbench.preexeccarry", false, "preexec strategies: carry the results to a new pre-executor on the same parent (implied by -buildbench.preexecahead)")
+
 var buildBenchPreexecMiss = flag.Float64("buildbench.preexecmiss", 0, "preexec strategies: leave this fraction of the candidates without a pre-executed result")
 
 var buildBenchPredictDrop = flag.Float64("buildbench.predictdrop", 0, "predict strategies: drop this fraction of the predicted accesses, to test incomplete predictions")

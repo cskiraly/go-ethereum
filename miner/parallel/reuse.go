@@ -64,13 +64,14 @@ type execEnv struct {
 // tip.
 type payment struct {
 	sender                     common.Address
+	nonce                      uint64
 	gasUsed, gasLimit, blobGas uint64
 	feeCap, tipCap, blobFeeCap *big.Int
 	price, tip, blobPrice      *big.Int // as executed
 }
 
 func (e *executor) payment(tx *types.Transaction, sender common.Address, gasUsed uint64) *payment {
-	p := &payment{sender: sender, gasUsed: gasUsed, gasLimit: tx.Gas(), feeCap: tx.GasFeeCap(), tipCap: tx.GasTipCap()}
+	p := &payment{sender: sender, nonce: tx.Nonce(), gasUsed: gasUsed, gasLimit: tx.Gas(), feeCap: tx.GasFeeCap(), tipCap: tx.GasTipCap()}
 	p.price, p.tip, _ = effectivePrice(p.feeCap, p.tipCap, e.header.BaseFee)
 	if blobGas := tx.BlobGas(); blobGas > 0 && e.env.blobFee != nil {
 		p.blobGas, p.blobFeeCap, p.blobPrice = blobGas, tx.BlobGasFeeCap(), e.env.blobFee
@@ -114,6 +115,7 @@ func (e *Engine) sameHeaderReads(r *Result) bool {
 	h, b, reads := r.env.header, e.exec.header, r.headerReads
 	return (reads&readTime == 0 || h.Time == b.Time) &&
 		(reads&(readNumber|readBlockHash) == 0 || bigEqual(h.Number, b.Number)) &&
+		(reads&readBlockHash == 0 || h.ParentHash == b.ParentHash) &&
 		(reads&readCoinbase == 0 || r.env.coinbase == e.exec.coinbase) &&
 		(reads&readRandom == 0 || h.MixDigest == b.MixDigest && bigEqual(h.Difficulty, b.Difficulty)) &&
 		(reads&readGasLimit == 0 || h.GasLimit == b.GasLimit) &&

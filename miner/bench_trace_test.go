@@ -463,21 +463,59 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 	}
 	perturbHeader(header, *buildBenchPreexecHeader)
 	db := state.NewMPTDatabase(env.chain.TrieDB(), env.chain.CodeDB()).WithSnapshot(env.chain.Snapshots())
-	reader, err := db.Reader(parent.Root)
-	if err != nil {
-		return nil, err
+	// newPre returns a pre-executor for header on parent, its system calls run
+	newPre := func(parent, header *types.Header) (*parallel.Preexecutor, error) {
+		reader, err := db.Reader(parent.Root)
+		if err != nil {
+			return nil, err
+		}
+		pre, err := parallel.NewPreexecutor(env.chain, env.chain.Config(), db, parent.Root, header, parallel.NewSharedReader(reader))
+		if err != nil {
+			return nil, err
+		}
+		// the block's system calls come first, as in the build
+		err = pre.Seed(func(sdb vm.StateDB) error {
+			evm := vm.NewEVM(core.NewEVMBlockContext(header, env.chain, &header.Coinbase), sdb, env.chain.Config(), vm.Config{})
+			defer evm.Release()
+			core.PreExecution(context.Background(), header.ParentBeaconRoot, parent, env.chain.Config(), evm, header.Number, header.Time)
+			return nil
+		})
+		return pre, err
 	}
-	pre, err := parallel.NewPreexecutor(env.chain, env.chain.Config(), db, parent.Root, header, parallel.NewSharedReader(reader))
-	if err != nil {
-		return nil, err
+	// With -buildbench.preexecahead=k, the candidates are pre-executed on the
+	// state k blocks earlier, with the transactions of the blocks in between,
+	// pending then too, ahead of them; the builder knows the slot's time and
+	// its fee recipient, not the base fee, prevrandao or beacon root.
+	pending, prior := env.candidates, 0
+	preParent, preHeader := parent, header
+	if k := *buildBenchPreexecAhead; k > 0 {
+		if *buildBenchPreexecRebase || *buildBenchPreexecMiss > 0 {
+			return nil, fmt.Errorf("-buildbench.preexecahead excludes rebase and miss")
+		}
+		config := env.chain.Config()
+		preParent = env.chain.GetHeaderByNumber(parent.Number.Uint64() - uint64(k))
+		if preParent == nil || !env.chain.HasState(preParent.Root) {
+			return nil, fmt.Errorf("no state %d blocks before block %d", k, parent.Number)
+		}
+		var txs []*types.Transaction
+		for n := preParent.Number.Uint64() + 1; n <= parent.Number.Uint64(); n++ {
+			txs = append(txs, env.chain.GetBlockByNumber(n).Transactions()...)
+		}
+		pending, prior = append(txs, env.candidates...), len(txs)
+		preHeader = types.CopyHeader(header)
+		preHeader.ParentHash = preParent.Hash()
+		preHeader.BaseFee = eip1559.CalcBaseFee(config, preParent)
+		if preHeader.ExcessBlobGas != nil {
+			excess := eip4844.CalcExcessBlobGas(config, preParent, preHeader.Time)
+			preHeader.ExcessBlobGas = &excess
+		}
+		preHeader.MixDigest = crypto.Keccak256Hash(preHeader.MixDigest[:])
+		if preHeader.ParentBeaconRoot != nil {
+			root := crypto.Keccak256Hash(preHeader.ParentBeaconRoot[:])
+			preHeader.ParentBeaconRoot = &root
+		}
 	}
-	// the block's system calls come first, as in the build
-	err = pre.Seed(func(sdb vm.StateDB) error {
-		evm := vm.NewEVM(core.NewEVMBlockContext(header, env.chain, &header.Coinbase), sdb, env.chain.Config(), vm.Config{})
-		defer evm.Release()
-		core.PreExecution(context.Background(), header.ParentBeaconRoot, parent, env.chain.Config(), evm, header.Number, header.Time)
-		return nil
-	})
+	pre, err := newPre(preParent, preHeader)
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +527,7 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 		chains  [][]int
 		chainOf = make(map[common.Address]int)
 	)
-	for i, tx := range env.candidates {
+	for i, tx := range pending {
 		from, err := types.Sender(signer, tx)
 		if err != nil {
 			return nil, err
@@ -503,7 +541,7 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 		chains[c] = append(chains[c], i)
 	}
 	late := preexecMissing(env)
-	results := make([]*parallel.Result, len(env.candidates))
+	results := make([]*parallel.Result, len(pending))
 	var (
 		next atomic.Int64
 		busy atomic.Int64
@@ -521,10 +559,10 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 				started := time.Now()
 				var basis []*parallel.Result
 				for _, i := range chains[c] {
-					if late[env.candidates[i].Hash()] {
+					if late[pending[i].Hash()] {
 						continue
 					}
-					r := pre.RunAfter(env.candidates[i], basis)
+					r := pre.RunAfter(pending[i], basis)
 					results[i] = r
 					if r.Usable() {
 						basis = append(basis, r)
@@ -548,6 +586,17 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 		for n, i := range order {
 			results[i] = ordered[n]
 		}
+		busy.Add(time.Since(started).Nanoseconds())
+	}
+	if prior > 0 || *buildBenchPreexecCarry {
+		// carried in pending order, which has every sender's in nonce order
+		started := time.Now()
+		next, err := newPre(parent, header)
+		if err != nil {
+			return nil, err
+		}
+		results, env.carry = next.Carry(results)
+		results = results[prior:]
 		busy.Add(time.Since(started).Nanoseconds())
 	}
 	env.preexecBusyNs = busy.Load()

@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -11,9 +12,9 @@ func TestPreexecExact(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds every workload several times")
 	}
-	defer func(candidates float64, rebase bool, miss float64, par int, header string) {
-		*buildBenchCandidates, *buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar, *buildBenchPreexecHeader = candidates, rebase, miss, par, header
-	}(*buildBenchCandidates, *buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar, *buildBenchPreexecHeader)
+	defer func(candidates float64, rebase bool, miss float64, par int, header string, carry bool) {
+		*buildBenchCandidates, *buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar, *buildBenchPreexecHeader, *buildBenchPreexecCarry = candidates, rebase, miss, par, header, carry
+	}(*buildBenchCandidates, *buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar, *buildBenchPreexecHeader, *buildBenchPreexecCarry)
 	*buildBenchCandidates = 0.25
 
 	variants := []struct {
@@ -40,6 +41,8 @@ func TestPreexecExact(t *testing.T) {
 		{"lower-basefee", "preexecx-w4-c", true, 0, 2, "basefee-down"},
 		{"higher-basefee", "preexec-w4", false, 0, 1, "basefee-up"},
 		{"other-all", "preexecx-w4-c", false, 0, 2, "all"},
+		{"carried", "preexecx-w4-c", false, 0, 2, "carry"},
+		{"carried-other-all", "preexecx-w4-c", false, 0, 2, "carry,all"},
 	}
 	for _, w := range benchWorkloads {
 		t.Run(w.name, func(t *testing.T) {
@@ -61,7 +64,9 @@ func TestPreexecExact(t *testing.T) {
 				t.Fatalf("invalid reference block: %v", err)
 			}
 			for _, v := range variants {
-				*buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar, *buildBenchPreexecHeader = v.rebase, v.miss, v.par, v.header
+				header, carry := strings.CutPrefix(v.header, "carry")
+				*buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar, *buildBenchPreexecCarry = v.rebase, v.miss, v.par, carry
+				*buildBenchPreexecHeader = strings.TrimPrefix(header, ",")
 				env.preexecuted = nil // pre-execute again for this variant
 				m, err := env.newMiner(v.strategy)
 				if err != nil {
