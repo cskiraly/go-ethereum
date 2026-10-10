@@ -56,6 +56,10 @@ var Networks = map[common.Hash]Network{
 		Name: "sepolia", Bootnodes: SepoliaBootnodes,
 		BlobSchedule: []BlobParams{{274176, 15}, {275712, 21}}, ElectraBlobs: BlobParams{222464, 9},
 	},
+	params.HoodiLightConfig.GenesisValidatorsRoot: {
+		Name: "hoodi", Bootnodes: HoodiBootnodes,
+		BlobSchedule: []BlobParams{{52480, 15}, {54016, 21}}, ElectraBlobs: BlobParams{2048, 9},
+	},
 }
 
 // NextFork returns the version and epoch of the first fork after epoch in the config, for
