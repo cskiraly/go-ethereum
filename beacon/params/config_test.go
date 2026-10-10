@@ -89,6 +89,11 @@ func checkNoTemp(t *testing.T, dir string) {
 // a temporary file of their own: the file holds one of the checkpoints, whole (each
 // one's bytes are all the same, so a mix of two shows).
 func TestSaveCheckpointToFileConcurrent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// A file being replaced can't be opened there (a sharing violation). geth
+		// saves one checkpoint at a time; this test is for the temporary files.
+		t.Skip("concurrent replacement of one file fails on Windows")
+	}
 	var (
 		dir  = t.TempDir()
 		file = filepath.Join(dir, "checkpoint")
