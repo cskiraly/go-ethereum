@@ -64,6 +64,36 @@ func TestSepoliaGloasTransition(t *testing.T) {
 	}
 }
 
+// TestHoodiGloasTransition checks the digest and subscriptions around Hoodi's Gloas fork (epoch
+// 132352). The Gloas digest is computed (fork data root of 0x80000910 XOR BPO2's parameters), not
+// yet seen in a live record on 2026-10-10.
+func TestHoodiGloasTransition(t *testing.T) {
+	sched := digestSchedule(params.HoodiLightConfig, Networks[params.HoodiLightConfig.GenesisValidatorsRoot])
+	const (
+		fulu  = "c6ecb76c" // Fulu with BPO2
+		gloas = "5ad30129"
+	)
+	for _, tt := range []struct {
+		epoch   uint64
+		current string
+		fork    string
+		want    []string
+	}{
+		{132349, fulu, "fulu", []string{fulu}},
+		{132350, fulu, "fulu", []string{gloas, fulu}},
+		{132352, gloas, "gloas", []string{gloas, fulu}},
+		{132354, gloas, "gloas", []string{gloas}},
+	} {
+		cur, want := topicsAt(sched, tt.epoch)
+		if got := hex.EncodeToString(cur.digest[:]); got != tt.current || cur.fork != tt.fork {
+			t.Errorf("epoch %d: current %s (%s), want %s (%s)", tt.epoch, got, cur.fork, tt.current, tt.fork)
+		}
+		if got := hexDigests(want); !slices.Equal(got, tt.want) {
+			t.Errorf("epoch %d: topics %v, want %v", tt.epoch, got, tt.want)
+		}
+	}
+}
+
 // TestMainnetDigestSchedule checks that the blob parameter changes (BPO1, BPO2) are digest
 // changes of their own, within Fulu.
 func TestMainnetDigestSchedule(t *testing.T) {

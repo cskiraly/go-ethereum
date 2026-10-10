@@ -18,7 +18,6 @@ package p2p
 
 import (
 	"encoding/hex"
-	"math"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/beacon/params"
@@ -56,8 +55,9 @@ func TestSepoliaForkDigest(t *testing.T) {
 	}
 }
 
-// TestHoodiForkDigest checks Hoodi's current digest (BPO2 in force, no fork scheduled), as in
-// the ENR of Lodestar's Hoodi node on 2026-10-09: c6ecb76c 70000910 FAR_FUTURE_EPOCH.
+// TestHoodiForkDigest checks Hoodi's current digest (BPO2 in force), as in the ENR of Lodestar's
+// Hoodi node on 2026-10-09 (c6ecb76c), and its next fork: Gloas at epoch 132352 (eth-clients/hoodi
+// ef89989, 2026-10-09).
 func TestHoodiForkDigest(t *testing.T) {
 	net := Networks[params.HoodiLightConfig.GenesisValidatorsRoot]
 	const epoch = 128523
@@ -66,8 +66,8 @@ func TestHoodiForkDigest(t *testing.T) {
 		t.Errorf("digest %s, want c6ecb76c", got)
 	}
 	v, e := NextFork(params.HoodiLightConfig, epoch)
-	if got := hex.EncodeToString(v[:]); got != "70000910" || e != math.MaxUint64 {
-		t.Errorf("next fork %s at %d, want 70000910 at FAR_FUTURE_EPOCH", got, e)
+	if got := hex.EncodeToString(v[:]); got != "80000910" || e != 132352 {
+		t.Errorf("next fork %s at %d, want 80000910 at 132352", got, e)
 	}
 }
 
