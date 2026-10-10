@@ -272,7 +272,7 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 	}
 	sched.start(tasks, seeds)
 	if shared, ok := e.exec.parent.(*SharedReader); ok && len(seeds) > 0 {
-		stop := prefetchSeeds(tasks, seeds, shared, max(1, e.workers/2), &e.stats)
+		stop := prefetchSeeds(tasks, seeds, shared, max(1, e.workers/2), e.storeVal, &e.stats)
 		defer stop()
 	}
 	defer func() {

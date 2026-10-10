@@ -400,9 +400,12 @@ func seedable(tasks []*Task, coinbase common.Address, inlineGas uint64, seeded m
 // write into shared, lowest position first, with n goroutines. The committer
 // validates and applies seeded results on the block state, which reads
 // through shared: without this its loads would be cold, as no worker executed
-// these transactions. The returned function stops the goroutines and waits for
-// them.
-func prefetchSeeds(tasks []*Task, seeds map[*Task]*Result, shared *SharedReader, n int, stats *Stats) func() {
+// these transactions. With storeVal, reads are validated against the store,
+// so only what applying a result loads is fetched: the keys it writes, the
+// accounts its balance changes and requirements touch, and the reads that
+// validation checks on the block state. The returned function stops the
+// goroutines and waits for them.
+func prefetchSeeds(tasks []*Task, seeds map[*Task]*Result, shared *SharedReader, n int, storeVal bool, stats *Stats) func() {
 	var order []*Result
 	for _, t := range tasks {
 		if r := seeds[t]; r != nil {
@@ -441,8 +444,19 @@ func prefetchSeeds(tasks []*Task, seeds map[*Task]*Result, shared *SharedReader,
 					return
 				default:
 				}
-				load(order[i].reads)
-				load(order[i].writes)
+				r := order[i]
+				if storeVal {
+					load(r.unversionedReads())
+					for addr := range r.deltas {
+						shared.Account(addr)
+					}
+					for addr := range r.minBalance {
+						shared.Account(addr)
+					}
+				} else {
+					load(r.reads)
+				}
+				load(r.writes)
 			}
 		}()
 	}
@@ -451,4 +465,23 @@ func prefetchSeeds(tasks []*Task, seeds map[*Task]*Result, shared *SharedReader,
 		wg.Wait()
 		stats.PrefetchTime += time.Duration(busy.Load())
 	}
+}
+
+// unversionedReads returns the reads of r that store validation checks on the
+// block state, as it has no load record for them (see committer.storeStale).
+func (r *Result) unversionedReads() map[key]value {
+	var reads map[key]value
+	for k, v := range r.reads {
+		if _, ok := r.loads[k]; ok {
+			continue
+		}
+		if _, ok := r.loads[key{addr: k.addr, field: exists}]; ok && k.field != storage {
+			continue
+		}
+		if reads == nil {
+			reads = make(map[key]value)
+		}
+		reads[k] = v
+	}
+	return reads
 }
