@@ -32,6 +32,7 @@ func TestPreexecExact(t *testing.T) {
 		{"apply-loads", "preexeca-w4-c", false, 0, 2},
 		{"apply-ahead", "preexecl-w4-c", false, 0, 2},
 		{"prefetch-executions", "preexecx-w4-c", false, 0, 2},
+		{"prefetch-ahead", "preexecxl-w4-c", false, 0, 2},
 		{"inline", "preexec-w4-g30000", false, 0, 1},
 	}
 	for _, w := range benchWorkloads {
