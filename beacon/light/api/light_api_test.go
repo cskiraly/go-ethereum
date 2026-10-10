@@ -99,13 +99,14 @@ func TestHeadListenerResubscribe(t *testing.T) {
 func TestEventStreamWait(t *testing.T) {
 	var (
 		received = []bool{false, false, false, false, false, false, false, true, false}
-		want     = []time.Duration{1, 2, 4, 8, 16, 30, 30, 1, 2}
+		s        = time.Second
+		want     = []time.Duration{1 * s, 2 * s, 4 * s, 8 * s, 16 * s, 30 * s, 30 * s, 1 * s, 2 * s}
 		wait     time.Duration
 	)
 	for i := range received {
 		wait = eventStreamWait(wait, received[i])
-		if wait != want[i]*time.Second {
-			t.Fatalf("wait %d: got %v, want %v", i, wait, want[i]*time.Second)
+		if wait != want[i] {
+			t.Fatalf("wait %d: got %v, want %v", i, wait, want[i])
 		}
 	}
 }
