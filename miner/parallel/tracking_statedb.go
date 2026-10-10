@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
 
@@ -30,6 +31,15 @@ type trackingStateDB struct {
 	credited   map[common.Address]bool         // balances changed by AddBalance or SubBalance
 	observed   map[common.Address]bool         // balances read exactly
 	minBalance map[common.Address]*uint256.Int // balance required before the transaction
+
+	// The gas purchase reads the sender's balance only to check that it
+	// covers upfront, the most the transaction can cost (gas limit times fee
+	// cap, plus value and blob fees), before the EVM is prepared. Recorded as a
+	// requirement, the sender's balance stays a delta, which lets a result be
+	// rebased onto another base fee.
+	sender   common.Address
+	upfront  *uint256.Int
+	prepared bool
 }
 
 var _ vm.StateDB = (*trackingStateDB)(nil)
@@ -121,6 +131,11 @@ func (t *trackingStateDB) mayBeEmpty(addr common.Address) bool {
 }
 
 func (t *trackingStateDB) GetBalance(addr common.Address) *uint256.Int {
+	if !t.prepared && t.upfront != nil && addr == t.sender {
+		if current := t.StateDB.GetBalance(addr); !current.Lt(t.upfront) && t.require(addr, t.upfront) {
+			return current
+		}
+	}
 	t.touch(addr, exists, balance)
 	t.observed[addr] = true
 	return t.StateDB.GetBalance(addr)
@@ -136,10 +151,20 @@ func (t *trackingStateDB) canTransfer(_ vm.StateDB, addr common.Address, amount 
 		t.GetBalance(addr)
 		return false
 	}
+	if !t.require(addr, amount) {
+		t.GetBalance(addr)
+	}
+	return true
+}
+
+// require records that addr's balance, as changed by the transaction so far,
+// covers amount, as the balance it needs before the transaction. It reports
+// false if it could not, and the caller must read the balance instead.
+func (t *trackingStateDB) require(addr common.Address, amount *uint256.Int) bool {
+	current := t.StateDB.GetBalance(addr)
 	initial, err := t.reader.base(key{addr: addr, field: balance})
 	if err != nil {
-		t.GetBalance(addr)
-		return true
+		return false
 	}
 	// required = amount + initial - current, the initial balance that makes
 	// the guard pass
@@ -150,13 +175,19 @@ func (t *trackingStateDB) canTransfer(_ vm.StateDB, addr common.Address, amount 
 	}
 	need, overflow := uint256.FromBig(required)
 	if overflow {
-		t.GetBalance(addr)
-		return true
+		return false
 	}
 	if prev := t.minBalance[addr]; prev == nil || prev.Lt(need) {
 		t.minBalance[addr] = need
 	}
 	return true
+}
+
+// Prepare marks the end of the gas purchase: from here on, the sender's
+// balance is read like any other.
+func (t *trackingStateDB) Prepare(rules params.Rules, sender, coinbase common.Address, dest *common.Address, precompiles []common.Address, txAccesses types.AccessList) {
+	t.prepared = true
+	t.StateDB.Prepare(rules, sender, coinbase, dest, precompiles, txAccesses)
 }
 
 func (t *trackingStateDB) GetNonce(addr common.Address) uint64 {

@@ -147,6 +147,8 @@ func benchStats(m *Miner) map[string]any {
 		"inlined":         s.Inlined,
 		"waits":           s.Waits,
 		"seeded":          s.Seeded,
+		"preexecRebased":  s.PreexecRebased,
+		"preexecRefused":  s.PreexecRefused,
 		"prefetchNs":      s.PrefetchTime.Nanoseconds(),
 		"prefetchExecNs":  s.PrefetchExecTime.Nanoseconds(),
 		"waitedNs":        s.WaitedTime.Nanoseconds(),
@@ -180,6 +182,8 @@ var buildBenchPreexecAlone = flag.Bool("buildbench.preexecalone", false, "preexe
 var buildBenchApplyAhead = flag.Int("buildbench.applyahead", 16, "preexecl and preexecxl strategies: positions past the committer to read the apply state of in the background")
 
 var buildBenchPreexecRebase = flag.Bool("buildbench.preexecrebase", false, "preexec strategies: re-execute candidates that depend on lower ones on top of them, in block order")
+
+var buildBenchPreexecHeader = flag.String("buildbench.preexecheader", "", "preexec strategies: pre-execute with a header that differs from the build's in coinbase, time (time, prevrandao and beacon root), basefee-down or basefee-up (base and blob base fee), or all")
 
 var buildBenchPreexecMiss = flag.Float64("buildbench.preexecmiss", 0, "preexec strategies: leave this fraction of the candidates without a pre-executed result")
 

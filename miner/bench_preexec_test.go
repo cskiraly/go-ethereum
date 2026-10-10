@@ -11,9 +11,9 @@ func TestPreexecExact(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds every workload several times")
 	}
-	defer func(candidates float64, rebase bool, miss float64, par int) {
-		*buildBenchCandidates, *buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar = candidates, rebase, miss, par
-	}(*buildBenchCandidates, *buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar)
+	defer func(candidates float64, rebase bool, miss float64, par int, header string) {
+		*buildBenchCandidates, *buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar, *buildBenchPreexecHeader = candidates, rebase, miss, par, header
+	}(*buildBenchCandidates, *buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar, *buildBenchPreexecHeader)
 	*buildBenchCandidates = 0.25
 
 	variants := []struct {
@@ -22,18 +22,24 @@ func TestPreexecExact(t *testing.T) {
 		rebase   bool
 		miss     float64
 		par      int
+		header   string // -buildbench.preexecheader
 	}{
-		{"alone", "preexec-w4", false, 0, 1},
-		{"shared-reads", "preexec-w2-c", false, 0, 4},
-		{"rebase", "preexec-w8-c", true, 0, 1},
-		{"missing", "preexec-w4-c", false, 0.3, 2},
-		{"rebase-missing", "preexec-w4", true, 0.3, 1},
-		{"store-validation", "preexecv-w4-c", false, 0, 1},
-		{"apply-loads", "preexeca-w4-c", false, 0, 2},
-		{"apply-ahead", "preexecl-w4-c", false, 0, 2},
-		{"prefetch-executions", "preexecx-w4-c", false, 0, 2},
-		{"prefetch-ahead", "preexecxl-w4-c", false, 0, 2},
-		{"inline", "preexec-w4-g30000", false, 0, 1},
+		{"alone", "preexec-w4", false, 0, 1, ""},
+		{"shared-reads", "preexec-w2-c", false, 0, 4, ""},
+		{"rebase", "preexec-w8-c", true, 0, 1, ""},
+		{"missing", "preexec-w4-c", false, 0.3, 2, ""},
+		{"rebase-missing", "preexec-w4", true, 0.3, 1, ""},
+		{"store-validation", "preexecv-w4-c", false, 0, 1, ""},
+		{"apply-loads", "preexeca-w4-c", false, 0, 2, ""},
+		{"apply-ahead", "preexecl-w4-c", false, 0, 2, ""},
+		{"prefetch-executions", "preexecx-w4-c", false, 0, 2, ""},
+		{"prefetch-ahead", "preexecxl-w4-c", false, 0, 2, ""},
+		{"inline", "preexec-w4-g30000", false, 0, 1, ""},
+		{"other-coinbase", "preexecx-w4-c", false, 0, 2, "coinbase"},
+		{"other-time", "preexecx-w4-c", true, 0, 2, "time"},
+		{"lower-basefee", "preexecx-w4-c", true, 0, 2, "basefee-down"},
+		{"higher-basefee", "preexec-w4", false, 0, 1, "basefee-up"},
+		{"other-all", "preexecx-w4-c", false, 0, 2, "all"},
 	}
 	for _, w := range benchWorkloads {
 		t.Run(w.name, func(t *testing.T) {
@@ -55,7 +61,7 @@ func TestPreexecExact(t *testing.T) {
 				t.Fatalf("invalid reference block: %v", err)
 			}
 			for _, v := range variants {
-				*buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar = v.rebase, v.miss, v.par
+				*buildBenchPreexecRebase, *buildBenchPreexecMiss, *buildBenchPreexecPar, *buildBenchPreexecHeader = v.rebase, v.miss, v.par, v.header
 				env.preexecuted = nil // pre-execute again for this variant
 				m, err := env.newMiner(v.strategy)
 				if err != nil {
@@ -71,6 +77,9 @@ func TestPreexecExact(t *testing.T) {
 					}
 					if v.miss == 0 && rec.Engine["seeded"].(int) == 0 && len(reference.Transactions()) > 0 && v.strategy != "preexec-w4-g30000" {
 						t.Errorf("%s: no transaction started from a pre-executed result", v.name)
+					}
+					if rep == 0 && v.header != "" {
+						t.Logf("%s: seeded %d, rebased %d, refused %d of %d", v.name, rec.Engine["seeded"], rec.Engine["preexecRebased"], rec.Engine["preexecRefused"], len(reference.Transactions()))
 					}
 				}
 			}

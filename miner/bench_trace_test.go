@@ -42,6 +42,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/miner/parallel"
 	"github.com/holiman/uint256"
 )
@@ -460,6 +461,7 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 	if err != nil {
 		return nil, err
 	}
+	perturbHeader(header, *buildBenchPreexecHeader)
 	db := state.NewMPTDatabase(env.chain.TrieDB(), env.chain.CodeDB()).WithSnapshot(env.chain.Snapshots())
 	reader, err := db.Reader(parent.Root)
 	if err != nil {
@@ -558,6 +560,38 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 
 // predictionHeader returns the parent and the header of the block being
 // built, as far as executions depend on it.
+// perturbHeader changes header as -buildbench.preexecheader asks, as if the
+// candidates were pre-executed before the build's attributes, or its parent,
+// were known.
+func perturbHeader(header *types.Header, how string) {
+	all := how == "all"
+	if all || how == "coinbase" {
+		header.Coinbase = common.HexToAddress("0x000000000000000000000000000000000000c0de")
+	}
+	if all || how == "time" {
+		header.Time += 12
+		header.MixDigest = crypto.Keccak256Hash(header.MixDigest[:])
+		if header.ParentBeaconRoot != nil {
+			root := crypto.Keccak256Hash(header.ParentBeaconRoot[:])
+			header.ParentBeaconRoot = &root
+		}
+	}
+	if all || how == "basefee-down" || how == "basefee-up" {
+		num, den := int64(7), int64(8)
+		if how == "basefee-up" {
+			num = 9
+		}
+		header.BaseFee = new(big.Int).Div(new(big.Int).Mul(header.BaseFee, big.NewInt(num)), big.NewInt(den))
+		if header.ExcessBlobGas != nil {
+			excess := *header.ExcessBlobGas + 3_000_000
+			if how == "basefee-down" && *header.ExcessBlobGas > 3_000_000 {
+				excess = *header.ExcessBlobGas - 3_000_000
+			}
+			header.ExcessBlobGas = &excess
+		}
+	}
+}
+
 func predictionHeader(env *benchEnv) (*types.Header, *types.Header, error) {
 	params := env.params()
 	parent := env.chain.GetHeaderByHash(params.parentHash)

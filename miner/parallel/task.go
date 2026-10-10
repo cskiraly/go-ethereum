@@ -221,6 +221,14 @@ type Result struct {
 	context common.Hash
 	basis   []*Result
 	changed []key // the keys of writes that change the value, once computed
+	// env is the environment a pre-executed result ran in, headerReads the
+	// header values it read and pay its payment, so that a build with
+	// another header can check and adapt it; adjusted marks an adapted
+	// result whose sender paid a different amount.
+	env         *execEnv
+	headerReads headerReads
+	pay         *payment
+	adjusted    bool
 }
 
 // holds reports whether the balance requirements of r hold on sdb.

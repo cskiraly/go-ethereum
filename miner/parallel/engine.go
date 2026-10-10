@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math/big"
 	"slices"
 	"time"
 
@@ -79,6 +80,11 @@ type Stats struct {
 	Reexecuted   int // of those, executed by a worker before (stale or failed results)
 	Waits        int // reads that waited for a predicted writer
 	Seeded       int // tasks started from a pre-executed result
+	// PreexecRebased counts pre-executed results used with their payment
+	// recomputed for another base fee or coinbase, PreexecRefused those that
+	// read a header value or system call write the build changes.
+	PreexecRebased int
+	PreexecRefused int
 
 	ExecutionTime time.Duration // time summed over all executions
 	ValidateTime  time.Duration // time the committer spent checking reads against the block state
@@ -129,7 +135,11 @@ type Engine struct {
 	prefExec  bool
 	predict   func(common.Hash) Prediction
 	preexec   func(common.Hash) *Result
-	context   common.Hash // execution context, which pre-executed results must share
+	context   common.Hash   // execution context, which pre-executed results must share
+	seed      map[key]value // the writes of Seed
+	blobFee   *big.Int      // the blob base fee, nil before Cancun
+	adapted   map[*Result]*Result
+	seedDiffs map[*execEnv]map[key]bool
 	seeded    map[*Result]bool
 	next      int
 	dropped   map[common.Address]bool
@@ -175,7 +185,10 @@ func New(cfg Config) (*Engine, error) {
 		prefExec:  cfg.PrefetchExecutions,
 		predict:   cfg.Predict,
 		preexec:   cfg.Preexecuted,
-		context:   executionContext(cfg.Params, cfg.Root, cfg.Header, cfg.Coinbase),
+		context:   executionContext(cfg.Params, cfg.Root, cfg.Header),
+		blobFee:   blobFee(cfg.Params, cfg.Header),
+		adapted:   make(map[*Result]*Result),
+		seedDiffs: make(map[*execEnv]map[key]bool),
 		dropped:   make(map[common.Address]bool),
 	}, nil
 }
@@ -203,8 +216,9 @@ func (e *Engine) NewTask(lazy *txpool.LazyTransaction, sender common.Address, bl
 		}
 	}
 	if e.preexec != nil && e.inOrder {
-		if r := e.preexec(lazy.Hash); r != nil && r.context == e.context {
-			t.pre = r
+		if r := e.preexec(lazy.Hash); r != nil {
+			t.pre = e.adapt(r)
+			e.adapted[r] = t.pre
 		}
 	}
 	e.next++
@@ -230,6 +244,7 @@ func (e *Engine) Seed(fn func(vm.StateDB) error) error {
 	if err != nil {
 		return err
 	}
+	e.seed = writes
 	e.store.publish(-1, writes, codes)
 	e.committed.publish(-1, writes, codes)
 	return nil

@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/holiman/uint256"
 )
 
 var (
@@ -40,6 +41,10 @@ type executor struct {
 	parent    state.Reader
 	waiter    *writeWaiter     // set during a run with predictions
 	jumpDests vm.JumpDestCache // code analysis shared by the executions, as one EVM would
+
+	// env, if set, makes results record the header values they read and
+	// what they paid, so that a build with another header can use them.
+	env *execEnv
 }
 
 // run executes t on the parent state plus the versions below its position. A
@@ -87,9 +92,20 @@ func (e *executor) execute(t *Task, reader *versionedStateReader) (res *Result) 
 		return &Result{Err: err}
 	}
 	trackedStateDB := newTrackingStateDB(sdb, reader, e.coinbase)
+	signer := types.MakeSigner(e.config, e.header.Number, e.header.Time)
+	if sender, err := types.Sender(signer, tx); err == nil {
+		trackedStateDB.sender, trackedStateDB.upfront = sender, e.upfront(tx)
+	}
 	blockCtx := core.NewEVMBlockContext(e.header, e.chain, &e.coinbase)
 	blockCtx.CanTransfer = trackedStateDB.canTransfer
-	evm := vm.NewEVM(blockCtx, trackedStateDB, e.config, vm.Config{})
+	var (
+		vmConfig vm.Config
+		hdr      headerReads
+	)
+	if e.env != nil {
+		vmConfig.Tracer = hdr.hooks()
+	}
+	evm := vm.NewEVM(blockCtx, trackedStateDB, e.config, vmConfig)
 	defer evm.Release()
 	if e.jumpDests != nil {
 		evm.SetJumpDestCache(e.jumpDests)
@@ -104,7 +120,7 @@ func (e *executor) execute(t *Task, reader *versionedStateReader) (res *Result) 
 	)
 	if t.skipNonce {
 		var msg *core.Message
-		msg, err = core.TransactionToMessage(tx, types.MakeSigner(e.config, e.header.Number, e.header.Time), e.header.BaseFee)
+		msg, err = core.TransactionToMessage(tx, signer, e.header.BaseFee)
 		if err == nil {
 			msg.SkipNonceChecks = true
 			receipt, accessList, err = core.ApplyTransactionWithEVM(msg, gas, sdb, e.header.Number, e.header.Hash(), e.header.Time, tx, evm)
@@ -127,5 +143,41 @@ func (e *executor) execute(t *Task, reader *versionedStateReader) (res *Result) 
 		return &Result{Err: err}
 	}
 	res.Receipt, res.AccessList = receipt, accessList
+	if e.env != nil {
+		res.env, res.headerReads = e.env, hdr
+		res.pay = e.payment(tx, trackedStateDB.sender, receipt.GasUsed)
+	}
 	return res
+}
+
+// upfront returns the balance the gas purchase requires of tx's sender, as
+// core's buyGas computes it, or nil if it overflows.
+func (e *executor) upfront(tx *types.Transaction) *uint256.Int {
+	need, overflow := uint256.FromBig(tx.GasFeeCap())
+	if overflow {
+		return nil
+	}
+	if _, overflow = need.MulOverflow(need, uint256.NewInt(tx.Gas())); overflow {
+		return nil
+	}
+	value, overflow := uint256.FromBig(tx.Value())
+	if overflow {
+		return nil
+	}
+	if _, overflow = need.AddOverflow(need, value); overflow {
+		return nil
+	}
+	if blobGas := tx.BlobGas(); blobGas > 0 && e.config.IsCancun(e.header.Number, e.header.Time) {
+		blobCap, overflow := uint256.FromBig(tx.BlobGasFeeCap())
+		if overflow {
+			return nil
+		}
+		if _, overflow = blobCap.MulOverflow(blobCap, uint256.NewInt(blobGas)); overflow {
+			return nil
+		}
+		if _, overflow = need.AddOverflow(need, blobCap); overflow {
+			return nil
+		}
+	}
+	return need
 }

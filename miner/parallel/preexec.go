@@ -1,7 +1,6 @@
 package parallel
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"maps"
@@ -44,17 +43,18 @@ func (p *Preexecutor) Seed(fn func(vm.StateDB) error) error {
 		return err
 	}
 	p.seed, p.codes = writes, codes
+	p.exec.env.seed = writes
 	p.exec.store.publish(-1, writes, codes)
 	return nil
 }
 
 // executionContext identifies what an execution depends on besides the
-// state changes of other transactions: the parent state and the header fields
-// the EVM reads. A pre-executed result is used only in a build with the same
-// context, since validating its state reads cannot detect a different one.
-func executionContext(config *params.ChainConfig, root common.Hash, h *types.Header, coinbase common.Address) common.Hash {
+// state changes of other transactions and the header values it reads: the
+// parent state and the rules. A pre-executed result is used only in a build
+// with the same context, since validating its state reads cannot detect a
+// different one; the header values it read are checked one by one (adapt).
+func executionContext(config *params.ChainConfig, root common.Hash, h *types.Header) common.Hash {
 	var buf []byte
-	u64 := func(v uint64) { buf = binary.BigEndian.AppendUint64(buf, v) }
 	bigInt := func(v *big.Int) {
 		if v == nil {
 			buf = append(buf, 0)
@@ -64,34 +64,21 @@ func executionContext(config *params.ChainConfig, root common.Hash, h *types.Hea
 		buf = append(buf, byte(len(b)+1))
 		buf = append(buf, b...)
 	}
-	opt := func(v *uint64) {
-		if v == nil {
-			buf = append(buf, 0)
-			return
-		}
-		buf = append(buf, 1)
-		u64(*v)
-	}
 	// the rules and chain id in force, as opcodes like CHAINID see them
 	rules := config.Rules(h.Number, h.Difficulty == nil || h.Difficulty.Sign() == 0, h.Time)
 	buf = fmt.Appendf(buf, "%+v", rules)
 	bigInt(config.ChainID)
-	if h.ExcessBlobGas != nil {
-		// BLOBBASEFEE also depends on the fork's blob schedule
-		bigInt(eip4844.CalcBlobFee(config, h))
-	}
 	buf = append(buf, root[:]...)
 	buf = append(buf, h.ParentHash[:]...)
-	buf = append(buf, coinbase[:]...)
-	buf = append(buf, h.MixDigest[:]...)
-	bigInt(h.Number)
-	bigInt(h.Difficulty)
-	bigInt(h.BaseFee)
-	u64(h.Time)
-	u64(h.GasLimit)
-	opt(h.ExcessBlobGas)
-	opt(h.SlotNumber)
 	return crypto.Keccak256Hash(buf)
+}
+
+// blobFee returns the blob base fee of blocks with header h, nil before Cancun.
+func blobFee(config *params.ChainConfig, h *types.Header) *big.Int {
+	if h.ExcessBlobGas == nil {
+		return nil
+	}
+	return eip4844.CalcBlobFee(config, h)
 }
 
 // NewPreexecutor returns a Preexecutor for blocks with the given header on the
@@ -103,7 +90,7 @@ func NewPreexecutor(chain core.ChainContext, config *params.ChainConfig, db stat
 			return nil, err
 		}
 	}
-	return &Preexecutor{context: executionContext(config, root, header, header.Coinbase), exec: &executor{
+	return &Preexecutor{context: executionContext(config, root, header), exec: &executor{
 		chain:     chain,
 		config:    config,
 		db:        db,
@@ -113,6 +100,7 @@ func NewPreexecutor(chain core.ChainContext, config *params.ChainConfig, db stat
 		store:     newStore(),
 		parent:    reader,
 		jumpDests: core.NewJumpDestCache(),
+		env:       &execEnv{header: types.CopyHeader(header), coinbase: header.Coinbase, blobFee: blobFee(config, header)},
 	}}, nil
 }
 
