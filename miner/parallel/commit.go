@@ -57,6 +57,10 @@ type committer struct {
 	storeVal  bool   // see Config.StoreValidation
 	shared    *SharedReader
 	applyLoad int // see Config.ApplyLoads; needs shared
+	ahead     int // see Config.ApplyAhead; needs shared
+	aheadNext int // index of the next task readAhead considers
+	aheadSem  chan struct{}
+	quit      chan struct{} // closed when the run ends
 }
 
 // run commits every task once its result has arrived and reports whether the
@@ -122,7 +126,8 @@ func (c *committer) run(ctx context.Context, tasks []*Task) (bool, error) {
 // result is validated and applied.
 func (c *committer) runInOrder(ctx context.Context, tasks []*Task) (bool, error) {
 	finished := make(map[*Task]bool, len(tasks))
-	for _, t := range tasks {
+	for i, t := range tasks {
+		c.readAhead(tasks, i)
 		if c.dropped[t.Sender] {
 			c.drop(t)
 			continue
@@ -263,13 +268,20 @@ func (c *committer) storeStale(t *Task, r *Result) (key, bool) {
 }
 
 // loadApply reads the parent state that applying r loads, concurrently, so
-// that Apply finds it cached instead of reading it key by key: the accounts r
-// writes or changes the balance of, and the slots it writes. Keys a lower
-// position wrote are on the block state already, and are skipped.
+// that Apply finds it cached instead of reading it key by key.
 func (c *committer) loadApply(t *Task, r *Result) {
 	if c.shared == nil {
 		return
 	}
+	if accounts, slots := c.applyKeys(t, r); len(accounts)+len(slots) > 1 {
+		c.shared.Load(accounts, slots, c.applyLoad)
+	}
+}
+
+// applyKeys returns what applying r loads from the parent state: the accounts
+// r writes or changes the balance of, and the slots it writes. Keys a lower
+// position wrote are on the block state already, and are left out.
+func (c *committer) applyKeys(t *Task, r *Result) ([]common.Address, []slotKey) {
 	var (
 		accounts []common.Address
 		slots    []slotKey
@@ -297,8 +309,40 @@ func (c *committer) loadApply(t *Task, r *Result) {
 	for addr := range r.deltas {
 		account(addr)
 	}
-	if len(accounts)+len(slots) > 1 {
-		c.shared.Load(accounts, slots, c.applyLoad)
+	return accounts, slots
+}
+
+// readAhead starts reading, in the background, what applying the results of
+// the tasks up to c.ahead positions past tasks[i] loads, each task once. A
+// task without a result yet is passed over. The reads stop when c.quit closes.
+func (c *committer) readAhead(tasks []*Task, i int) {
+	if c.shared == nil || c.ahead == 0 {
+		return
+	}
+	for ; c.aheadNext < min(len(tasks), i+1+c.ahead); c.aheadNext++ {
+		if c.aheadNext <= i {
+			continue
+		}
+		t := tasks[c.aheadNext]
+		t.mu.Lock()
+		r := t.result
+		t.mu.Unlock()
+		if r == nil || r.Err != nil {
+			continue
+		}
+		accounts, slots := c.applyKeys(t, r)
+		if len(accounts)+len(slots) == 0 {
+			continue
+		}
+		go func() {
+			select {
+			case c.aheadSem <- struct{}{}:
+			case <-c.quit:
+				return
+			}
+			defer func() { <-c.aheadSem }()
+			c.shared.Load(accounts, slots, c.applyLoad)
+		}()
 	}
 }
 

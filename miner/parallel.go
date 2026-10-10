@@ -113,6 +113,7 @@ func (miner *Miner) commitTransactionsParallel(ctx context.Context, env *environ
 
 		StoreValidation: miner.config.ParallelStoreValidation,
 		ApplyLoads:      miner.config.ParallelApplyLoads,
+		ApplyAhead:      miner.config.ParallelApplyAhead,
 		Reader:          parallelReader(env),
 	})
 	if err != nil {

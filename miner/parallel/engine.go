@@ -45,6 +45,10 @@ type Config struct {
 	// applying a validated result loads before applying it, with up to this
 	// many concurrent reads. Zero leaves the reads to Apply, one at a time.
 	ApplyLoads int
+	// ApplyAhead, with ApplyLoads, also reads in the background what applying
+	// the results of the next ApplyAhead positions loads, while the committer
+	// applies the current one.
+	ApplyAhead int
 	// Predict, if set, returns the expected state access of a transaction.
 	// An execution reading a key waits for the lower positions predicted to
 	// write it, instead of reading a value they are about to replace; for a
@@ -114,6 +118,7 @@ type Engine struct {
 	storeVal  bool
 	inlineGas uint64
 	applyLoad int
+	ahead     int
 	predict   func(common.Hash) Prediction
 	preexec   func(common.Hash) *Result
 	context   common.Hash // execution context, which pre-executed results must share
@@ -158,6 +163,7 @@ func New(cfg Config) (*Engine, error) {
 		storeVal:  cfg.StoreValidation,
 		inlineGas: cfg.InlineGas,
 		applyLoad: cfg.ApplyLoads,
+		ahead:     cfg.ApplyAhead,
 		predict:   cfg.Predict,
 		preexec:   cfg.Preexecuted,
 		context:   executionContext(cfg.Params, cfg.Root, cfg.Header, cfg.Coinbase),
@@ -305,6 +311,10 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 	}
 	if shared, ok := e.exec.parent.(*SharedReader); ok && e.applyLoad > 0 {
 		c.shared, c.applyLoad = shared, e.applyLoad
+		if e.ahead > 0 {
+			c.ahead, c.aheadSem, c.quit = e.ahead, make(chan struct{}, 2), make(chan struct{})
+			defer close(c.quit)
+		}
 	}
 	if e.inOrder {
 		return c.runInOrder(ctx, tasks)

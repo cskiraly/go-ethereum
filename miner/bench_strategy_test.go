@@ -69,16 +69,20 @@ func applyBenchStrategy(name string, cfg *Config) error {
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
-	case "inorderv", "predictv", "preexecv", "preexeca":
+	case "inorderv", "predictv", "preexecv", "preexeca", "preexecl":
 		// as below, validating results against the version store;
-		// preexeca: also reading what applying a result loads concurrently
+		// preexeca: also reading what applying a result loads concurrently;
+		// preexecl: and reading ahead for the next -buildbench.applyahead
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
 		cfg.ParallelInOrder = true
 		cfg.ParallelStoreValidation = true
-		if kind == "preexeca" {
+		if kind == "preexeca" || kind == "preexecl" {
 			cfg.ParallelApplyLoads = workers
+		}
+		if kind == "preexecl" {
+			cfg.ParallelApplyAhead = *buildBenchApplyAhead
 		}
 	case "inorder", "predict", "preexec", "preexecp":
 		// predict: in order, with the writes of every candidate predicted by
@@ -168,6 +172,8 @@ func benchProcessBlock(chain *core.BlockChain, parent *types.Header, block *type
 var buildBenchPreexecPar = flag.Int("buildbench.preexecpar", 1, "preexec strategies: goroutines pre-executing the candidates")
 
 var buildBenchPreexecAlone = flag.Bool("buildbench.preexecalone", false, "preexec strategies: execute every candidate on the parent state alone, not on top of the earlier ones of its sender")
+
+var buildBenchApplyAhead = flag.Int("buildbench.applyahead", 16, "preexecl strategies: positions past the committer to read the apply state of in the background")
 
 var buildBenchPreexecRebase = flag.Bool("buildbench.preexecrebase", false, "preexec strategies: re-execute candidates that depend on lower ones on top of them, in block order")
 
