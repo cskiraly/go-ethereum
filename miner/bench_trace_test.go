@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -77,6 +78,26 @@ type traceTx struct {
 	// Predicted are the keys the transaction writes when executed alone on the
 	// parent state, as a builder could pre-execute it from the mempool.
 	Predicted []string `json:"pw"`
+
+	// HeaderReads are the block environment opcodes the transaction executed
+	// in the same pass, as their values are not state reads.
+	HeaderReads []string `json:"hr,omitempty"`
+}
+
+// headerOps are the opcodes that read the block environment or the gas price.
+var headerOps = map[vm.OpCode]bool{
+	vm.TIMESTAMP: true, vm.NUMBER: true, vm.COINBASE: true, vm.PREVRANDAO: true,
+	vm.GASLIMIT: true, vm.BASEFEE: true, vm.BLOBBASEFEE: true, vm.BLOCKHASH: true,
+	vm.GASPRICE: true,
+}
+
+// headerReader returns tracing hooks recording the headerOps executed into *ops.
+func headerReader(ops *[]string) *tracing.Hooks {
+	return &tracing.Hooks{OnOpcode: func(_ uint64, op byte, _, _ uint64, _ tracing.OpContext, _ []byte, _ int, _ error) {
+		if o := vm.OpCode(op); headerOps[o] && !slices.Contains(*ops, o.String()) {
+			*ops = append(*ops, o.String())
+		}
+	}}
 }
 
 type traceBlock struct {
@@ -385,7 +406,7 @@ func predictWrites(env *benchEnv, block *types.Block, parent *types.Header, trac
 		rec := &accessRecorder{StateDB: statedb, coinbase: header.Coinbase}
 		blockCtx := core.NewEVMBlockContext(header, env.chain, nil)
 		blockCtx.CanTransfer = rec.canTransfer
-		evm := vm.NewEVM(blockCtx, rec, config, vm.Config{})
+		evm := vm.NewEVM(blockCtx, rec, config, vm.Config{Tracer: headerReader(&trace.Txs[i].HeaderReads)})
 		msg, err := core.TransactionToMessage(tx, signer, header.BaseFee)
 		if err != nil {
 			return err
