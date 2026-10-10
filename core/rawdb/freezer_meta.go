@@ -30,6 +30,12 @@ const (
 	freezerTableV1 = 1              // Initial version of metadata struct
 	freezerTableV2 = 2              // Add field: 'flushOffset'
 	freezerVersion = freezerTableV2 // The current used version
+
+	// freezerMetaSize is the size the metadata is written at, padded with zeros,
+	// which decoding ignores; the encoding takes at most 20 bytes. A rewrite then
+	// never changes the file's length: if a rewrite grew it, a crash could keep
+	// the new content at the old length, cut short, which doesn't decode.
+	freezerMetaSize = 32
 )
 
 // freezerTableMeta is a collection of additional properties that describe the
@@ -37,8 +43,10 @@ const (
 // them to be automatically corrected after an error occurs without significantly
 // impacting overall correctness.
 type freezerTableMeta struct {
-	file    *os.File // file handler of metadata
-	version uint16   // version descriptor of the freezer table
+	file     *os.File // file handler of metadata
+	size     int64    // file size when loaded, 0 for a new file
+	prepared bool     // whether the file is ready for rewrites (see write)
+	version  uint16   // version descriptor of the freezer table
 
 	// virtualTail represents the number of items marked as deleted. It is
 	// calculated as the sum of items removed from the table and the items
@@ -143,9 +151,11 @@ func newMetadata(file *os.File) (*freezerTableMeta, error) {
 		return m, nil
 	}
 	if m := decodeV2(file); m != nil {
+		m.size = stat.Size()
 		return m, nil
 	}
 	if m := decodeV1(file); m != nil {
+		m.size = stat.Size()
 		return m, nil // legacy metadata
 	}
 	return nil, errors.New("failed to decode metadata")
@@ -175,11 +185,30 @@ func (m *freezerTableMeta) write(sync bool) error {
 	o.Tail = m.virtualTail
 	o.Offset = uint64(m.flushOffset)
 
-	_, err := m.file.Seek(0, io.SeekStart)
+	enc, err := rlp.EncodeToBytes(&o)
 	if err != nil {
 		return err
 	}
-	if err := rlp.Encode(m.file, &o); err != nil {
+	// Before the first rewrite of a loaded file, make its fixed size durable,
+	// so that the writes don't change the length on disk: a file an earlier
+	// version wrote is shorter, and is extended with zeros after its content
+	// first. The sync is needed at that size too, as an extension by a process
+	// killed before its sync may not be on disk. (Here rather than at open:
+	// read-only opens don't write.)
+	if !m.prepared && m.size > 0 {
+		if m.size < freezerMetaSize {
+			if _, err := m.file.WriteAt(make([]byte, freezerMetaSize-m.size), m.size); err != nil {
+				return err
+			}
+		}
+		if err := m.file.Sync(); err != nil {
+			return err
+		}
+	}
+	m.prepared = true
+	buf := make([]byte, freezerMetaSize)
+	copy(buf, enc)
+	if _, err := m.file.WriteAt(buf, 0); err != nil {
 		return err
 	}
 	if !sync {
