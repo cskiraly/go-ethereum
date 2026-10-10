@@ -69,18 +69,20 @@ func applyBenchStrategy(name string, cfg *Config) error {
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
-	case "inorderv", "predictv", "preexecv", "preexeca", "preexecl":
+	case "inorderv", "predictv", "preexecv", "preexeca", "preexecl", "preexecx":
 		// as below, validating results against the version store;
 		// preexeca: also reading what applying a result loads concurrently;
-		// preexecl: and reading ahead for the next -buildbench.applyahead
+		// preexecl: and reading ahead for the next -buildbench.applyahead;
+		// preexecx: preexeca, prefetching what non-seeded tasks read
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
 		cfg.ParallelInOrder = true
 		cfg.ParallelStoreValidation = true
-		if kind == "preexeca" || kind == "preexecl" {
+		if kind == "preexeca" || kind == "preexecl" || kind == "preexecx" {
 			cfg.ParallelApplyLoads = workers
 		}
+		cfg.ParallelPrefetchExec = kind == "preexecx"
 		if kind == "preexecl" {
 			cfg.ParallelApplyAhead = *buildBenchApplyAhead
 		}
@@ -145,6 +147,7 @@ func benchStats(m *Miner) map[string]any {
 		"waits":           s.Waits,
 		"seeded":          s.Seeded,
 		"prefetchNs":      s.PrefetchTime.Nanoseconds(),
+		"prefetchExecNs":  s.PrefetchExecTime.Nanoseconds(),
 		"waitedNs":        s.WaitedTime.Nanoseconds(),
 		"reexecuted":      s.Reexecuted,
 		"inlineTimeNs":    s.InlineTime.Nanoseconds(),

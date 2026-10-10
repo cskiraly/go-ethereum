@@ -49,6 +49,10 @@ type Config struct {
 	// the results of the next ApplyAhead positions loads, while the committer
 	// applies the current one.
 	ApplyAhead int
+	// PrefetchExecutions, with a SharedReader parent and Preexecuted, loads
+	// the parent state the pre-executed results of the tasks that are not
+	// seeded read, ahead of the workers that execute them.
+	PrefetchExecutions bool
 	// Predict, if set, returns the expected state access of a transaction.
 	// An execution reading a key waits for the lower positions predicted to
 	// write it, instead of reading a value they are about to replace; for a
@@ -83,7 +87,10 @@ type Stats struct {
 	InlineTime    time.Duration // time the committer spent executing transactions itself
 	WaitedTime    time.Duration // time executions spent waiting for predicted writers
 	PrefetchTime  time.Duration // time summed over the goroutines loading the state seeded results read
-	ChainWaitTime time.Duration // the part of WaitTime spent with a chained task as the lowest one left
+	// PrefetchExecTime is the time summed over the goroutines loading the state
+	// that the pre-executed results of non-seeded tasks read.
+	PrefetchExecTime time.Duration
+	ChainWaitTime    time.Duration // the part of WaitTime spent with a chained task as the lowest one left
 
 	// StaleBy counts stale results by the location of the read that failed
 	// first: "<address>" for account fields, "<address>/storage".
@@ -119,6 +126,7 @@ type Engine struct {
 	inlineGas uint64
 	applyLoad int
 	ahead     int
+	prefExec  bool
 	predict   func(common.Hash) Prediction
 	preexec   func(common.Hash) *Result
 	context   common.Hash // execution context, which pre-executed results must share
@@ -164,6 +172,7 @@ func New(cfg Config) (*Engine, error) {
 		inlineGas: cfg.InlineGas,
 		applyLoad: cfg.ApplyLoads,
 		ahead:     cfg.ApplyAhead,
+		prefExec:  cfg.PrefetchExecutions,
 		predict:   cfg.Predict,
 		preexec:   cfg.Preexecuted,
 		context:   executionContext(cfg.Params, cfg.Root, cfg.Header, cfg.Coinbase),
@@ -285,6 +294,10 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 	sched.start(tasks, seeds)
 	if shared, ok := e.exec.parent.(*SharedReader); ok && len(seeds) > 0 {
 		stop := prefetchSeeds(tasks, seeds, shared, max(1, e.workers/2), e.storeVal, &e.stats)
+		defer stop()
+	}
+	if shared, ok := e.exec.parent.(*SharedReader); ok && e.prefExec && seeds != nil {
+		stop := prefetchExecutions(tasks, seeds, shared, e.workers, &e.stats)
 		defer stop()
 	}
 	defer func() {

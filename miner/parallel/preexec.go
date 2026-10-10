@@ -485,3 +485,69 @@ func (r *Result) unversionedReads() map[key]value {
 	}
 	return reads
 }
+
+// prefetchExecutions loads, for the tasks that execute in the build although
+// pre-executed (results not seeded: a lower task is expected to change what
+// they read, or they ran ahead of their nonce), the parent state their
+// pre-executed results read, contract code included. A worker reads one key
+// after another; here each task's keys are read concurrently, up to n at a
+// time, two tasks at a time in position order, so that the worker finds them
+// cached or joins the reads. The returned function stops it and waits.
+func prefetchExecutions(tasks []*Task, seeds map[*Task]*Result, shared *SharedReader, n int, stats *Stats) func() {
+	var order []*Result
+	for _, t := range tasks {
+		if r := t.pre; r != nil && r.Err == nil && seeds[t] == nil {
+			order = append(order, r)
+		}
+	}
+	var (
+		next atomic.Int64
+		busy atomic.Int64
+		quit = make(chan struct{})
+		wg   sync.WaitGroup
+	)
+	for range min(2, len(order)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			started := time.Now()
+			defer func() { busy.Add(int64(time.Since(started))) }()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(order) {
+					return
+				}
+				select {
+				case <-quit:
+					return
+				default:
+				}
+				var (
+					accounts []common.Address
+					slots    []slotKey
+					seen     = make(map[common.Address]bool)
+				)
+				for k, v := range order[i].reads {
+					if !seen[k.addr] {
+						seen[k.addr] = true
+						accounts = append(accounts, k.addr)
+					}
+					switch k.field {
+					case storage:
+						slots = append(slots, slotKey{k.addr, k.slot})
+					case code:
+						if h := v.hash(); h != types.EmptyCodeHash && h != (common.Hash{}) {
+							shared.Code(k.addr, h)
+						}
+					}
+				}
+				shared.Load(accounts, slots, n)
+			}
+		}()
+	}
+	return func() {
+		close(quit)
+		wg.Wait()
+		stats.PrefetchExecTime += time.Duration(busy.Load())
+	}
+}

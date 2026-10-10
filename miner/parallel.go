@@ -111,10 +111,11 @@ func (miner *Miner) commitTransactionsParallel(ctx context.Context, env *environ
 
 		Preexecuted: miner.parallelPreexecuted,
 
-		StoreValidation: miner.config.ParallelStoreValidation,
-		ApplyLoads:      miner.config.ParallelApplyLoads,
-		ApplyAhead:      miner.config.ParallelApplyAhead,
-		Reader:          parallelReader(env),
+		StoreValidation:    miner.config.ParallelStoreValidation,
+		ApplyLoads:         miner.config.ParallelApplyLoads,
+		ApplyAhead:         miner.config.ParallelApplyAhead,
+		PrefetchExecutions: miner.config.ParallelPrefetchExec,
+		Reader:             parallelReader(env),
 	})
 	if err != nil {
 		return err
