@@ -69,13 +69,17 @@ func applyBenchStrategy(name string, cfg *Config) error {
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
-	case "inorderv", "predictv", "preexecv":
-		// as below, validating results against the version store
+	case "inorderv", "predictv", "preexecv", "preexeca":
+		// as below, validating results against the version store;
+		// preexeca: also reading what applying a result loads concurrently
 		if hasGas {
 			return fmt.Errorf("invalid strategy %q", name)
 		}
 		cfg.ParallelInOrder = true
 		cfg.ParallelStoreValidation = true
+		if kind == "preexeca" {
+			cfg.ParallelApplyLoads = workers
+		}
 	case "inorder", "predict", "preexec", "preexecp":
 		// predict: in order, with the writes of every candidate predicted by
 		// executing it alone on the parent state (prepareBenchMiner).

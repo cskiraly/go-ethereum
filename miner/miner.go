@@ -58,6 +58,7 @@ type Config struct {
 	ParallelInlineGas       uint64         // With ParallelInOrder, execute txs using at most this much gas on the block state.
 	ParallelStoreValidation bool           // With ParallelInOrder, validate results against the version store (see parallel.Config).
 	ParallelSharedReads     bool           // Share the parent state reads of the parallel engine with the block state.
+	ParallelApplyLoads      int            // With ParallelSharedReads, read what applying a result loads with this many concurrent reads first (see parallel.Config).
 
 	ParallelBenchmarkMode    string // Parallel execution benchmark mode: off or alternate.
 	ParallelBenchmarkOutput  string // JSONL output file for parallel execution benchmark events.

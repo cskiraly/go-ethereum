@@ -41,6 +41,10 @@ type Config struct {
 	// the block state with tracking, so that every committed write is in the
 	// store.
 	StoreValidation bool
+	// ApplyLoads, with a SharedReader parent, reads the parent state that
+	// applying a validated result loads before applying it, with up to this
+	// many concurrent reads. Zero leaves the reads to Apply, one at a time.
+	ApplyLoads int
 	// Predict, if set, returns the expected state access of a transaction.
 	// An execution reading a key waits for the lower positions predicted to
 	// write it, instead of reading a value they are about to replace; for a
@@ -109,6 +113,7 @@ type Engine struct {
 	inOrder   bool
 	storeVal  bool
 	inlineGas uint64
+	applyLoad int
 	predict   func(common.Hash) Prediction
 	preexec   func(common.Hash) *Result
 	context   common.Hash // execution context, which pre-executed results must share
@@ -152,6 +157,7 @@ func New(cfg Config) (*Engine, error) {
 		inOrder:   cfg.InOrder,
 		storeVal:  cfg.StoreValidation,
 		inlineGas: cfg.InlineGas,
+		applyLoad: cfg.ApplyLoads,
 		predict:   cfg.Predict,
 		preexec:   cfg.Preexecuted,
 		context:   executionContext(cfg.Params, cfg.Root, cfg.Header, cfg.Coinbase),
@@ -296,6 +302,9 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 		stats:     &e.stats,
 		inlineGas: e.inlineGas,
 		storeVal:  e.storeVal,
+	}
+	if shared, ok := e.exec.parent.(*SharedReader); ok && e.applyLoad > 0 {
+		c.shared, c.applyLoad = shared, e.applyLoad
 	}
 	if e.inOrder {
 		return c.runInOrder(ctx, tasks)

@@ -55,6 +55,8 @@ type committer struct {
 	stats     *Stats
 	inlineGas uint64 // see Config.InlineGas
 	storeVal  bool   // see Config.StoreValidation
+	shared    *SharedReader
+	applyLoad int // see Config.ApplyLoads; needs shared
 }
 
 // run commits every task once its result has arrived and reports whether the
@@ -183,6 +185,7 @@ func (c *committer) runInOrder(ctx context.Context, tasks []*Task) (bool, error)
 			c.stats.ValidateTime += time.Since(started)
 			if !isStale {
 				started = time.Now()
+				c.loadApply(t, r)
 				err := c.block.Include(t, r)
 				c.stats.CommitTime += time.Since(started)
 				if err != nil {
@@ -257,6 +260,46 @@ func (c *committer) storeStale(t *Task, r *Result) (key, bool) {
 		return key{addr: addr, field: minBalance}, true
 	}
 	return key{}, false
+}
+
+// loadApply reads the parent state that applying r loads, concurrently, so
+// that Apply finds it cached instead of reading it key by key: the accounts r
+// writes or changes the balance of, and the slots it writes. Keys a lower
+// position wrote are on the block state already, and are skipped.
+func (c *committer) loadApply(t *Task, r *Result) {
+	if c.shared == nil {
+		return
+	}
+	var (
+		accounts []common.Address
+		slots    []slotKey
+		seen     = make(map[common.Address]bool)
+	)
+	lower := func(k key) bool {
+		_, _, has := c.store.read(k, t.Position)
+		return has
+	}
+	account := func(addr common.Address) {
+		if seen[addr] || addr == c.coinbase {
+			return
+		}
+		seen[addr] = true
+		if !lower(key{addr: addr, field: balance}) && !lower(key{addr: addr, field: nonce}) {
+			accounts = append(accounts, addr)
+		}
+	}
+	for k := range r.writes {
+		account(k.addr)
+		if k.field == storage && !lower(k) {
+			slots = append(slots, slotKey{k.addr, k.slot})
+		}
+	}
+	for addr := range r.deltas {
+		account(addr)
+	}
+	if len(accounts)+len(slots) > 1 {
+		c.shared.Load(accounts, slots, c.applyLoad)
+	}
 }
 
 // inlineTracked executes t on the block state with tracking, includes the
