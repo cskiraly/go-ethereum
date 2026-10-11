@@ -97,6 +97,9 @@ func (e *executor) execute(t *Task, reader *versionedStateReader) (res *Result) 
 		trackedStateDB.sender, trackedStateDB.upfront = sender, e.upfront(tx)
 	}
 	blockCtx := core.NewEVMBlockContext(e.header, e.chain, &e.coinbase)
+	if e.env != nil && e.env.parent != nil && e.env.parent.Number.Uint64()+1 < e.header.Number.Uint64() {
+		blockCtx.GetHash = e.env.aheadGetHash(e.chain)
+	}
 	blockCtx.CanTransfer = trackedStateDB.canTransfer
 	var (
 		vmConfig vm.Config

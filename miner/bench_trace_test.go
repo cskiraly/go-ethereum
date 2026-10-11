@@ -469,7 +469,7 @@ func preexecuteCandidates(env *benchEnv) (map[common.Hash]*parallel.Result, erro
 		if err != nil {
 			return nil, err
 		}
-		pre, err := parallel.NewPreexecutor(env.chain, env.chain.Config(), db, parent.Root, header, parallel.NewSharedReader(reader))
+		pre, err := parallel.NewPreexecutor(env.chain, env.chain.Config(), db, parent, header, parallel.NewSharedReader(reader))
 		if err != nil {
 			return nil, err
 		}

@@ -82,8 +82,11 @@ func blobFee(config *params.ChainConfig, h *types.Header) *big.Int {
 }
 
 // NewPreexecutor returns a Preexecutor for blocks with the given header on the
-// state root. reader, if set, reads that state instead of db.Reader(root).
-func NewPreexecutor(chain core.ChainContext, config *params.ChainConfig, db state.Database, root common.Hash, header *types.Header, reader state.Reader) (*Preexecutor, error) {
+// state of parent. The header may lie more than one block ahead of parent, for
+// a block the node will propose later. reader, if set, reads parent's state
+// instead of db.Reader(parent.Root).
+func NewPreexecutor(chain core.ChainContext, config *params.ChainConfig, db state.Database, parent, header *types.Header, reader state.Reader) (*Preexecutor, error) {
+	root := parent.Root
 	if reader == nil {
 		var err error
 		if reader, err = db.Reader(root); err != nil {
@@ -100,7 +103,7 @@ func NewPreexecutor(chain core.ChainContext, config *params.ChainConfig, db stat
 		store:     newStore(),
 		parent:    reader,
 		jumpDests: core.NewJumpDestCache(),
-		env:       &execEnv{header: types.CopyHeader(header), coinbase: header.Coinbase, blobFee: blobFee(config, header)},
+		env:       &execEnv{header: types.CopyHeader(header), parent: types.CopyHeader(parent), coinbase: header.Coinbase, blobFee: blobFee(config, header)},
 	}}, nil
 }
 

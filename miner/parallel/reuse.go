@@ -5,6 +5,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -53,9 +54,31 @@ func (h *headerReads) hooks() *tracing.Hooks {
 // coinbase, the blob base fee and the writes of the block's system calls.
 type execEnv struct {
 	header   *types.Header
+	parent   *types.Header // the state's block, possibly more than one before header
 	coinbase common.Address
 	blobFee  *big.Int // nil before Cancun
 	seed     map[key]value
+}
+
+// aheadGetHash serves BLOCKHASH for a header more than one block ahead of its
+// parent: core.GetHashFn takes a header's parent to be the block before it, so
+// it would return wrong hashes, and walk the whole chain back for the blocks in
+// between. The hashes up to the parent come from the parent's chain; those of
+// the blocks between it and the header are unknown, zero (a result that read
+// them is not used: its parent hash differs from the build's).
+func (env *execEnv) aheadGetHash(chain core.ChainContext) func(uint64) common.Hash {
+	number := env.parent.Number.Uint64()
+	upTo := core.GetHashFn(&types.Header{Number: new(big.Int).SetUint64(number + 1), ParentHash: env.parent.Hash()}, chain)
+	lower := uint64(0)
+	if h := env.header.Number.Uint64(); h > 256 {
+		lower = h - 256
+	}
+	return func(n uint64) common.Hash {
+		if n > number || n < lower {
+			return common.Hash{}
+		}
+		return upTo(n)
+	}
 }
 
 // payment is what a transaction paid for gas, and what it would pay with
