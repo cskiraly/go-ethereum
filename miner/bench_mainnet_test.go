@@ -150,6 +150,10 @@ func openBenchChain(datadir string) (*core.BlockChain, consensus.Engine, error) 
 	// shutdown. Without them the chain rewinds to the state on disk, ~128
 	// blocks back, and truncates the blocks above it.
 	cfg.TrieJournalDirectory = filepath.Join(datadir, "geth", "triedb")
+	// No trienode history, as geth: zero keeps it for the whole chain, and
+	// one started here falls behind the state once the node runs again,
+	// which then fails to open (gap between state and trienode history).
+	cfg.TrienodeHistory = -1
 	if *buildBenchCold {
 		cfg.TrieCleanLimit, cfg.SnapshotLimit = 1, 1
 	}
