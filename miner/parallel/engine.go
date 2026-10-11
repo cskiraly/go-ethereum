@@ -54,6 +54,14 @@ type Config struct {
 	// the parent state the pre-executed results of the tasks that are not
 	// seeded read, ahead of the workers that execute them.
 	PrefetchExecutions bool
+	// PrefetchWrites, with Preexecuted, schedules on the block state's trie
+	// prefetcher the trie paths that the pre-executed results of the tasks
+	// write, in position order up to the block's gas limit, when a batch
+	// starts. Hashing the state root after the build then finds them loaded:
+	// applying results schedules their paths only as they are applied, in
+	// quick succession at the end of the build, where a sequential build
+	// schedules them as it executes.
+	PrefetchWrites bool
 	// Predict, if set, returns the expected state access of a transaction.
 	// An execution reading a key waits for the lower positions predicted to
 	// write it, instead of reading a value they are about to replace; for a
@@ -96,7 +104,12 @@ type Stats struct {
 	// PrefetchExecTime is the time summed over the goroutines loading the state
 	// that the pre-executed results of non-seeded tasks read.
 	PrefetchExecTime time.Duration
-	ChainWaitTime    time.Duration // the part of WaitTime spent with a chained task as the lowest one left
+	// PrefetchedWrites counts the keys whose trie paths PrefetchWrites
+	// scheduled, and PrefetchWriteTime is the time summed over the goroutines
+	// scheduling them (loading the storage roots).
+	PrefetchedWrites  int
+	PrefetchWriteTime time.Duration
+	ChainWaitTime     time.Duration // the part of WaitTime spent with a chained task as the lowest one left
 
 	// StaleBy counts stale results by the location of the read that failed
 	// first: "<address>" for account fields, "<address>/storage".
@@ -133,6 +146,7 @@ type Engine struct {
 	applyLoad int
 	ahead     int
 	prefExec  bool
+	prefWrite bool
 	predict   func(common.Hash) Prediction
 	preexec   func(common.Hash) *Result
 	context   common.Hash   // execution context, which pre-executed results must share
@@ -183,6 +197,7 @@ func New(cfg Config) (*Engine, error) {
 		applyLoad: cfg.ApplyLoads,
 		ahead:     cfg.ApplyAhead,
 		prefExec:  cfg.PrefetchExecutions,
+		prefWrite: cfg.PrefetchWrites,
 		predict:   cfg.Predict,
 		preexec:   cfg.Preexecuted,
 		context:   executionContext(cfg.Params, cfg.Root, cfg.Header),
@@ -305,6 +320,10 @@ func (e *Engine) Run(ctx context.Context, tasks []*Task, block Block) (bool, err
 		}
 		seeds = seedable(tasks, e.exec.coinbase, e.inlineGas, e.seeded)
 		e.stats.Seeded += len(seeds)
+	}
+	if sdb := block.State(); e.prefWrite && e.preexec != nil && sdb != nil {
+		stop := prefetchWritePaths(sdb, tasks, seeds, e.exec.coinbase, e.exec.header.GasLimit, max(1, e.workers/2), &e.stats)
+		defer stop()
 	}
 	sched.start(tasks, seeds)
 	if shared, ok := e.exec.parent.(*SharedReader); ok && len(seeds) > 0 {

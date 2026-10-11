@@ -61,6 +61,7 @@ type Config struct {
 	ParallelApplyLoads      int            // With ParallelSharedReads, read what applying a result loads with this many concurrent reads first (see parallel.Config).
 	ParallelApplyAhead      int            // With ParallelApplyLoads, also read ahead for the results of this many next positions (see parallel.Config).
 	ParallelPrefetchExec    bool           // With ParallelSharedReads and pre-execution, prefetch what non-seeded transactions read (see parallel.Config).
+	ParallelPrefetchWrites  bool           // With pre-execution, schedule the trie paths pre-executed results write on the block state's prefetcher (see parallel.Config).
 
 	ParallelBenchmarkMode    string // Parallel execution benchmark mode: off or alternate.
 	ParallelBenchmarkOutput  string // JSONL output file for parallel execution benchmark events.

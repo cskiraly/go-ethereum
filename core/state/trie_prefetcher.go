@@ -18,6 +18,8 @@ package state
 
 import (
 	"errors"
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -38,12 +40,14 @@ var (
 // items and does trie-loading of them. The goal is to get as much useful content
 // into the caches as possible.
 //
-// Note, the prefetcher's API is not thread safe.
+// Note, the prefetcher's API is not thread safe, except that prefetch may be
+// called concurrently with the other methods.
 type triePrefetcher struct {
 	isUBT    bool                   // Flag whether the prefetcher is in UBT mode
 	db       Database               // Database to fetch trie nodes through
 	root     common.Hash            // Root hash of the account trie for metrics
 	fetchers map[string]*subfetcher // Subfetchers for each trie
+	lock     sync.Mutex             // Protects fetchers and the closing of term
 	term     chan struct{}          // Channel to signal interruption
 	noreads  bool                   // Whether to ignore state-read-only prefetch requests
 
@@ -96,6 +100,9 @@ func newTriePrefetcher(db Database, root common.Hash, namespace string, noreads 
 // to all of them. Depending on the async parameter, the method will either block
 // until all subfetchers spin down, or return immediately.
 func (p *triePrefetcher) terminate(async bool) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
 	// Short circuit if the fetcher is already closed
 	select {
 	case <-p.term:
@@ -114,7 +121,10 @@ func (p *triePrefetcher) report() {
 	if !metrics.Enabled() {
 		return
 	}
-	for _, fetcher := range p.fetchers {
+	p.lock.Lock()
+	fetchers := slices.Collect(maps.Values(p.fetchers))
+	p.lock.Unlock()
+	for _, fetcher := range fetchers {
 		fetcher.wait() // ensure the fetcher's idle before poking in its internals
 
 		if fetcher.root == p.root {
@@ -163,6 +173,9 @@ func (p *triePrefetcher) prefetch(owner common.Hash, root common.Hash, addr comm
 	if read && p.noreads {
 		return nil
 	}
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
 	// Ensure the subfetcher is still alive
 	select {
 	case <-p.term:
@@ -183,7 +196,9 @@ func (p *triePrefetcher) prefetch(owner common.Hash, root common.Hash, addr comm
 // returned.
 func (p *triePrefetcher) trie(owner common.Hash, root common.Hash) Trie {
 	// Bail if no trie was prefetched for this root
+	p.lock.Lock()
 	fetcher := p.fetchers[p.trieID(owner, root)]
+	p.lock.Unlock()
 	if fetcher == nil {
 		log.Error("Prefetcher missed to load trie", "owner", owner, "root", root)
 		p.deliveryMissMeter.Mark(1)
@@ -196,7 +211,10 @@ func (p *triePrefetcher) trie(owner common.Hash, root common.Hash) Trie {
 // used marks a batch of state items used to allow creating statistics as to
 // how useful or wasteful the fetcher is.
 func (p *triePrefetcher) used(owner common.Hash, root common.Hash, usedAddr []common.Address, usedSlot []common.Hash) {
-	if fetcher := p.fetchers[p.trieID(owner, root)]; fetcher != nil {
+	p.lock.Lock()
+	fetcher := p.fetchers[p.trieID(owner, root)]
+	p.lock.Unlock()
+	if fetcher != nil {
 		fetcher.wait() // ensure the fetcher's idle before poking in its internals
 
 		fetcher.usedAddr = append(fetcher.usedAddr, usedAddr...)

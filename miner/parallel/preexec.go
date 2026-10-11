@@ -542,3 +542,96 @@ func prefetchExecutions(tasks []*Task, seeds map[*Task]*Result, shared *SharedRe
 		stats.PrefetchExecTime += time.Duration(busy.Load())
 	}
 }
+
+// prefetchWritePaths schedules on the trie prefetcher of sdb, the block
+// state, the trie paths of the keys that the pre-executed results of tasks
+// write, in position order until their gas used exceeds gasLimit: seeded
+// results are applied as they are, the others predict what their executions
+// write. The account paths, which need no reads, go first in one batch; the
+// storage paths need the parent storage root of their account, which n
+// goroutines load through sdb's reader. The returned function stops them and
+// waits.
+func prefetchWritePaths(sdb *state.StateDB, tasks []*Task, seeds map[*Task]*Result, coinbase common.Address, gasLimit uint64, n int, stats *Stats) func() {
+	var (
+		accounts = []common.Address{coinbase}
+		owners   []common.Address
+		slots    = make(map[common.Address][]common.Hash)
+		seen     = map[key]bool{{addr: coinbase, field: exists}: true}
+		gas      uint64
+	)
+	add := func(k key) {
+		if k.field != storage {
+			k = key{addr: k.addr, field: exists}
+		}
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		if k.field != storage {
+			accounts = append(accounts, k.addr)
+			return
+		}
+		if slots[k.addr] == nil {
+			owners = append(owners, k.addr)
+		}
+		slots[k.addr] = append(slots[k.addr], k.slot)
+	}
+	for _, t := range tasks {
+		r := seeds[t]
+		if r == nil {
+			r = t.pre
+		}
+		if r == nil || r.Err != nil {
+			continue
+		}
+		for k := range r.writes {
+			add(k)
+		}
+		for addr := range r.deltas {
+			add(key{addr: addr, field: exists})
+		}
+		if r.Receipt != nil {
+			if gas += r.Receipt.GasUsed; gas >= gasLimit {
+				break
+			}
+		}
+	}
+	// a storage write also writes the account's storage root
+	for _, addr := range owners {
+		add(key{addr: addr, field: exists})
+	}
+	sdb.PrefetchAccountWrites(accounts)
+	stats.PrefetchedWrites += len(seen)
+
+	var (
+		next atomic.Int64
+		busy atomic.Int64
+		quit = make(chan struct{})
+		wg   sync.WaitGroup
+	)
+	for range min(n, len(owners)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			started := time.Now()
+			defer func() { busy.Add(int64(time.Since(started))) }()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(owners) {
+					return
+				}
+				select {
+				case <-quit:
+					return
+				default:
+				}
+				sdb.PrefetchStorageWrites(owners[i], slots[owners[i]])
+			}
+		}()
+	}
+	return func() {
+		close(quit)
+		wg.Wait()
+		stats.PrefetchWriteTime += time.Duration(busy.Load())
+	}
+}

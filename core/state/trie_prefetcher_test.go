@@ -104,3 +104,72 @@ func TestVerklePrefetcher(t *testing.T) {
 		t.Fatal("Two different tries are retrieved")
 	}
 }
+
+// TestPrefetchWrites schedules write paths ahead of the writes, concurrently
+// with them, and checks that the prefetcher loaded them and that the state
+// root is the one without prefetching.
+func TestPrefetchWrites(t *testing.T) {
+	db := NewDatabaseForTesting()
+	init, _ := New(types.EmptyRootHash, db)
+	var (
+		addrs []common.Address
+		slots []common.Hash
+	)
+	for i := 0; i < 64; i++ {
+		addr := testrand.Address()
+		addrs = append(addrs, addr)
+		init.SetBalance(addr, uint256.NewInt(uint64(i+1)), tracing.BalanceChangeUnspecified)
+	}
+	for i := 0; i < 32; i++ {
+		slot := testrand.Hash()
+		slots = append(slots, slot)
+		init.SetState(addrs[0], slot, testrand.Hash())
+	}
+	root, err := init.Commit(0, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(prefetch bool) (common.Hash, *triePrefetcher) {
+		s, _ := New(root, db)
+		s.StartPrefetcher("test", nil)
+		done := make(chan struct{})
+		if prefetch {
+			go func() {
+				defer close(done)
+				s.PrefetchAccountWrites(addrs)
+				s.PrefetchStorageWrites(addrs[0], slots)
+				s.PrefetchStorageWrites(addrs[1], slots) // no storage: skipped
+			}()
+		} else {
+			close(done)
+		}
+		for i, addr := range addrs {
+			s.AddBalance(addr, uint256.NewInt(1), tracing.BalanceChangeUnspecified)
+			if i < len(slots) {
+				s.SetState(addrs[0], slots[i], common.Hash{byte(i)})
+			}
+			s.Finalise(true)
+		}
+		<-done
+		p := s.prefetcher
+		return s.IntermediateRoot(true), p
+	}
+	want, _ := write(false)
+	got, p := write(true)
+	if got != want {
+		t.Fatalf("root %x, want %x", got, want)
+	}
+	acct := p.fetchers[p.trieID(common.Hash{}, root)]
+	if n := len(acct.seenWriteAddr); n != len(addrs) {
+		t.Errorf("account paths loaded: %d, want %d", n, len(addrs))
+	}
+	init2, _ := New(root, db)
+	storageRoot := init2.GetStorageRoot(addrs[0])
+	storage := p.fetchers[p.trieID(crypto.Keccak256Hash(addrs[0].Bytes()), storageRoot)]
+	if storage == nil || len(storage.seenWriteSlot) != len(slots) {
+		t.Fatalf("storage paths not loaded")
+	}
+	if len(p.fetchers) != 2 {
+		t.Errorf("%d fetchers, want 2", len(p.fetchers))
+	}
+}

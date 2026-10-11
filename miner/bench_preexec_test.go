@@ -35,6 +35,8 @@ func TestPreexecExact(t *testing.T) {
 		{"apply-ahead", "preexecl-w4-c", false, 0, 2, ""},
 		{"prefetch-executions", "preexecx-w4-c", false, 0, 2, ""},
 		{"prefetch-ahead", "preexecxl-w4-c", false, 0, 2, ""},
+		{"prefetch-writes", "preexecx-w4-c-t", false, 0, 2, ""},
+		{"prefetch-writes-unshared", "preexec-w4-t", false, 0.3, 1, ""},
 		{"inline", "preexec-w4-g30000", false, 0, 1, ""},
 		{"other-coinbase", "preexecx-w4-c", false, 0, 2, "coinbase"},
 		{"other-time", "preexecx-w4-c", true, 0, 2, "time"},
@@ -42,7 +44,7 @@ func TestPreexecExact(t *testing.T) {
 		{"higher-basefee", "preexec-w4", false, 0, 1, "basefee-up"},
 		{"other-all", "preexecx-w4-c", false, 0, 2, "all"},
 		{"carried", "preexecx-w4-c", false, 0, 2, "carry"},
-		{"carried-other-all", "preexecx-w4-c", false, 0, 2, "carry,all"},
+		{"carried-other-all", "preexecx-w4-c-t", false, 0, 2, "carry,all"},
 	}
 	for _, w := range benchWorkloads {
 		t.Run(w.name, func(t *testing.T) {
@@ -82,6 +84,9 @@ func TestPreexecExact(t *testing.T) {
 					}
 					if v.miss == 0 && rec.Engine["seeded"].(int) == 0 && len(reference.Transactions()) > 0 && v.strategy != "preexec-w4-g30000" {
 						t.Errorf("%s: no transaction started from a pre-executed result", v.name)
+					}
+					if strings.HasSuffix(v.strategy, "-t") && rec.Engine["prefetchWrites"].(int) == 0 && len(reference.Transactions()) > 0 {
+						t.Errorf("%s: no write paths prefetched", v.name)
 					}
 					if rep == 0 && v.header != "" {
 						t.Logf("%s: seeded %d, rebased %d, refused %d of %d", v.name, rec.Engine["seeded"], rec.Engine["preexecRebased"], rec.Engine["preexecRefused"], len(reference.Transactions()))

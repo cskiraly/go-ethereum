@@ -48,6 +48,12 @@ func applyBenchStrategy(name string, cfg *Config) error {
 		cfg.ParallelExecution = false
 		return nil
 	}
+	if base, ok := strings.CutSuffix(name, "-t"); ok {
+		// -t: schedule the trie paths pre-executed results write on the
+		// block state's prefetcher when a batch starts
+		cfg.ParallelPrefetchWrites = true
+		name = base
+	}
 	if base, ok := strings.CutSuffix(name, "-c"); ok {
 		// -c: share parent reads between the engine and the block state
 		cfg.ParallelSharedReads = true
@@ -151,6 +157,8 @@ func benchStats(m *Miner) map[string]any {
 		"preexecRefused":  s.PreexecRefused,
 		"prefetchNs":      s.PrefetchTime.Nanoseconds(),
 		"prefetchExecNs":  s.PrefetchExecTime.Nanoseconds(),
+		"prefetchWrites":  s.PrefetchedWrites,
+		"prefetchWriteNs": s.PrefetchWriteTime.Nanoseconds(),
 		"waitedNs":        s.WaitedTime.Nanoseconds(),
 		"reexecuted":      s.Reexecuted,
 		"inlineTimeNs":    s.InlineTime.Nanoseconds(),

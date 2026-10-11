@@ -239,6 +239,37 @@ func (s *StateDB) StopPrefetcher() {
 	}
 }
 
+// PrefetchAccountWrites schedules the account trie paths of accounts that are
+// about to be written on the running prefetcher, as Finalise does once they
+// are. Unlike the other methods, it may be called concurrently with them,
+// between StartPrefetcher and StopPrefetcher: it touches no state object.
+func (s *StateDB) PrefetchAccountWrites(addrs []common.Address) {
+	if s.prefetcher == nil || len(addrs) == 0 {
+		return
+	}
+	if err := s.prefetcher.prefetch(common.Hash{}, s.originalRoot, common.Address{}, addrs, nil, false); err != nil {
+		log.Debug("Failed to prefetch account writes", "err", err)
+	}
+}
+
+// PrefetchStorageWrites schedules the storage trie paths of slots of addr that
+// are about to be written on the running prefetcher, in the storage trie addr
+// has in the state s was opened at. It reads the account through the state
+// reader and, like PrefetchAccountWrites, may be called concurrently with the
+// other methods.
+func (s *StateDB) PrefetchStorageWrites(addr common.Address, slots []common.Hash) {
+	if s.prefetcher == nil || len(slots) == 0 {
+		return
+	}
+	acct, err := s.reader.Account(addr)
+	if err != nil || acct == nil || (acct.Root == types.EmptyRootHash && s.db.Type().Is(TypeMPT)) {
+		return
+	}
+	if err := s.prefetcher.prefetch(crypto.Keccak256Hash(addr.Bytes()), acct.Root, addr, nil, slots, false); err != nil {
+		log.Debug("Failed to prefetch storage writes", "addr", addr, "err", err)
+	}
+}
+
 // setError remembers the first non-nil error it is called with.
 func (s *StateDB) setError(err error) {
 	if s.dbErr == nil {

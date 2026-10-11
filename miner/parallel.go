@@ -115,6 +115,7 @@ func (miner *Miner) commitTransactionsParallel(ctx context.Context, env *environ
 		ApplyLoads:         miner.config.ParallelApplyLoads,
 		ApplyAhead:         miner.config.ParallelApplyAhead,
 		PrefetchExecutions: miner.config.ParallelPrefetchExec,
+		PrefetchWrites:     miner.config.ParallelPrefetchWrites,
 		Reader:             parallelReader(env),
 	})
 	if err != nil {
