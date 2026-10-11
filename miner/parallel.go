@@ -46,6 +46,12 @@ import (
 // position order, so those come last.
 const parallelPlanningGasFactor = 4
 
+// parallelLargeShare makes a candidate large when its gas limit is at least
+// this fraction of the gas left. A large candidate that fits only if the ones
+// planned before it use less than their gas limits ends the batch instead of
+// joining it (see planParallel).
+const parallelLargeShare = 8
+
 // parallelBlock presents the miners environment to the engine as a Block.
 type parallelBlock struct {
 	miner     *Miner
@@ -189,10 +195,14 @@ func (miner *Miner) commitTransactionsParallel(ctx context.Context, env *environ
 }
 
 // planParallel takes about one blocks worth of candidates off the queues in
-// price order, popping senders the engine has dropped.
+// price order, popping senders the engine has dropped and, as the sequential
+// loop does, senders whose next transaction needs more gas than the block has
+// left. Planned, those would be executed and then rejected, a batch after
+// batch while such senders remain.
 func (miner *Miner) planParallel(engine *parallel.Engine, env *environment, plainTxs, blobTxs *txorder.TransactionsByPriceAndNonce) []*parallel.Task {
 	var (
-		budget      = env.gasPool.Gas() * parallelPlanningGasFactor
+		gasLeft     = env.gasPool.Gas()
+		budget      = gasLeft * parallelPlanningGasFactor
 		blobGas     uint64
 		planned     uint64
 		plannedBlob uint64
@@ -211,9 +221,18 @@ func (miner *Miner) planParallel(engine *parallel.Engine, env *environment, plai
 		// the dropped for a sender check only gets fired if the engine has already
 		// dropped a task from that sender in a previous batch in the commit phase
 		// so we can skipthe senders transactions entirely
-		if engine.Dropped(sender) || (blob && lazy.BlobGas > blobGas-plannedBlob) {
+		if engine.Dropped(sender) || lazy.Gas > gasLeft || (blob && lazy.BlobGas > blobGas-plannedBlob) {
 			queue.Pop()
 			continue
+		}
+		// A large candidate that fits only if the ones before it use less
+		// than their gas limits waits for the next batch, which knows the gas
+		// they used. Planned, the workers would execute it, and others like it,
+		// on that chance: mainnet spam with gas limits near the cap, of which
+		// a block holds three, was executed and rejected by the dozen. Ending
+		// a batch early leaves the block as it is.
+		if len(tasks) > 0 && lazy.Gas >= gasLeft/parallelLargeShare && planned+lazy.Gas > gasLeft {
+			break
 		}
 		if blob {
 			plannedBlob += lazy.BlobGas

@@ -52,6 +52,11 @@ var (
 	// reverts: call(gas, coinbase, 1, 0, 0, 0, 0); revert(0, 0)
 	benchCoinbaseRevertContract = common.HexToAddress("0x00000000000000000000000000000000000e0000")
 	benchCoinbaseRevertCode     = common.FromHex("0x6000600060006000600141" + "5af1" + "50" + "60006000fd")
+
+	// benchBurnerContract loops until the call runs out of gas, so a call
+	// uses its whole gas limit: jumpdest; push1 0; jump
+	benchBurnerContract = common.HexToAddress("0x00000000000000000000000000000000000f0000")
+	benchBurnerCode     = common.FromHex("0x5b600056")
 )
 
 const (
@@ -60,6 +65,7 @@ const (
 	benchTokenGas   = 60_000
 	benchCounterGas = 60_000
 	benchComputeGas = 200_000
+	benchBurnerGas  = 16_000_000 // near the transaction gas cap (EIP-7825), as mainnet spam has it
 
 	// Rough gas each candidate actually uses, for sizing the candidate set.
 	benchTransferUse = params.TxGas
@@ -202,6 +208,18 @@ var benchWorkloads = []benchWorkload{
 				g.call(g.newSender(), benchComputeContract, nil, benchComputeGas)
 				gas += benchComputeUse
 			}
+		}
+	}},
+	{"burners", "transfers, and 40 senders with 8 calls each that burn a 16M gas limit, of which a block holds 3", func(g *benchGen) {
+		g.deploy(benchBurnerContract, benchBurnerCode, nil)
+		for range 40 {
+			s := g.newSender()
+			for range 8 {
+				g.call(s, benchBurnerContract, nil, benchBurnerGas)
+			}
+		}
+		for gas := uint64(0); gas < g.candidateGas; gas += benchTransferUse {
+			g.transfer(g.newSender(), g.newAccount())
 		}
 	}},
 }
