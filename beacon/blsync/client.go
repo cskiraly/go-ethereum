@@ -74,9 +74,6 @@ func NewClient(config params.ClientConfig) *Client {
 	forwardSync := sync.NewForwardUpdateSync(committeeChain)
 	beaconBlockSync := newBeaconBlockSync(headTracker, config.P2PBlocks)
 	beaconBlockSync.prefetch = beforeGloas(&config.ChainConfig)
-	if prefetch := beaconBlockSync.prefetch; prefetch != nil {
-		beaconBlockSync.payloadOfParent = func(slot uint64) bool { return !prefetch(slot) }
-	}
 	beaconBlockSync.trigger = scheduler.Trigger
 	scheduler.RegisterTarget(headTracker)
 	scheduler.RegisterTarget(committeeChain)
@@ -102,7 +99,7 @@ func (c *Client) SetEngineRPC(engine *rpc.Client) {
 func (c *Client) Start() error {
 	headCh := make(chan types.ChainHeadEvent, 16)
 	c.chainHeadSub = c.blockSync.SubscribeChainHead(headCh)
-	var fetchBlock func(types.ChainHeadEvent)
+	var fetchBlock blockFetcher
 	if c.config.P2PBlocks {
 		fetchBlock = c.blockSync.fetchBlock
 	}
